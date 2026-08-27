@@ -1,6 +1,13 @@
 # Open Notebook — Agent Rules
 
 Open Notebook is an open-source, privacy-focused alternative to Google's Notebook LM: an AI-powered research assistant with multi-provider AI support, fully self-hostable.
+<!-- AGRIBANK-OVERLAY:START -->
+## Agribank Internal Fork
+
+This repository is maintained as an internal fork of Open Notebook. Before making architectural, security, authentication, authorization, data-model, document-processing, AI-provider, or deployment changes, read `AGRIBANK.md`.
+
+Rules in `AGRIBANK.md` add internal constraints to the upstream project rules. Installed agent skills/plugins do not override repository architecture, security, testing, or data-handling requirements. Current source code and verified tests must be checked before acting on generated graphs, planning files, or persistent agent memory.
+<!-- AGRIBANK-OVERLAY:END -->
 
 This file holds the project-wide rules every coding session needs. Component rules: [open_notebook/AGENTS.md](open_notebook/AGENTS.md) (backend — also covers `api/`, `commands/`, `prompts/`) and [frontend/AGENTS.md](frontend/AGENTS.md). Knowledge lives in the docs (see [Where to look](#where-to-look)) — read it on demand instead of guessing.
 
@@ -43,3 +50,4 @@ Or all at once: `make start-all` (status: `make status`, stop: `make stop-all`).
 | Decision log (ADRs/PDRs) | [docs/7-DEVELOPMENT/decisions/](docs/7-DEVELOPMENT/decisions/) |
 | Contribution process (Discussions → Issues → PRs) | [docs/7-DEVELOPMENT/contributing.md](docs/7-DEVELOPMENT/contributing.md) |
 | User/operator docs (install, configure, troubleshoot) | [docs/](docs/index.md) |
+

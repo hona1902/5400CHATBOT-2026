@@ -151,3 +151,8 @@ docker-compose.override.yml
 # Local QA/debug artifacts
 screenshot-*.png
 history.txt
+
+# Agribank coding-agent tooling
+.graphify/
+.agribank-overlay-backup/
+
