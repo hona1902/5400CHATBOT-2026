@@ -1,0 +1,33 @@
+cd "D:\Project Web\5400CHATBOT-2026\open-notebook"
+
+# Lần đầu
+Copy-Item .env.example .env
+# chỉnh .env: SURREAL_URL=ws://127.0.0.1:8000/rpc
+# dùng 127.0.0.1 thay vì localhost để tránh timeout SurrealDB trên Windows/Docker
+
+uv --cache-dir .uv-cache sync --python "C:\Users\Acer\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+
+cd frontend
+& "C:\Program Files\nodejs\node.exe" "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js" install --cache ..\.npm-cache
+
+
+Chạy dev bằng 3 terminal:
+terminal 01:
+# Terminal 1: API (server API)
+cd "D:\Project Web\5400CHATBOT-2026\open-notebook"
+uv --cache-dir .uv-cache run --env-file .env run_api.py
+
+terminal 02: worker
+# Terminal 2: Worker
+cd "D:\Project Web\5400CHATBOT-2026\open-notebook"
+$env:PYTHONIOENCODING='utf-8'
+$env:PYTHONUTF8='1'
+uv --cache-dir .uv-cache run --env-file .env surreal-commands-worker --import-modules commands --max-tasks 5
+
+terminal 03: 
+# Terminal 3: Frontend
+cd "D:\Project Web\5400CHATBOT-2026\open-notebook\frontend"
+& "C:\Program Files\nodejs\node.exe" "C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js" run dev --cache ..\.npm-cache
+
+nếu chưa chạy docker:
+docker compose up -d surrealdb
