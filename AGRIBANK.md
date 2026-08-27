@@ -159,3 +159,13 @@ Do not:
 - treat Graphify, Claude-Mem, a planning document, or an agent summary as more authoritative than the current repository;
 - enable new external data-processing or synchronization paths for internal material without explicit approval;
 - claim compatibility, security, or completion without verification.
+
+## External Tooling Safety
+
+- Do not modify global coding-agent installations, plugin caches, MCP servers,
+  Claude Code configuration, Codex installation, or user-level tooling without
+  explicit user approval.
+- Tooling failures must first be reported with root cause and a proposed fix.
+- Repository tasks must not silently patch files outside the repository.
+- Temporary tooling workarounds must be clearly identified as temporary and
+  must not be treated as project implementation.
