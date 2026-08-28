@@ -1,10 +1,16 @@
 # GraphRAG-03 — Source Lifecycle Forensic & Architecture Design
 
-**Status:** FORENSIC + DESIGN ONLY — **NOT APPROVED, NOT IMPLEMENTED.**
-**Date:** 2026-08-28 · **Baseline:** `bc5b413` (GraphRAG-02 checkpoint) · **Branch (actual):** `feature/graphrag-lightrag`
+**Status:** Forensic APPROVED (architecture) 2026-08-28. **Slice 03-A (INDEX/REINDEX) APPROVED / COMPLETE 2026-08-28.** Slices 03-B → 03-E not started.
+**Date:** 2026-08-28 · **Baseline:** `bc5b413` (GraphRAG-02 checkpoint) · **Branch:** `feature/graphrag-lifecycle` (forensic committed `6cd8333`).
 **LightRAG pinned:** `v1.5.6` — every upstream claim below was read from source at `?ref=v1.5.6`, never guessed.
 
-> **Branch note.** The session brief names `feature/graphrag-lifecycle`. No such branch exists in this checkout; HEAD is `bc5b413` on `feature/graphrag-lightrag`, which is the stated GraphRAG-02 checkpoint. The forensic proceeded on the existing branch. Branch creation is left to the user.
+> **03-A final decisions (approved 2026-08-28).** INDEX/REINDEX is implemented per §18/§21 as approved; the recommended lifecycle architecture below is **unchanged**. Full per-decision record: [`../development/GRAPHRAG_03A_INDEXING.md`](../development/GRAPHRAG_03A_INDEXING.md). Decisions finalized in this slice, none of which alter the approved architecture:
+> - Queued command payload carries **`source_id` only**; the worker reloads the CURRENT canonical Source at execution, so stale queued `full_text` cannot be resurrected.
+> - Reindex is **delete-then-insert** guarded by a **double `confirm_current`**: pre-delete (a superseded old job neither deletes nor inserts, so it cannot erase a newer job's document) and post-delete/pre-POST (no stale text egress after delete latency).
+> - Record-id identity is preserved end-to-end via a lossless `record_id_for()` (numeric vs string-numeric ids stay distinct); `doc_id = "doc-"+md5(source_id)` computed locally.
+> - Delete-then-insert failure is **derived-index degradation, never canonical corruption**; INDEX/REINDEX remain **fail-open** at the `save_source` seam.
+> - The tombstone/DB-event migration (§17, §21 03-B) was **deliberately NOT created** in 03-A — **no migration added (count 46)**. Durable deletion stays deferred to **03-B/03-C**; reconciliation to **03-D**; rebuild to **03-E**.
+> - Two residuals are **accepted and deferred** (INDEX is rebuildable, no retention guarantee): the sub-step confirm→POST window / ack-loss, and crash-after-delete with no queue crash re-drive — both closed by durable DELETE + RECONCILE (03-B/03-D) and query-time validation (§8).
 
 > **Precedence (AGRIBANK §1).** Where this document disagrees with `GRAPHRAG_DECISION.md` (AGR-005), the decision record wins. This document is forensic input to a GraphRAG-03 decision that does not yet exist.
 
@@ -388,7 +394,7 @@ All LightRAG specifics stay behind `open_notebook/integrations/graphrag/`.
 
 Each slice independently testable, flag-off = baseline, no real data. **None to start before approval.**
 
-- **03-A — INDEX/REINDEX (fail-open):** `graphrag_index_source` command + integration `index/reindex` (delete-then-insert); enqueue seam in `save_source` with `Note.save()` contract; idempotency + canonical-existence check. Tests: enqueue on save, flag-off no-op, submit failure does not fail ingestion, idempotent re-index.
+- **03-A — INDEX/REINDEX (fail-open): ✅ IMPLEMENTED (pending sign-off).** `graphrag_index_source` command + integration `index/reindex` (delete-then-insert); enqueue seam in `save_source` with `Note.save()` contract; idempotency + canonical-existence check. Payload carries `source_id` only; worker reloads current Source. Tests: enqueue on save, flag-off no-op, submit failure does not fail ingestion, idempotent re-index, stale-text impossibility, deleted-source no-op. See [`../development/GRAPHRAG_03A_INDEXING.md`](../development/GRAPHRAG_03A_INDEXING.md).
 - **03-B — DELETE durability core:** *(migration-gated — needs blocker #2/#3)* `graphrag_deletion` tombstone table + `source_delete`-style insert event; drain command (retry/backoff, absent=success, busy=retry, flag-independent). Tests: raw-SurrealQL delete still records intent; worker-down persists; LightRAG-down retries; drain idempotent.
 - **03-C — Best-effort immediate delete:** optional synchronous call in `Source.delete()`. Tests: fast-path deletes, failure falls through to tombstone.
 - **03-D — REBUILD:** fan-out command + `POST /graphrag/rebuild` mirroring `rebuild_embeddings`. Tests: enumerate eligible, per-source idempotent, resume. Synthetic only.

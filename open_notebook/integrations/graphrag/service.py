@@ -14,11 +14,12 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
-from open_notebook.integrations.graphrag.client import GraphRAGClient
+from open_notebook.integrations.graphrag.client import GraphRAGClient, compute_doc_id
 from open_notebook.integrations.graphrag.config import GraphRAGConfig, load_config
 from open_notebook.integrations.graphrag.models import (
     _INDEXABLE_TABLES,
     ALLOWED_METADATA_FIELDS,
+    DeleteOutcome,
     GraphQueryResult,
     GraphRAGDisabledError,
     GraphRAGError,
@@ -160,6 +161,38 @@ class GraphRAGService:
             canonical_text=document["canonical_text"],
             source_id=document["source_id"],
         )
+
+    async def index_source(self, *, source_id: str, canonical_text: str) -> IndexAck:
+        """Index CURRENT canonical source content through the flag-gated path.
+
+        Distinct from index_synthetic_document (the manual PoC helper) in that
+        this is the seam the GraphRAG-03A lifecycle command calls with real
+        canonical text. It still enforces exactly the same guards: the feature
+        flag (via _require_client) and the source_id value allowlist (via
+        build_sidecar_document -> validate_source_id). The caller
+        (commands/graphrag_commands.py) is responsible for having reloaded the
+        live Source first, so the text passed here is never a stale queued copy.
+        """
+        document = build_sidecar_document(
+            source_id=source_id, canonical_text=canonical_text
+        )
+        client = self._require_client()
+        return await client.index_document(
+            canonical_text=document["canonical_text"],
+            source_id=document["source_id"],
+        )
+
+    async def delete_document_for_source(self, *, source_id: str) -> DeleteOutcome:
+        """Delete the sidecar document derived from ``source_id``.
+
+        Validates the source_id to its canonical form (never trusting the
+        caller), computes the deterministic doc_id locally, and requests
+        deletion. Used by REINDEX to remove the old document before inserting
+        the current one; the durable lifecycle delete is 03B/03C.
+        """
+        canonical = validate_source_id(source_id)
+        doc_id = compute_doc_id(canonical)
+        return await self._require_client().delete_document(doc_id)
 
     async def track_status(self, track_id: str) -> IndexStatus:
         """Poll indexing progress. Raises on failure (diagnostic call)."""

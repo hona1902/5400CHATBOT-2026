@@ -5,10 +5,19 @@
 | Phase 0 — Governance & tooling baseline | ✅ **COMPLETE** | `AGRIBANK.md`, `DECISIONS.md`, Graphify baseline |
 | GraphRAG-01 — Forensic & architecture decision | ✅ **COMPLETE** | [`../architecture/GRAPHRAG_FORENSIC.md`](../architecture/GRAPHRAG_FORENSIC.md) rev-2 · [`GRAPHRAG_DECISION.md`](GRAPHRAG_DECISION.md) (AGR-005) |
 | GraphRAG-02 — Isolated LightRAG PoC | ✅ **COMPLETE** — accepted 2026-08-27 | [`../architecture/GRAPHRAG_POC.md`](../architecture/GRAPHRAG_POC.md) |
-| GraphRAG-03 — Indexing lifecycle & durable deletion | ⬜ **NOT STARTED — NOT APPROVED** | — |
+| GraphRAG-03 — Indexing lifecycle & durable deletion | 🔨 **IN PROGRESS** — forensic approved 2026-08-28; slice 03-A **COMPLETE** | [`../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md`](../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md) · [`GRAPHRAG_03A_INDEXING.md`](GRAPHRAG_03A_INDEXING.md) |
 | GraphRAG-04 → 07 | ⬜ Not started, not approved | — |
 
-**Branch:** `feature/graphrag-lightrag` · **LightRAG pinned:** `v1.5.6`
+**Branch:** `feature/graphrag-lifecycle` (from `bc5b413`) · **LightRAG pinned:** `v1.5.6`
+
+### GraphRAG-03 slice status
+| Slice | Status |
+|---|---|
+| 03-A INDEX/REINDEX | ✅ **COMPLETE** — approved 2026-08-28 (no migration; count 46) |
+| 03-B Durable deletion state + DB event (migration) | ⬜ **NOT STARTED** — approved in principle; requires separate go-ahead |
+| 03-C Tombstone draining / retry / idempotent delete | ⬜ Not started |
+| 03-D RECONCILE | ⬜ Not started |
+| 03-E REBUILD | ⬜ Not started |
 
 > **Boundary B (sidecar → LLM/embedding provider) is NOT APPROVED for internal data.** Real internal data is **prohibited** in every phase until a separate egress decision exists. Synthetic, public, or anonymized content only.
 
@@ -78,4 +87,4 @@ Five backend tests fail independently of this work — four Windows-environment 
 
 ## Next phase
 
-**GraphRAG-03** — async indexing lifecycle (INDEX / REINDEX / DELETE / REBUILD / RECONCILE) and the durable-deletion mechanism. **Requires separate written approval. Not started.**
+**GraphRAG-03B** — durable deletion state + `source_delete`-style DB event (the tombstone migration). Approved in principle by the 03-A approval, but **not started** and **requires a separate written go-ahead** before any code or migration. 03-C (tombstone draining), 03-D (RECONCILE), and 03-E (REBUILD) follow, each gated on its own review.

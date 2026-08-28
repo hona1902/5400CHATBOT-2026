@@ -108,8 +108,20 @@ class TestImportAndStartupIndependence:
         assert response.status_code == 503
         assert "vector search is unaffected" in response.json()["detail"]
 
-    def test_removing_integration_package_leaves_one_import_site(self):
-        """§21.12 removability: only main.py and the router reference it."""
+    def test_integration_package_referrers_are_the_approved_set(self):
+        """Removability: the integration package is referenced only from an
+        explicit, approved set of call sites.
+
+        GraphRAG-02 allowed exactly one (the diagnostic router). GraphRAG-03A
+        adds the lifecycle command; the fail-open enqueue seam in
+        graphs/source.py imports only ``integrations.graphrag.config`` lazily,
+        which this same guard covers. Any referrer outside this set is a scatter
+        regression (AGR-005 §21.2) and must be justified before it lands."""
+        approved = {
+            "api/routers/graphrag.py",  # GraphRAG-02 diagnostic endpoint
+            "commands/graphrag_commands.py",  # GraphRAG-03A lifecycle command
+            "open_notebook/graphs/source.py",  # GraphRAG-03A fail-open enqueue seam
+        }
         referencing = set()
         for base in ("open_notebook", "api", "commands"):
             for path in (REPO_ROOT / base).rglob("*.py"):
@@ -118,8 +130,8 @@ class TestImportAndStartupIndependence:
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 if "integrations.graphrag" in text:
                     referencing.add(path.relative_to(REPO_ROOT).as_posix())
-        assert referencing == {"api/routers/graphrag.py"}, (
-            f"GraphRAG must stay isolated; unexpected referrers: {referencing}"
+        assert referencing == approved, (
+            f"GraphRAG referrers changed; expected {approved}, got {referencing}"
         )
 
 
@@ -155,9 +167,12 @@ class TestNoExistingPathModified:
     @pytest.mark.parametrize(
         "relative",
         [
-            "open_notebook/graphs/source.py",
+            # graphs/source.py is DELIBERATELY excluded: GraphRAG-03A adds the
+            # approved fail-open enqueue seam there. Every OTHER ingestion and
+            # retrieval path must still be free of GraphRAG references.
             "open_notebook/graphs/chat.py",
             "open_notebook/graphs/source_chat.py",
+            "open_notebook/graphs/ask.py",
             "open_notebook/domain/notebook.py",
             "commands/source_commands.py",
             "commands/embedding_commands.py",
@@ -166,11 +181,28 @@ class TestNoExistingPathModified:
         ],
     )
     def test_prohibited_files_have_no_graphrag_reference(self, relative):
-        """§21.9: no ingestion or retrieval path may reference GraphRAG."""
+        """No retrieval path, and no ingestion path OTHER than the approved
+        save_source enqueue seam, may reference GraphRAG (AGR-005 §21.9;
+        GraphRAG-03A scope keeps DELETE/reindex out of domain/commands here)."""
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert "graphrag" not in text.lower(), (
-            f"{relative} must not reference GraphRAG in GraphRAG-02"
+            f"{relative} must not reference GraphRAG"
         )
+
+    def test_source_graph_enqueue_seam_is_failopen_and_minimal(self):
+        """The one allowed ingestion reference (graphs/source.py) must be the
+        fail-open enqueue seam and nothing more: it submits by command name and
+        must NOT import LightRAG or the GraphRAG client/service (only config,
+        lazily). Property: a scatter of HTTP/client logic into the graph would
+        break failure isolation and removability."""
+        text = (REPO_ROOT / "open_notebook" / "graphs" / "source.py").read_text(
+            encoding="utf-8"
+        )
+        assert "graphrag_index_source" in text  # the seam exists
+        # No LightRAG client/service/http coupling in the graph module.
+        assert "GraphRAGClient" not in text
+        assert "GraphRAGService" not in text
+        assert "import lightrag" not in text and "from lightrag" not in text
 
     def test_no_new_migration_added(self):
         """§21.9: no DB migration in this phase."""
@@ -186,11 +218,29 @@ class TestNoExistingPathModified:
         )
         assert not any("graphrag" in name for name in migrations)
 
-    def test_no_production_index_command_registered(self):
-        """§21.9: no graphrag_index_source command may exist yet."""
+    def test_only_index_command_registered_not_later_lifecycle_verbs(self):
+        """GraphRAG-03A registers ONLY the index/reindex command. DELETE
+        (durable/tombstone), RECONCILE, and REBUILD are later slices (03B-03E)
+        and must not exist yet — their premature appearance would mean scope
+        creep past what is approved."""
+        import commands
+
+        registered = set(commands.__all__)
+        assert "graphrag_index_source_command" in registered
+        forbidden_yet = {
+            "graphrag_delete_source_command",
+            "graphrag_reconcile_command",
+            "graphrag_rebuild_command",
+        }
+        assert forbidden_yet & registered == set(), (
+            f"later GraphRAG lifecycle verbs must not be registered in 03A: "
+            f"{forbidden_yet & registered}"
+        )
+        # No command declaration for those verbs anywhere in commands/.
         for path in (REPO_ROOT / "commands").glob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
-            assert "graphrag" not in text, f"{path.name} must not register GraphRAG work"
+            for verb in ("graphrag_delete", "graphrag_reconcile", "graphrag_rebuild"):
+                assert verb not in text, f"{path.name} must not define {verb} yet"
 
     def test_existing_search_endpoint_untouched(self):
         """The production search route keeps its own contract.

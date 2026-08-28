@@ -87,6 +87,19 @@ class GraphRAGValidationError(GraphRAGError):
     """
 
 
+class GraphRAGConflictError(GraphRAGError):
+    """Sidecar rejected an insert because a document for this file_source
+    still exists (HTTP 409).
+
+    Distinct from GraphRAGRequestError (422, a permanent schema rejection):
+    a 409 during REINDEX is TRANSIENT. LightRAG deletion is asynchronous
+    (`deletion_started` != deleted), so an insert issued right after a delete
+    can still see the old document and refuse it as a filename duplicate
+    (lightrag/pipeline.py:1121-1170, verified v1.5.6). The correct response is
+    to retry, not to fail permanently - hence its own type.
+    """
+
+
 class GraphRAGConfigurationError(GraphRAGError):
     """Sidecar is reachable but we are talking to it wrongly.
 
@@ -201,8 +214,16 @@ def is_valid_record_id(value: str, *, tables: frozenset[str]) -> bool:
     return True
 
 
-def _validate_record_id(value: str, *, tables: frozenset[str]) -> str:
-    """Shared structural validation. Returns the canonical serialized form."""
+def _build_record_id(value: str, *, tables: frozenset[str]) -> RecordID:
+    """Shared structural validation. Returns the validated RecordID OBJECT.
+
+    Building the object (rather than re-parsing the canonical string) is the
+    only lossless path: ``RecordID.parse()`` double-escapes an already-escaped
+    presentation string (e.g. ``source:⟨123⟩`` -> ``source:⟨⟨123\\⟩⟩``), so any
+    downstream ``ensure_record_id(canonical_str)`` would bind the WRONG record.
+    Callers that need to query/load by this id must use this object, not
+    re-parse the string form.
+    """
     if not isinstance(value, str) or not value:
         raise _reject("value is empty or not a string")
 
@@ -218,8 +239,23 @@ def _validate_record_id(value: str, *, tables: frozenset[str]) -> str:
         raise _reject("identifier contains disallowed characters or is too long")
 
     if not was_escaped and identifier.isdigit():
-        return str(RecordID(table, int(identifier)))
-    return str(RecordID(table, identifier))
+        return RecordID(table, int(identifier))
+    return RecordID(table, identifier)
+
+
+def _validate_record_id(value: str, *, tables: frozenset[str]) -> str:
+    """Shared structural validation. Returns the canonical serialized form."""
+    return str(_build_record_id(value, tables=tables))
+
+
+def record_id_for(value: str, *, tables: frozenset[str]) -> RecordID:
+    """Public: validate ``value`` and return a losslessly-built RecordID object.
+
+    Use this instead of ``ensure_record_id(validate_source_id(x))`` — the latter
+    re-parses the canonical string and double-escapes escaped identifiers,
+    silently binding the wrong record (numeric vs string-numeric identity bug).
+    """
+    return _build_record_id(value, tables=tables)
 
 
 class QueryMode(str, Enum):
@@ -273,6 +309,38 @@ class HealthResult:
     healthy: bool
     detail: str
     version: Optional[str] = None
+
+
+class DeleteState(str, Enum):
+    """Normalized outcome of a sidecar document-delete request.
+
+    Maps LightRAG's DeleteDocByIdResponse.status
+    (lightrag/api/routers/document_routes.py:6111-6118, verified against
+    v1.5.6) onto the three outcomes a lifecycle caller can act on:
+
+    - GONE: the document is (now) absent. Covers upstream ``deletion_started``
+      (background delete scheduled) *and* ``not_found`` (already absent). Both
+      mean "there is nothing left for us to keep" from the caller's side, so
+      both are idempotent success for a delete-then-insert.
+    - BUSY: upstream refused because the pipeline is busy/scanning/enqueuing
+      (``status="busy"``). NOT success - the copy still exists; retry later.
+    - REFUSED: upstream ``not_allowed`` - a policy/state refusal that will not
+      succeed on blind retry; surfaced distinctly so callers do not treat it as
+      progress.
+    """
+
+    GONE = "gone"
+    BUSY = "busy"
+    REFUSED = "refused"
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    """Normalized result of requesting deletion of one sidecar document."""
+
+    doc_id: str
+    state: DeleteState
+    detail: str
 
 
 @dataclass(frozen=True)

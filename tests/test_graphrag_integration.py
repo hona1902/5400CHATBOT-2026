@@ -206,15 +206,29 @@ class TestFailureNormalization:
             await _client(handler).query("q")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", [400, 409, 422])
+    @pytest.mark.parametrize("status", [400, 422])
     async def test_http_4xx_caller_errors(self, status):
         """Request-level rejections. 401/403/404/405 are covered separately as
-        configuration errors - see the dedicated tests below."""
+        configuration errors - see the dedicated tests below. 409 is a distinct
+        conflict error (GraphRAG-03A reindex), tested separately."""
 
         def handler(request):
             return _json_response(status, {"detail": "nope"})
 
         with pytest.raises(GraphRAGRequestError):
+            await _client(handler).query("q")
+
+    @pytest.mark.asyncio
+    async def test_http_409_is_conflict_not_request_error(self):
+        """409 means a document for this file_source still exists. During the
+        GraphRAG-03A reindex (delete-then-insert) LightRAG deletion is async, so
+        this is TRANSIENT (retry), not a permanent request rejection."""
+        from open_notebook.integrations.graphrag.models import GraphRAGConflictError
+
+        def handler(request):
+            return _json_response(409, {"detail": "exists"})
+
+        with pytest.raises(GraphRAGConflictError):
             await _client(handler).query("q")
 
     @pytest.mark.asyncio

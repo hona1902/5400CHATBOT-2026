@@ -227,7 +227,58 @@ async def save_source(state: SourceState) -> dict:
                 f"Source {source.id} has no text content to embed, skipping vectorization"
             )
 
+    # Fire-and-forget GraphRAG (re)index of the CURRENT canonical text. This is
+    # additive and OFF by default; with OPEN_NOTEBOOK_GRAPHRAG_ENABLED unset it
+    # is a no-op and ingestion behaves byte-for-byte as before. Unlike
+    # source.vectorize() (which raises on submission failure and is awaited
+    # unguarded above), this MUST NOT raise: the source is already durably
+    # saved, so a GraphRAG queue hiccup must not fail an otherwise-successful
+    # ingestion. Same contract as Note.save() (domain/notebook.py). Only the
+    # source_id is enqueued — never full_text — so a job that runs later always
+    # reloads and indexes current state (see commands/graphrag_commands.py).
+    _maybe_enqueue_graphrag_index(source)
+
     return {"source": source}
+
+
+def _maybe_enqueue_graphrag_index(source: Source) -> None:
+    """Best-effort, flag-gated enqueue of a GraphRAG index job. Never raises.
+
+    Kept LightRAG-agnostic: it only reads the feature flag and submits a command
+    by name. All LightRAG/HTTP specifics live behind
+    open_notebook/integrations/graphrag/ and in commands/graphrag_commands.py.
+    """
+    try:
+        # Import lazily so this module has no import-time dependency on the
+        # GraphRAG integration or its config, preserving startup independence
+        # when the feature is absent/disabled (AGR-005 §21.8).
+        from open_notebook.integrations.graphrag.config import load_config
+
+        # Flag gate FIRST: with the feature off (the default) this returns before
+        # touching anything, so ingestion behaves byte-for-byte as baseline and
+        # incurs no GraphRAG side effect whatsoever.
+        if not load_config().enabled:
+            return
+
+        if not source.id or not source.full_text or not source.full_text.strip():
+            return
+
+        from surreal_commands import submit_command
+
+        command_id = submit_command(
+            "open_notebook",
+            "graphrag_index_source",
+            {"source_id": str(source.id)},
+        )
+        logger.debug(
+            f"Submitted graphrag_index_source command {command_id} for {source.id}"
+        )
+    except Exception as e:
+        # Fail open: log and move on. Canonical source + vector RAG are
+        # unaffected. Recovery is REBUILD/RECONCILE (later GraphRAG-03 slices).
+        logger.warning(
+            f"Failed to submit graphrag_index_source for {source.id}: {e}"
+        )
 
 
 def trigger_transformations(state: SourceState, config: RunnableConfig) -> List[Send]:

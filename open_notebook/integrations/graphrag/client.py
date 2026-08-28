@@ -16,6 +16,7 @@ Do NOT wire index_document() into source ingestion in this phase - it exists for
 manual/synthetic PoC calls only (AGR-005 §21.4, §21.9).
 """
 
+import hashlib
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -26,8 +27,11 @@ from open_notebook.integrations.graphrag.config import (
     GraphRAGConfig,
 )
 from open_notebook.integrations.graphrag.models import (
+    DeleteOutcome,
+    DeleteState,
     GraphQueryResult,
     GraphRAGConfigurationError,
+    GraphRAGConflictError,
     GraphRAGProtocolError,
     GraphRAGRequestError,
     GraphRAGServerError,
@@ -41,6 +45,28 @@ from open_notebook.integrations.graphrag.models import (
     is_valid_record_id,
     normalize_index_state,
 )
+
+
+def compute_doc_id(source_id: str) -> str:
+    """Compute LightRAG's document id for a canonical Open Notebook source_id.
+
+    Verified against LightRAG v1.5.6: for a document inserted with a valid
+    ``file_source`` (which Open Notebook always supplies), the id is
+    ``"doc-" + md5(canonical_file_source)`` — deterministic and independent of
+    content (lightrag/pipeline.py:936-946 → utils.compute_mdhash_id →
+    compute_args_hash, single-arg md5). ``normalize_document_file_path`` only
+    strips ``[hint]`` segments and collapses placeholder sources; a canonical
+    Open Notebook record id ("source:...") contains neither, so it is its own
+    canonical file-source form.
+
+    Computing this locally means DELETE and RECONCILE never need a list/search
+    round trip, and the id does not drift when a source's text changes — which
+    is exactly what lets an idempotent delete-then-insert target the right
+    document. The caller is responsible for passing an already-validated
+    canonical source_id (service.validate_source_id); this function does no
+    validation so it cannot mask a bad id as a plausible-looking doc id.
+    """
+    return "doc-" + hashlib.md5(source_id.encode("utf-8")).hexdigest()
 
 # Tables that may appear as retrieval PROVENANCE. Broader than the indexable set
 # (service._INDEXABLE_TABLES == {"source"}): fn::vector_search can return source,
@@ -146,6 +172,16 @@ class GraphRAGClient:
                 f"{response.status_code}): likely a version mismatch with "
                 f"{VERIFIED_LIGHTRAG_VERSION}"
             )
+        if response.status_code == 409:
+            # A document for this file_source still exists. During REINDEX this
+            # is transient: LightRAG deletion is asynchronous, so an insert
+            # issued right after a delete can still see the old document
+            # (pipeline.py:1121-1170). Typed separately from 422 so the caller
+            # retries rather than failing permanently.
+            raise GraphRAGConflictError(
+                "GraphRAG sidecar rejected the request with HTTP 409 "
+                "(document for this file_source already exists)"
+            )
         if response.status_code >= 400:
             # Genuine request-level rejection, e.g. 422 schema validation.
             # Deliberately does not echo the response body, which could contain
@@ -232,6 +268,78 @@ class GraphRAGClient:
             accepted=status in {"success", "partial_success"},
             detail=str(payload.get("message", "")) or status,
         )
+
+    async def delete_document(self, doc_id: str) -> DeleteOutcome:
+        """Request deletion of one document by its LightRAG doc_id.
+
+        Hits DELETE /documents/delete_document (verified v1.5.6). Upstream runs
+        the delete in the BACKGROUND and returns a status immediately.
+
+        The pinned v1.5.6 endpoint (DeleteDocByIdResponse.status,
+        document_routes.py:6114) exposes exactly three values:
+
+          - ``deletion_started`` -> DeleteState.GONE (scheduled; nothing left
+            for us to retain from the caller's perspective). An absent document
+            also returns this — the background delete absorbs the not-found.
+          - ``busy``             -> DeleteState.BUSY (pipeline busy; retry)
+          - ``not_allowed``      -> DeleteState.REFUSED
+
+        ``not_found`` is NOT returned by this endpoint in v1.5.6; it is a
+        DEFENSIVE/internal normalized value (it is the status of LightRAG's own
+        core ``DeletionResult``, lightrag.py:5387). We still map it to GONE so
+        that a future endpoint version or an internal caller surfacing it stays
+        idempotent — an already-absent document is success for a
+        delete-then-insert. The branch is deliberately retained even though it
+        is currently unreachable via this route.
+
+        Note the asymmetry with retention guarantees: ``deletion_started`` is an
+        acceptance, not a completion. This method is used inside REINDEX
+        (remove-old-before-insert-new); the DURABLE lifecycle delete with its
+        own retention proof is GraphRAG-03B/03C and is deliberately not built
+        here.
+
+        ``delete_file`` / ``delete_llm_cache`` are left at their upstream
+        defaults (False): Open Notebook never uploaded a file to the sidecar
+        (text-only ingestion), and cache cleanup is not required for reindex
+        correctness.
+        """
+        payload = await self._request(
+            "DELETE",
+            "/documents/delete_document",
+            json={"doc_ids": [doc_id]},
+        )
+
+        # Why `deletion_started` -> GONE is safe for the immediately-following
+        # reindex insert (verified against v1.5.6, not assumed): the delete
+        # endpoint acquires `destructive_busy` SYNCHRONOUSLY before returning
+        # `deletion_started` (document_routes.py ~6200), and the background
+        # delete holds it until its own `finally` AFTER all data removal
+        # (background_delete_documents). Meanwhile `insert_text` raises HTTP 409
+        # whenever `destructive_busy` is set. So an insert issued while the old
+        # doc is still being deleted gets 409 -> classified TRANSIENT ->
+        # retried; the insert can only SUCCEED once the delete has fully
+        # completed and released the slot. There is therefore no
+        # "insert-then-late-background-delete-erases-it" race for the same
+        # deterministic doc_id. (The remaining crash-after-delete gap is a
+        # durability concern for 03-B/03-D, not a correctness bug here.)
+        status = str(payload.get("status", "")).strip().lower()
+        if status in {"deletion_started", "not_found"}:
+            state = DeleteState.GONE
+        elif status == "busy":
+            state = DeleteState.BUSY
+        elif status == "not_allowed":
+            state = DeleteState.REFUSED
+        else:
+            # An unrecognized status is not proof of deletion. Treating it as
+            # GONE could drop a still-present copy from our bookkeeping; surface
+            # it as a protocol error so the caller retries instead.
+            raise GraphRAGProtocolError(
+                f"GraphRAG sidecar returned unexpected delete status {status!r}"
+            )
+
+        detail = str(payload.get("message", "")) or status
+        logger.debug(f"GraphRAG delete doc_id={doc_id} -> {state.value}")
+        return DeleteOutcome(doc_id=doc_id, state=state, detail=detail)
 
     async def track_status(self, track_id: str) -> IndexStatus:
         """Poll indexing progress for a track_id.
