@@ -1,0 +1,51 @@
+# LightRAG sidecar — GraphRAG-02 PoC (DEV ONLY)
+#
+# Separate from the repository's docker-compose.yml on purpose: production must
+# NOT hard-depend on LightRAG (AGR-005 §21.11). Nothing in the main compose file
+# references this one, so `docker compose up` behaves exactly as before.
+#
+# Run explicitly, alongside the main stack:
+#   docker compose -f deploy/graphrag-poc/docker-compose.graphrag.yml up -d
+#
+# SCOPE LIMITS (AGR-005 §21, §6):
+#   - SYNTHETIC / PUBLIC / ANONYMIZED data only. Boundary B (sidecar -> LLM or
+#     embedding provider) is NOT approved for real internal data.
+#   - Do not point this at production model credentials.
+#   - LightRAG is pinned: the integration was verified against v1.5.6 by reading
+#     its router source. A newer tag may change the HTTP contract.
+
+services:
+  lightrag:
+    # Pinned, not :latest — an unannounced contract change must be a deliberate
+    # upgrade, not a surprise on the next pull.
+    image: ghcr.io/hkuds/lightrag:v1.5.6
+    container_name: graphrag-lightrag-poc
+    ports:
+      # Bound to localhost only, mirroring the surrealdb service in the root
+      # compose file. Note that LightRAG ships with auth DISABLED unless
+      # LIGHTRAG_API_KEY is set — anyone who can reach this port can read every
+      # indexed document and call DELETE /documents.
+      - "127.0.0.1:9621:9621"
+    environment:
+      # Require an API key even locally, so the Open Notebook client exercises
+      # the authenticated path that a real deployment would use.
+      - LIGHTRAG_API_KEY=${GRAPHRAG_POC_API_KEY:?set GRAPHRAG_POC_API_KEY in your shell or .env}
+
+      # Provider bindings are intentionally NOT defaulted here. Supply them in a
+      # local, untracked env file only after confirming the target is approved
+      # for synthetic/public test data (Boundary B).
+      - LLM_BINDING=${GRAPHRAG_POC_LLM_BINDING:-}
+      - LLM_MODEL=${GRAPHRAG_POC_LLM_MODEL:-}
+      - LLM_BINDING_HOST=${GRAPHRAG_POC_LLM_HOST:-}
+      - LLM_BINDING_API_KEY=${GRAPHRAG_POC_LLM_API_KEY:-}
+      - EMBEDDING_BINDING=${GRAPHRAG_POC_EMBEDDING_BINDING:-}
+      - EMBEDDING_MODEL=${GRAPHRAG_POC_EMBEDDING_MODEL:-}
+      - EMBEDDING_BINDING_HOST=${GRAPHRAG_POC_EMBEDDING_HOST:-}
+      - EMBEDDING_BINDING_API_KEY=${GRAPHRAG_POC_EMBEDDING_API_KEY:-}
+    volumes:
+      # Local throwaway state. Holds a copy of whatever text is indexed, so it
+      # must never receive real internal documents. Delete the directory to
+      # reset the PoC — the store is fully derived data (AGR-005 §4).
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./data/inputs:/app/data/inputs
+    restart: unless-stopped

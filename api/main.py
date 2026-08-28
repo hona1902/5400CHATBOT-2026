@@ -31,6 +31,7 @@ from api.routers import (
     embedding,
     embedding_rebuild,
     episode_profiles,
+    graphrag,
     insights,
     languages,
     models,
@@ -404,6 +405,10 @@ app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(providers.router, prefix="/api", tags=["providers"])
 app.include_router(capabilities.router, prefix="/api", tags=["capabilities"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
+# Experimental GraphRAG diagnostic endpoints (AGR-005 §21.6). Disabled by
+# default via OPEN_NOTEBOOK_GRAPHRAG_ENABLED; registered unconditionally so the
+# health endpoint can report "disabled" rather than 404. Not a production path.
+app.include_router(graphrag.router, prefix="/api", tags=["graphrag-experimental"])
 
 
 @app.get("/")

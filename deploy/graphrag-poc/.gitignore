@@ -1,0 +1,4 @@
+# Local PoC sidecar state. Contains copies of indexed document text and must
+# never be committed (AGR-005 §21.11).
+data/
+.env

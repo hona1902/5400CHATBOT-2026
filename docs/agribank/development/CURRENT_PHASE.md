@@ -1,61 +1,81 @@
-# Current Phase — Phase 0: Governance and Tooling Baseline
+# Current Phase — GraphRAG programme status
 
-## Objective
+| Phase | Status | Deliverable |
+|---|---|---|
+| Phase 0 — Governance & tooling baseline | ✅ **COMPLETE** | `AGRIBANK.md`, `DECISIONS.md`, Graphify baseline |
+| GraphRAG-01 — Forensic & architecture decision | ✅ **COMPLETE** | [`../architecture/GRAPHRAG_FORENSIC.md`](../architecture/GRAPHRAG_FORENSIC.md) rev-2 · [`GRAPHRAG_DECISION.md`](GRAPHRAG_DECISION.md) (AGR-005) |
+| GraphRAG-02 — Isolated LightRAG PoC | ✅ **COMPLETE** — accepted 2026-08-27 | [`../architecture/GRAPHRAG_POC.md`](../architecture/GRAPHRAG_POC.md) |
+| GraphRAG-03 — Indexing lifecycle & durable deletion | ⬜ **NOT STARTED — NOT APPROVED** | — |
+| GraphRAG-04 → 07 | ⬜ Not started, not approved | — |
 
-Create a safe, repeatable coding-agent workflow before major internal fork changes begin.
+**Branch:** `feature/graphrag-lightrag` · **LightRAG pinned:** `v1.5.6`
 
-## In scope
+> **Boundary B (sidecar → LLM/embedding provider) is NOT APPROVED for internal data.** Real internal data is **prohibited** in every phase until a separate egress decision exists. Synthetic, public, or anonymized content only.
 
-- [ ] Add internal fork rules without rewriting upstream documentation.
-- [ ] Keep root `CLAUDE.md` importing root `AGENTS.md` and the internal overlay.
-- [ ] Add nested `CLAUDE.md` loaders for backend and frontend rules.
-- [ ] Add `.graphify/` to `.gitignore`.
-- [ ] Install Graphify and build a local AST code graph.
-- [ ] Decide how the Graphify graph will be refreshed during development.
-- [ ] Install/review Claude-Mem only after confirming its local storage and cloud-sync policy for this development environment.
-- [ ] Capture backend test/lint/typecheck baseline.
-- [ ] Capture frontend lint/test/build baseline.
-- [ ] Confirm `origin` and `upstream` remotes.
+---
 
-## Out of scope
+## GraphRAG-02 — completed scope
 
-- Authentication redesign.
-- RBAC implementation.
-- Production deployment changes.
-- Internal document ingestion changes.
-- UI redesign.
-- Database schema changes unrelated to tooling governance.
+An isolated, flag-gated LightRAG integration boundary with experimental diagnostic endpoints. Default **OFF**; not wired into source ingestion, Ask, or Chat.
 
-## Acceptance criteria
+Delivered: `open_notebook/integrations/graphrag/` (config · models · client · service) · `api/routers/graphrag.py` (+2 lines in `api/main.py`) · three test modules · dev-only sidecar compose profile · frozen contract documentation.
 
-- Repository rules are present and load correctly in Claude Code.
-- Existing upstream rules remain intact.
-- Graphify generated artifacts are not accidentally committed.
-- Persistent memory policy explicitly forbids storing real production/customer data and unapproved cloud sync.
-- Baseline backend/frontend verification results are recorded.
-- No product behavior is changed by this phase.
+### Acceptance criteria (§21.12) — all met
 
-## Verification record
+- [x] LightRAG boundary fully isolated; never imported or vendored
+- [x] Flag defaults OFF; baseline unchanged when off
+- [x] Open Notebook boots and operates without LightRAG present
+- [x] Synthetic document indexable via the PoC path
+- [x] Experimental graph query works
+- [x] Failures normalized; no `httpx` exception escapes
+- [x] Metadata allowlist verified at field **and value** level
+- [x] No real internal data used
+- [x] No existing RAG path modified
+- [x] No source ingestion path modified
+- [x] No DB migration (count unchanged at 46)
+- [x] Tests pass
+- [x] Karpathy diff clean (2 passes, 5 findings resolved)
+- [x] Codex review: no unresolved HIGH (2 passes, 4 findings resolved)
+- [x] User sign-off — 2026-08-27
 
-Fill this after running the baseline:
+### Verification record
 
 ```text
-Date:
-Commit:
-Python:
-Node:
-Claude Code:
-Graphify:
-Claude-Mem:
+Date:    2026-08-27
+Branch:  feature/graphrag-lightrag
+LightRAG pinned: v1.5.6 (contract read from router source, not docs)
 
-Backend pytest:
-Backend ruff:
-Backend mypy:
-Frontend lint:
-Frontend tests:
-Frontend build:
+GraphRAG tests:  189 passed
+Backend pytest:  839 passed, 5 failed
+                 (all 5 proven pre-existing: stashing every GraphRAG file
+                  reproduced them at 5 failed / 50 passed)
+Backend ruff:    All checks passed
+Backend mypy:    Success — no issues
+Frontend:        untouched (verified by test)
+Migrations:      unchanged (46 files)
+
+Karpathy diff:   clean — 5 findings across 2 passes, all resolved
+Codex review:    no unresolved HIGH — 4 findings across 2 passes, all resolved
+RecordID:        canonical round trip verified; numeric vs numeric-string
+                 identity preserved; LightRAG file_source compatibility verified
+Commit:          approved for commit; nothing committed automatically
 ```
+
+### Known baseline failures (not GraphRAG-related, not fixed here)
+
+Five backend tests fail independently of this work — four Windows-environment artifacts (symlink privilege, path separators, `file://` drive letters) and one genuine logic bug in proxy env-var case merging. Full evidence and per-test detail in [`../architecture/GRAPHRAG_POC.md`](../architecture/GRAPHRAG_POC.md) § Known Baseline Test Failures.
+
+---
+
+## Blockers for later phases
+
+| Blocker | Blocks |
+|---|---|
+| **Boundary B not approved** | Any real internal data, in every phase |
+| Deletion-durability mechanism undecided | GraphRAG-03; an outbox would need its own migration approval |
+| No synthetic evaluation corpus | GraphRAG-04 — without it, later phases optimize an unmeasured system |
+| Is notebook-scoped retrieval needed today? | Whether `RetrievalScope` ships used or reserved |
 
 ## Next phase
 
-Phase 1 — Upstream and dependency baseline, after Phase 0 acceptance criteria are met.
+**GraphRAG-03** — async indexing lifecycle (INDEX / REINDEX / DELETE / REBUILD / RECONCILE) and the durable-deletion mechanism. **Requires separate written approval. Not started.**

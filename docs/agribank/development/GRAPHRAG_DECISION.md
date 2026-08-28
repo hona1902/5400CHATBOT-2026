@@ -1,7 +1,40 @@
 # AGR-005 — GraphRAG via LightRAG Sidecar, Alongside Existing Vector RAG
 
-**Status: PROPOSED — NOT APPROVED.**
-No implementation, dependency, migration, schema, API, or frontend change may begin on the basis of this document. GraphRAG-02 starts only after explicit written approval.
+**Status: GraphRAG-02 APPROVED / COMPLETE** — approved 2026-08-27.
+**GraphRAG-03: NOT STARTED, NOT APPROVED.**
+
+This approval is **narrow**. It covers the isolated LightRAG PoC only — an integration boundary plus an experimental diagnostic endpoint, exercised with synthetic data. It is **explicitly NOT** approval for:
+
+| Not approved | Still gated by |
+|---|---|
+| Real internal data | Boundary B decision (§6) — **still pending** |
+| Production deployment | GraphRAG-07 |
+| Source ingestion integration | GraphRAG-03 |
+| Durable deletion implementation | GraphRAG-03 |
+| Database migration (incl. outbox/tombstone) | GraphRAG-03 + its own approval |
+| Hybrid retrieval / RRF / reranking | GraphRAG-05 |
+| Ask / Chat integration | GraphRAG-06 |
+| Authorization redesign | GraphRAG-07 |
+
+**Boundary B (sidecar → LLM/embedding provider) remains NOT APPROVED for real internal data.** Only synthetic data, public documents, and anonymized test fixtures are permitted — in this phase and every later one, until a separate egress decision exists. **Real internal data remains PROHIBITED.** Any requirement that would breach an approved boundary is a **stop-and-report** condition, not an implementation detail.
+
+### GraphRAG-02 completion record (verified 2026-08-27)
+
+| Fact | Result |
+|---|---|
+| GraphRAG tests | **189 passed** (`test_graphrag_integration.py`, `test_graphrag_isolation.py`, `test_graphrag_recordid.py`) |
+| Backend tests | **839 passed**, 5 failed |
+| Baseline failures | **5, proven pre-existing** — reproduced with every GraphRAG file stashed off disk (`5 failed, 50 passed`); documented in `GRAPHRAG_POC.md` § Known Baseline Test Failures |
+| Ruff | Clean — all checks passed |
+| Mypy | Clean — no issues |
+| Karpathy diff | Clean — 2 passes, 5 findings, all resolved |
+| Codex adversarial | **No unresolved HIGH** — 2 passes, 4 findings (2 HIGH, 2 MEDIUM), all resolved |
+| Canonical SurrealDB RecordID round trip | **Verified** — structural validation; escaping preserved; numeric id vs numeric-string id remain distinct through the validator *and* the outbound payload |
+| LightRAG `file_source` compatibility | **Verified** against pinned v1.5.6 — canonical forms survive `normalize_file_path` → `canonicalize_parser_hinted_basename` → `Path(x).name` unchanged; no extra transport encoding required |
+| Boundary A | Approved — synthetic/public/anonymized data only |
+| Boundary B | **NOT approved** for internal data |
+| Real internal data | **None used**; remains prohibited |
+| Commit state | Approved for commit; nothing committed automatically |
 
 | | |
 |---|---|
@@ -105,6 +138,19 @@ Permitted: `source_id`, `content` (canonical `full_text`), `content_hash`, `titl
 Open Notebook retains original URL, raw file path, asset storage details, and all credential-bearing provenance. The UI resolves these from the `source` record via `source_id`; the sidecar never needs them.
 
 Rationale: rev-1 included `asset.{url,file_path}`. Paths leak host layout and filenames; URLs can carry internal hostnames and tokens. Neither is required for citation. A `model_dump()` is how that leaked and how future fields would leak silently — hence the explicit allowlist plus `contract_version`.
+
+> **UPSTREAM CONSTRAINT (recorded 2026-08-27, GraphRAG-02 implementation).**
+> Verified by reading LightRAG v1.5.6 router source: `POST /documents/text` accepts **only** `text`, `file_source`, and `chunking`. There is **no arbitrary metadata field**.
+>
+> Therefore, of the allowlist above, only two values can physically be transmitted:
+> - `source_id` → sent as **`file_source`** (the sole join-key slot).
+> - `canonical_text` → sent as `text`.
+>
+> `title`, `content_hash`, `notebook_ids`, and `contract_version` are **not sent at all** — they remain in Open Notebook and are joined locally by `source_id`.
+>
+> This is **strictly less egress** than this section permits, so it stays inside the approved boundary; it narrows the contract rather than widening it. The allowlist is retained in code (`ALLOWED_METADATA_FIELDS`) as the governing rule for any future upstream version that *does* accept metadata.
+>
+> Consequence for query results: LightRAG returns the join key as `ReferenceItem.file_path`. For documents Open Notebook indexed, that field carries **our `source_id`, never a filesystem path**. The client maps it back at the boundary so no caller sees the misleading upstream name.
 
 ---
 
@@ -374,13 +420,91 @@ GraphRAG-02 is complete **only** when all of the following pass with recorded ev
 
 | Item | Status |
 |---|---|
-| Architecture decision (§2) | ⬜ Pending |
-| Data-egress Boundary A (§6) | ⬜ Pending |
-| Data-egress Boundary B (§6) | ⬜ Pending — **blocks real data** |
-| Metadata allowlist (§7) | ⬜ Pending |
-| Asymmetric failure policy (§9) | ⬜ Pending |
-| Fusion strategy = RRF (§11) | ⬜ Pending |
-| Phase boundaries (§16) | ⬜ Pending |
-| GraphRAG-02 acceptance criteria (§19) | ⬜ Pending |
+| Architecture decision (§2) | ✅ Approved 2026-08-27 — **PoC scope only** |
+| Data-egress Boundary A (§6) | ✅ Approved 2026-08-27 — synthetic/public/anonymized data only |
+| Data-egress Boundary B (§6) | ⬜ **NOT approved** — blocks all real internal data |
+| Metadata allowlist (§7) | ✅ Approved 2026-08-27 |
+| Asymmetric failure policy (§9) | ✅ Approved 2026-08-27 (design); implementation deferred to GraphRAG-03 |
+| Fusion strategy = RRF (§11) | ✅ Approved as direction; implementation deferred to GraphRAG-05 |
+| Phase boundaries (§16) | ✅ Approved 2026-08-27 |
+| GraphRAG-02 acceptance criteria (§19) | ✅ Approved 2026-08-27, extended by §21 |
+| **GraphRAG-02 delivery** | ✅ **COMPLETE** — accepted 2026-08-27 against §21.12 |
 
-**GraphRAG-02 does not begin until the above are approved.**
+**GraphRAG-02 is COMPLETE within §21. Phases 03-07 remain unapproved and not started.**
+
+---
+
+## 21. GraphRAG-02 approved scope (PoC)
+
+Authorized 2026-08-27. Supplements §19; where they differ, this section is narrower and wins.
+
+### 21.1 Phase goal
+
+An **isolated integration boundary** between Open Notebook and LightRAG. Open Notebook must be able to: know whether GraphRAG is enabled · check sidecar health · push a synthetic document through the service directly · run an experimental graph query · receive normalized diagnostic results · fail open when the sidecar misbehaves.
+
+**Not wired into real source ingestion.**
+
+### 21.2 Architecture boundary
+
+Preferred structure (final naming follows whatever the existing source conventions show is a better fit):
+
+```
+open_notebook/integrations/graphrag/
+    __init__.py  ·  client.py  ·  config.py  ·  models.py  ·  service.py
+```
+
+All LightRAG-specific HTTP/API behavior lives **behind** this boundary. LightRAG URL handling, response parsing, exceptions, and HTTP code must not leak into domain, the Ask graph, or generic retrieval code.
+
+### 21.3 Configuration
+
+Minimum: `OPEN_NOTEBOOK_GRAPHRAG_ENABLED` (default **false**) · `OPEN_NOTEBOOK_GRAPHRAG_BASE_URL` · `OPEN_NOTEBOOK_GRAPHRAG_TIMEOUT`. Any additional key requires a documented reason. Flag false ⇒ baseline behavior unchanged. No secrets in the repo.
+
+### 21.4 Client contract
+
+`GraphRAGClient` isolates LightRAG's HTTP contract. Capabilities: `health()`, `index_document(...)` (**manual/synthetic PoC calls only**), `query(...)`.
+
+`index_document` must **not** be wired into `Source.save()`, `save_source()`, `process_source`, `vectorize()`, or worker ingestion.
+
+Where upstream semantics differ, adapt **inside the client** rather than letting Open Notebook depend on LightRAG's schema. Normalize timeout, connection refused, HTTP error, malformed JSON, and incompatible response into typed internal integration errors matching existing conventions.
+
+### 21.5 Service contract
+
+`GraphRAGService` is the facade Open Notebook calls. It enforces the feature flag, timeout, metadata allowlist, contract version, and call-site-appropriate fail-open semantics.
+
+**No `model_dump()` of a `Source` into the sidecar payload.** Allowlist: `source_id`, `title`, `content_hash`, `notebook_ids` (only when the caller supplies them), `canonical_text`, `contract_version`. Never: `asset.file_path`, raw filesystem paths, `asset.url`, original/signed URLs, API keys, tokens, credentials, arbitrary model metadata. A genuine upstream requirement for another field must be documented before being added.
+
+### 21.6 Experimental API
+
+An experimental diagnostic endpoint (e.g. `/api/search/graph`; final name follows existing API conventions). It must not replace the existing search endpoint, and must not change `vector_search()`, Ask, or Chat. Not used by any production frontend path.
+
+Its response may be **graph-native**, but must make explicit that it is **not** the Open Notebook citation contract. Synthetic LightRAG entity IDs must never be presented as Open Notebook citation IDs.
+
+### 21.7 Retrieval scope
+
+Do not redesign existing global search semantics. If the endpoint exposes scope, **global must be represented explicitly** — never inferred from a missing value. `RetrievalScope` may be implemented only if genuinely needed by this integration contract; otherwise document the interface and defer (no overengineering).
+
+### 21.8 Failure isolation — must be demonstrated
+
+Flag false ⇒ baseline · sidecar absent ⇒ startup succeeds · connection refused ⇒ controlled error, no crash · timeout ⇒ controlled result/error · malformed response ⇒ controlled integration error · LightRAG removed ⇒ vector RAG works. **No import-time dependency** may prevent startup when LightRAG is absent.
+
+### 21.9 Prohibited in GraphRAG-02
+
+No changes to `Source.save()`, `save_source()`, `process_source`, `Source.vectorize()`, `vector_search()`, `text_search()`, the Ask graph, or the Chat graph. No production `graphrag_index_source` command, outbox, tombstone table, or DB migration. No durable deletion, production reindex lifecycle, reconciliation job, `HybridRetriever`, production RRF, or production reranking. No production frontend change. **No real internal data.**
+
+### 21.10 Required tests (≥16)
+
+feature disabled · healthy sidecar · connection refused · timeout · HTTP 4xx · HTTP 5xx · malformed JSON · unexpected LightRAG schema · synthetic index success · query success · metadata allowlist · `file_path` not sent · URL not sent · secret-like extra fields not dumped to sidecar · imports/startup independent of LightRAG availability · existing vector retrieval regression.
+
+**Mock the HTTP boundary. No real remote provider calls in automated tests.**
+
+### 21.11 Sidecar
+
+PoC sidecar lives outside core Open Notebook source; LightRAG is **not vendored** into the package. Check existing deployment conventions before adding Docker/config. Production compose must not hard-depend on LightRAG.
+
+### 21.12 Definition of done
+
+Boundary fully isolated · flag default OFF · baseline runs without LightRAG · synthetic document indexable via the PoC path · experimental query works · failures normalized · metadata allowlist verified · no real internal data · no existing RAG path modified · no ingestion path modified · no DB migration · tests pass · Karpathy diff clean or findings resolved · **no unresolved HIGH findings from independent Codex review**.
+
+Verification: targeted GraphRAG tests → relevant backend regression → `ruff` → `mypy` (if changed files are in the typechecked surface) → `git diff` inspection → `/karpathy:diff` → independent Codex review. **No automatic commit.**
+
+Any requirement that would breach an approved boundary ⇒ **stop and report.**
