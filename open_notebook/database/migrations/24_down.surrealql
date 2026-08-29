@@ -1,0 +1,14 @@
+-- Migration 24 (down): remove GraphRAG-03B durable deletion state.
+--
+-- Removes ONLY the GraphRAG-specific event and tombstone table. The canonical
+-- `source` table, the existing `source_delete` vector-cleanup event, and all
+-- unrelated schema are left untouched. After this runs, the source delete path
+-- returns byte-for-byte to baseline.
+--
+-- Removing the table drops any still-pending tombstone rows -- removing the
+-- GraphRAG feature removes its local lifecycle metadata cleanly. This does NOT
+-- purge any copy already held by a remote LightRAG sidecar; remote purge is a
+-- GraphRAG-03C/03D operational concern, not a schema rollback.
+
+REMOVE EVENT IF EXISTS graphrag_source_delete ON TABLE source;
+REMOVE TABLE IF EXISTS graphrag_deletion;

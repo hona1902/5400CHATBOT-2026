@@ -5,7 +5,7 @@
 | Phase 0 — Governance & tooling baseline | ✅ **COMPLETE** | `AGRIBANK.md`, `DECISIONS.md`, Graphify baseline |
 | GraphRAG-01 — Forensic & architecture decision | ✅ **COMPLETE** | [`../architecture/GRAPHRAG_FORENSIC.md`](../architecture/GRAPHRAG_FORENSIC.md) rev-2 · [`GRAPHRAG_DECISION.md`](GRAPHRAG_DECISION.md) (AGR-005) |
 | GraphRAG-02 — Isolated LightRAG PoC | ✅ **COMPLETE** — accepted 2026-08-27 | [`../architecture/GRAPHRAG_POC.md`](../architecture/GRAPHRAG_POC.md) |
-| GraphRAG-03 — Indexing lifecycle & durable deletion | 🔨 **IN PROGRESS** — forensic approved 2026-08-28; slice 03-A **COMPLETE** | [`../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md`](../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md) · [`GRAPHRAG_03A_INDEXING.md`](GRAPHRAG_03A_INDEXING.md) |
+| GraphRAG-03 — Indexing lifecycle & durable deletion | 🔨 **IN PROGRESS** — forensic approved 2026-08-28; slices 03-A **COMPLETE** & 03-B **COMPLETE** | [`../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md`](../architecture/GRAPHRAG_LIFECYCLE_FORENSIC.md) · [`GRAPHRAG_03A_INDEXING.md`](GRAPHRAG_03A_INDEXING.md) · [`GRAPHRAG_03B_DURABLE_DELETE.md`](GRAPHRAG_03B_DURABLE_DELETE.md) |
 | GraphRAG-04 → 07 | ⬜ Not started, not approved | — |
 
 **Branch:** `feature/graphrag-lifecycle` (from `bc5b413`) · **LightRAG pinned:** `v1.5.6`
@@ -14,8 +14,8 @@
 | Slice | Status |
 |---|---|
 | 03-A INDEX/REINDEX | ✅ **COMPLETE** — approved 2026-08-28 (no migration; count 46) |
-| 03-B Durable deletion state + DB event (migration) | ⬜ **NOT STARTED** — approved in principle; requires separate go-ahead |
-| 03-C Tombstone draining / retry / idempotent delete | ⬜ Not started |
+| 03-B Durable deletion state + DB event (migration) | ✅ **COMPLETE / APPROVED** — signed off 2026-08-28. Migration **24** (`graphrag_deletion` SCHEMAFULL table + separate `graphrag_source_delete` event, Option A / flag-independent) with a per-arm **`arm_id`** (`rand::uuid()`) fence token closing the ABA re-arm race (verified on SurrealDB v2.6.5); read-only tombstone helper; 28 property tests. Migration count 46 → **48**. No HTTP/egress. Karpathy CLEAN · Codex APPROVE. See [`GRAPHRAG_03B_DURABLE_DELETE.md`](GRAPHRAG_03B_DURABLE_DELETE.md). |
+| 03-C Tombstone draining / retry / idempotent delete | ⬜ **NOT STARTED** — mandatory contract preconditions recorded in `GRAPHRAG_03B_DURABLE_DELETE.md` §17.1 (live-source convergence · live-empty→delete · confirmed-absence · `arm_id` CAS). Requires its own written go-ahead. |
 | 03-D RECONCILE | ⬜ Not started |
 | 03-E REBUILD | ⬜ Not started |
 
@@ -87,4 +87,4 @@ Five backend tests fail independently of this work — four Windows-environment 
 
 ## Next phase
 
-**GraphRAG-03B** — durable deletion state + `source_delete`-style DB event (the tombstone migration). Approved in principle by the 03-A approval, but **not started** and **requires a separate written go-ahead** before any code or migration. 03-C (tombstone draining), 03-D (RECONCILE), and 03-E (REBUILD) follow, each gated on its own review.
+**GraphRAG-03B** — durable deletion state + `graphrag_source_delete` DB event (migration 24) — ✅ **COMPLETE / APPROVED 2026-08-28** (Karpathy CLEAN, Codex APPROVE, no unresolved HIGH). Next is **GraphRAG-03C** (HTTP-capable tombstone draining) — **NOT STARTED**, requires its own written go-ahead. Its mandatory contract preconditions are recorded in `GRAPHRAG_03B_DURABLE_DELETE.md` §17.1: live-source convergence (absent→confirmed delete; live-empty→delete; live-non-empty→converge-to-current via 03-A reindex), resolution only on confirmed absence/insert, and a fenced compare-and-set on `arm_id` (never `requested_at`). 03-D (RECONCILE, defense-in-depth) and 03-E (REBUILD) follow, each gated on its own review.

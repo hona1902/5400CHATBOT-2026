@@ -204,19 +204,27 @@ class TestNoExistingPathModified:
         assert "GraphRAGService" not in text
         assert "import lightrag" not in text and "from lightrag" not in text
 
-    def test_no_new_migration_added(self):
-        """§21.9: no DB migration in this phase."""
+    def test_migration_count_matches_approved_phases(self):
+        """Migration count is a scope guard. GraphRAG-02 and 03A added NO
+        migration (count 46 = 23 up + 23 down). GraphRAG-03B adds EXACTLY ONE
+        migration — number 24: the durable deletion tombstone table plus the
+        `graphrag_source_delete` event — taking the on-disk file count to 48
+        (24 up + 24 down). Any other delta means scope creep beyond what is
+        approved. Migrations keep numeric filenames (no per-feature naming), so
+        no migration file is named for GraphRAG even though 24 is GraphRAG-owned;
+        that keeps `graphrag` out of the filename set while the schema lives in
+        the file body."""
         migrations = sorted(
             p.name
             for p in (
                 REPO_ROOT / "open_notebook" / "database" / "migrations"
             ).glob("*.surrealql")
         )
-        # 23 up + 23 down. A new migration here would be out of approved scope.
-        assert len(migrations) == 46, (
+        assert len(migrations) == 48, (
             f"unexpected migration count {len(migrations)}: {migrations}"
         )
         assert not any("graphrag" in name for name in migrations)
+        assert "24.surrealql" in migrations and "24_down.surrealql" in migrations
 
     def test_only_index_command_registered_not_later_lifecycle_verbs(self):
         """GraphRAG-03A registers ONLY the index/reindex command. DELETE

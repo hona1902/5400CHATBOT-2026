@@ -354,9 +354,12 @@ class TestEgressAllowlist:
 # --------------------------------------------------- migration guard (16)
 
 
-def test_no_migration_added():
-    """Property (16): GraphRAG-03A adds no schema; migration count stays 46."""
+def test_migration_count_is_48_after_03b():
+    """GraphRAG-03A added no schema (count 46). GraphRAG-03B adds exactly one
+    migration — number 24, the durable deletion tombstone + delete event — so
+    the on-disk file count is now 48 (24 up + 24 down). The 03A index/reindex
+    path itself still adds nothing; the delta is owned entirely by 03B."""
     migrations = glob.glob(
         str(REPO_ROOT / "open_notebook" / "database" / "migrations" / "*.surrealql")
     )
-    assert len(migrations) == 46
+    assert len(migrations) == 48
