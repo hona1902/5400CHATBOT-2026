@@ -336,9 +336,12 @@ class TestEgressAllowlist:
             assert forbidden not in body
 
     @pytest.mark.asyncio
-    async def test_disabled_service_makes_no_call(self):
-        """Property (1): with the flag off the service refuses before any
-        network setup."""
+    async def test_disabled_service_makes_no_indexing_call(self):
+        """Property (1): with the flag off the service refuses INDEXING before any
+        network setup. (Deletion is deliberately flag-INDEPENDENT in 03C — a
+        sidecar doc from a previously-enabled period must still be removable — so
+        the delete path gates on base_url only; that is covered in the 03C tests.)
+        """
 
         def handler(request):  # pragma: no cover - must never run
             raise AssertionError("disabled service must not make a request")
@@ -348,18 +351,20 @@ class TestEgressAllowlist:
         from open_notebook.integrations.graphrag.models import GraphRAGDisabledError
 
         with pytest.raises(GraphRAGDisabledError):
-            await svc.delete_document_for_source(source_id="source:abc")
+            await svc.index_synthetic_document(
+                source_id="source:abc", canonical_text="x"
+            )
 
 
 # --------------------------------------------------- migration guard (16)
 
 
-def test_migration_count_is_48_after_03b():
-    """GraphRAG-03A added no schema (count 46). GraphRAG-03B adds exactly one
-    migration — number 24, the durable deletion tombstone + delete event — so
-    the on-disk file count is now 48 (24 up + 24 down). The 03A index/reindex
-    path itself still adds nothing; the delta is owned entirely by 03B."""
+def test_migration_count_is_50_after_03c():
+    """GraphRAG-03A added no schema (46). 03B added migration 24 (tombstone +
+    event) -> 48. 03C adds migration 25 (next_attempt_at fair-drain field + event
+    OVERWRITE) -> 50 (25 up + 25 down). The 03A index/reindex path still adds
+    nothing."""
     migrations = glob.glob(
         str(REPO_ROOT / "open_notebook" / "database" / "migrations" / "*.surrealql")
     )
-    assert len(migrations) == 48
+    assert len(migrations) == 50

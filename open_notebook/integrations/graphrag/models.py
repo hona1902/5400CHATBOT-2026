@@ -343,6 +343,48 @@ class DeleteOutcome:
     detail: str
 
 
+class AbsenceState(str, Enum):
+    """Whether a specific document is provably absent from the sidecar.
+
+    GraphRAG-03C resolves a durable deletion tombstone ONLY on
+    ``ABSENT_CONFIRMED`` — an async ``deletion_started`` acknowledgement is NOT
+    proof (verified live against v1.5.6: a background delete can fail and leave
+    the document present). Absence is proven only by a COMPLETE single-request
+    enumeration; anything requiring multiple offset requests, or any error, is
+    ``UNKNOWN`` and keeps the tombstone pending.
+
+    - FOUND: the target doc_id is present in the enumeration.
+    - ABSENT_CONFIRMED: the target is absent AND the paginated response proves it
+      enumerated the ENTIRE current document set in that one response
+      (``total_pages <= 1`` and ``total_count == len(documents)``), so no
+      cross-request offset-shift race could have hidden the target.
+    - UNKNOWN: anything else — ``total_pages > 1`` (would need multiple requests),
+      a count/consistency mismatch, a timeout, an HTTP error, a parse/schema
+      error, or an otherwise incomplete/uncertain response.
+    """
+
+    FOUND = "found"
+    ABSENT_CONFIRMED = "absent_confirmed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class DocumentsPage:
+    """One normalized page of the sidecar's document listing.
+
+    ``doc_ids`` are the document ids on this page (LightRAG's
+    ``DocStatusResponse.id``). ``total_count``/``total_pages`` come from the
+    response's ``pagination`` block and are what let a caller decide whether a
+    single page enumerated the whole set. The raw response is never surfaced.
+    """
+
+    doc_ids: tuple[str, ...]
+    page: int
+    page_size: int
+    total_count: int
+    total_pages: int
+
+
 @dataclass(frozen=True)
 class IndexAck:
     """Acknowledgement that a document was accepted for indexing.

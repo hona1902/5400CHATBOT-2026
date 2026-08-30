@@ -19,6 +19,7 @@ from open_notebook.integrations.graphrag.config import GraphRAGConfig, load_conf
 from open_notebook.integrations.graphrag.models import (
     _INDEXABLE_TABLES,
     ALLOWED_METADATA_FIELDS,
+    AbsenceState,
     DeleteOutcome,
     GraphQueryResult,
     GraphRAGDisabledError,
@@ -124,6 +125,31 @@ class GraphRAGService:
             self._client = GraphRAGClient(self._config)
         return self._client
 
+    def _require_client_for_deletion(self) -> GraphRAGClient:
+        """Return a client for the DELETION lifecycle, gated on sidecar CONFIG
+        only — NOT on the ``OPEN_NOTEBOOK_GRAPHRAG_ENABLED`` flag.
+
+        Deletion draining (GraphRAG-03C) must converge even when indexing is
+        disabled: a sidecar document indexed during a previously-enabled period
+        must not linger just because the flag was later turned off (AGR-005 §9,
+        forensic row 18). So the only requirement here is enough configuration to
+        REACH the sidecar. When no base_url is set the sidecar is unreachable, and
+        this raises ``GraphRAGDisabledError`` — which the drain treats as "cannot
+        reach sidecar, keep the tombstone pending and retry", never as success.
+
+        Indexing (index_source / index_synthetic_document) still goes through the
+        flag-gated ``_require_client``; only the delete/confirm-absence lifecycle
+        relaxes the gate to base_url, and that path is never reached with a
+        different meaning by 03A (its command checks the flag first)."""
+        if not self._config.base_url:
+            raise GraphRAGDisabledError(
+                "GraphRAG deletion drain cannot reach the sidecar: "
+                "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL is not set"
+            )
+        if self._client is None:
+            self._client = GraphRAGClient(self._config)
+        return self._client
+
     async def health(self) -> HealthResult:
         """Report sidecar health. Never raises (AGR-005 §21.8)."""
         if not self._config.enabled:
@@ -192,7 +218,27 @@ class GraphRAGService:
         """
         canonical = validate_source_id(source_id)
         doc_id = compute_doc_id(canonical)
-        return await self._require_client().delete_document(doc_id)
+        return await self._require_client_for_deletion().delete_document(doc_id)
+
+    async def confirm_source_document_absent(
+        self, *, source_id: str
+    ) -> AbsenceState:
+        """Prove the sidecar document derived from ``source_id`` is absent.
+
+        The GraphRAG-03C tombstone-resolution gate: validates the source_id to its
+        canonical form (never trusting the caller), derives the deterministic
+        doc_id, and asks the client for a single-snapshot absence proof. Returns
+        ``AbsenceState`` (FOUND / ABSENT_CONFIRMED / UNKNOWN); only
+        ABSENT_CONFIRMED may permit resolving a tombstone. A validation error
+        (structurally invalid source_id) propagates as GraphRAGValidationError —
+        the drain classifies that as a permanent local error and never turns it
+        into an unsafe remote action.
+        """
+        canonical = validate_source_id(source_id)
+        doc_id = compute_doc_id(canonical)
+        return await self._require_client_for_deletion().confirm_document_absent(
+            doc_id
+        )
 
     async def track_status(self, track_id: str) -> IndexStatus:
         """Poll indexing progress. Raises on failure (diagnostic call)."""

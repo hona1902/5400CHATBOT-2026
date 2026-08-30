@@ -676,8 +676,45 @@ class Source(ObjectModel):
                 "Continuing with source deletion."
             )
 
-        # Call parent delete to remove database record
-        return await super().delete()
+        # Call parent delete to remove database record. The migration-24/25 DB
+        # event writes the durable graphrag_deletion tombstone atomically with
+        # this delete (on every path, including raw SurrealQL).
+        result = await super().delete()
+        await _maybe_wake_graphrag_deletion_drain()
+        return result
+
+
+async def _maybe_wake_graphrag_deletion_drain() -> None:
+    """Best-effort immediate wake-up of the GraphRAG-03C deletion drain.
+
+    OPTIMISATION ONLY: canonical deletion correctness NEVER depends on this. The
+    durable tombstone (written by the DB event) plus the periodic FastAPI-lifespan
+    wake-up guarantee the derived document is eventually removed — including for a
+    raw SurrealQL ``DELETE source`` that never runs this code. This just shortens
+    latency when a delete goes through the Python domain path. It is flag-
+    independent (deletion must converge even with indexing off) but only fires
+    when a sidecar is configured, and it never raises.
+
+    Routes through the SAME deduplicating ``enqueue_drain_if_pending`` as the
+    periodic wake-up, so a bulk cascade (e.g. ``Notebook.delete`` looping over
+    many ``Source.delete``) enqueues at most one new drain command instead of one
+    per source.
+    """
+    try:
+        from open_notebook.integrations.graphrag.config import load_config
+
+        if not load_config().base_url:
+            return  # no sidecar configured -> nothing to wake; periodic loop covers it
+        from open_notebook.integrations.graphrag.drain import (
+            enqueue_drain_if_pending,
+        )
+
+        await enqueue_drain_if_pending()
+    except Exception as e:
+        logger.debug(
+            f"GraphRAG deletion-drain wake-up on source delete skipped: "
+            f"{type(e).__name__}"
+        )
 
 
 class Note(ObjectModel):

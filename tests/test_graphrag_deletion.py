@@ -40,7 +40,16 @@ DOWN_SQL = (MIGRATIONS / "24_down.surrealql").read_text(encoding="utf-8")
 # metadata leak (the whole point of a tombstone is that it is NOT a copy of the
 # deleted document). arm_id is an opaque per-arm fence token (rand::uuid()), not
 # content.
-ALLOWED_TOMBSTONE_FIELDS = {"id", "source_id", "requested_at", "status", "arm_id"}
+ALLOWED_TOMBSTONE_FIELDS = {
+    "id",
+    "source_id",
+    "requested_at",
+    "status",
+    "arm_id",
+    # GraphRAG-03C (migration 25): a scheduling datetime for fair draining. Like
+    # the other fields it is metadata, never document content.
+    "next_attempt_at",
+}
 FORBIDDEN_TOMBSTONE_SUBSTRINGS = (
     "full_text",
     "content",
@@ -136,13 +145,26 @@ class TestMigration24Structure:
 
     def test_registered_in_manager_up_and_down(self):
         """Migrations are hard-coded in AsyncMigrationManager, not discovered.
-        Count is now 24 up + 24 down, and slot 24 is the GraphRAG-03B migration."""
+        Count is now 25 up + 25 down: slot 24 (0-indexed 23) is the GraphRAG-03B
+        migration, slot 25 (0-indexed 24) is the GraphRAG-03C next_attempt_at
+        scheduling field + event OVERWRITE."""
         manager = AsyncMigrationManager()
-        assert len(manager.up_migrations) == 24
+        assert len(manager.up_migrations) == 25
         assert len(manager.up_migrations) == len(manager.down_migrations)
         assert "graphrag_deletion" in manager.up_migrations[23].sql
         assert "graphrag_source_delete" in manager.up_migrations[23].sql
         assert "REMOVE TABLE IF EXISTS graphrag_deletion" in manager.down_migrations[23].sql
+        # Migration 25 (03C): adds next_attempt_at + re-arms the event via OVERWRITE.
+        assert "next_attempt_at" in manager.up_migrations[24].sql
+        assert "DEFINE EVENT OVERWRITE graphrag_source_delete" in manager.up_migrations[24].sql
+        # 25 down removes the field and restores the migration-24 event body: the
+        # restored event (everything before REMOVE FIELD) must not reference
+        # next_attempt_at, proving exact GraphRAG-03B semantics are restored.
+        down25 = manager.down_migrations[24].sql
+        assert "REMOVE FIELD IF EXISTS next_attempt_at" in down25
+        restored_event = down25.split("REMOVE FIELD")[0]
+        assert "next_attempt_at" not in restored_event
+        assert "arm_id = rand::uuid()" in restored_event
 
     def test_flattened_migration_is_a_single_valid_statement_stream(self):
         """AsyncMigration.from_file strips comments/blank lines and joins with
@@ -156,21 +178,24 @@ class TestMigration24Structure:
         assert "DEFINE EVENT IF NOT EXISTS graphrag_source_delete" in flat
 
 
-class TestDeletionHelperIsReadOnlyAndNoHttp:
-    def test_helper_imports_no_http_or_lightrag(self):
+class TestDeletionHelperIsDbOnlyAndNoHttp:
+    def test_helper_imports_no_http_or_lightrag_client(self):
+        """03C adds arm-fenced CAS writes (resolve/defer) to this module, but they
+        are raw SurrealQL via ``repo_query`` — the module still performs NO HTTP
+        and imports NO LightRAG client/service (the remote lifecycle lives in
+        drain.py / service / client). The only integration import is
+        ``models.record_id_for`` (pure RecordID types, no HTTP)."""
         src = (
             REPO_ROOT / "open_notebook" / "integrations" / "graphrag" / "deletion.py"
         ).read_text(encoding="utf-8")
         assert "import httpx" not in src
         assert "import lightrag" not in src and "from lightrag" not in src
-        # No HTTP client coupling: the module must not import or instantiate the
-        # LightRAG client (a prose mention of GraphRAGClient.compute_doc_id as
-        # the 03C step is fine; importing/using it here is not).
+        # No HTTP client/service coupling here — the drain owns that.
         assert "graphrag.client import" not in src
+        assert "graphrag.service import" not in src
         assert "GraphRAGClient(" not in src
-        # Read-only, proven by imports rather than prose: the module uses only
-        # repo_query (SELECT), never any write helper. This can't be fooled by a
-        # docstring that mentions DELETE.
+        # All DB access goes through repo_query; the module must not reach for the
+        # ORM write helpers (its CAS is deliberately raw, arm-fenced SurrealQL).
         assert "repo_query" in src
         for writer in (
             "repo_create",
@@ -181,23 +206,34 @@ class TestDeletionHelperIsReadOnlyAndNoHttp:
         ):
             assert writer not in src, f"deletion helper must not use {writer}"
 
-    def test_no_draining_command_registered(self):
-        """03B creates durable state only. The drain/delete command is 03C and
-        must not exist yet."""
+    def test_drain_command_registered_but_not_reconcile_rebuild(self):
+        """GraphRAG-03C registers the deletion drain command. RECONCILE (03D) and
+        REBUILD (03E) are later slices and must not exist yet."""
         import commands
 
         registered = set(commands.__all__)
-        assert "graphrag_delete_source_command" not in registered
+        assert "graphrag_drain_deletions_command" in registered
         assert "graphrag_reconcile_command" not in registered
+        assert "graphrag_rebuild_command" not in registered
 
-    def test_source_delete_hook_has_no_graphrag_http(self):
-        """Source.delete() must NOT gain a LightRAG HTTP call in 03B — deletion
-        durability lives in the DB event, not an app-side best-effort call."""
+    def test_source_delete_hook_has_no_direct_lightrag_http(self):
+        """Source.delete() may fire a BEST-EFFORT drain wake-up (03C, §27) — an
+        optimisation that submits a command by name — but must NOT contain a
+        direct LightRAG HTTP call or client/service coupling. Canonical deletion
+        correctness stays in the DB event + durable tombstone, never in an
+        app-side best-effort remote call."""
         src = (REPO_ROOT / "open_notebook" / "domain" / "notebook.py").read_text(
             encoding="utf-8"
         )
-        assert "graphrag" not in src.lower()
+        # No direct sidecar HTTP / client / delete-document coupling in the domain.
+        assert "import httpx" not in src
+        assert "GraphRAGClient" not in src
+        assert "GraphRAGService" not in src
         assert "delete_document_for_source" not in src
+        assert "import lightrag" not in src and "from lightrag" not in src
+        # The only allowed GraphRAG reference is the best-effort wake-up, which
+        # routes through the deduplicating enqueue path (the worker does the HTTP).
+        assert "enqueue_drain_if_pending" in src
 
 
 # ===========================================================================

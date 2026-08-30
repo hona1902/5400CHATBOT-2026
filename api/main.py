@@ -181,6 +181,46 @@ async def _run_database_migrations() -> None:
         logger.info("Database is already at the latest version. No migrations needed.")
 
 
+def _maybe_start_graphrag_drain_wakeup():
+    """Start the GraphRAG-03C deletion-drain wake-up loop, if available.
+
+    Best-effort and fully removable: lazy-imports the GraphRAG integration so the
+    API has no import-time dependency on it, and swallows any failure (a broken or
+    absent integration must never stop the API from booting). Returns the
+    asyncio.Task, or None if it could not be started. The loop only ENQUEUES
+    bounded drain work (the worker performs the HTTP); its correctness comes from
+    the durable tombstone table, not from this process staying up.
+    """
+    try:
+        from open_notebook.integrations.graphrag.config import load_drain_config
+        from open_notebook.integrations.graphrag.drain import (
+            graphrag_drain_wakeup_loop,
+        )
+
+        interval = load_drain_config().interval_seconds
+        return asyncio.create_task(graphrag_drain_wakeup_loop(interval))
+    except Exception as e:  # pragma: no cover - defensive boot guard
+        logger.warning(
+            f"GraphRAG deletion-drain wake-up not started: {type(e).__name__}"
+        )
+        return None
+
+
+async def _stop_graphrag_drain_wakeup(task) -> None:
+    """Cancel the drain wake-up loop deterministically on shutdown."""
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(
+            f"GraphRAG drain wake-up shutdown error: {type(e).__name__}"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -208,12 +248,19 @@ async def lifespan(app: FastAPI):
         # Fail fast - don't start the API with an outdated database schema
         raise RuntimeError(f"Failed to run database migrations: {str(e)}") from e
 
+    # Start the GraphRAG-03C deletion-drain wake-up loop (periodic durable-state
+    # discovery). Runs AFTER migrations so migration 25's next_attempt_at exists,
+    # and only enqueues bounded drain work. Fully optional — a failure to start it
+    # never blocks API startup.
+    app.state.graphrag_drain_task = _maybe_start_graphrag_drain_wakeup()
+
     logger.success("API initialization completed successfully")
 
     # Yield control to the application
     yield
 
-    # Shutdown: cleanup if needed
+    # Shutdown: stop the drain wake-up loop deterministically, then finish.
+    await _stop_graphrag_drain_wakeup(getattr(app.state, "graphrag_drain_task", None))
     logger.info("API shutdown complete")
 
 

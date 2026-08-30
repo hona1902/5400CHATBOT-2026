@@ -1,8 +1,7 @@
-"""GraphRAG lifecycle commands (GraphRAG-03A: INDEX / REINDEX).
+"""GraphRAG lifecycle commands (GraphRAG-03A INDEX/REINDEX, GraphRAG-03C DRAIN).
 
-Only the indexing verb is implemented in this slice. DELETE (durable /
-tombstone), RECONCILE, and REBUILD are later slices (GraphRAG-03B → 03E) and are
-deliberately absent.
+Implements the indexing verb (03A) and the durable deletion drain (03C).
+RECONCILE and REBUILD are later slices (03D/03E) and are deliberately absent.
 
 Design invariants (see docs/agribank/development/GRAPHRAG_03A_INDEXING.md):
 
@@ -32,6 +31,7 @@ from surreal_commands import CommandInput, CommandOutput, command
 from open_notebook.database.repository import repo_query
 from open_notebook.domain.notebook import Source
 from open_notebook.exceptions import ConfigurationError
+from open_notebook.integrations.graphrag.drain import drain_pending_deletions
 from open_notebook.integrations.graphrag.lifecycle import (
     IndexResult,
     index_source,
@@ -244,3 +244,58 @@ async def graphrag_index_source_command(
         f"graphrag_index_source: transient failure for {source_id}: {outcome.detail}"
     )
     raise RuntimeError(f"GraphRAG index transient failure: {outcome.detail}")
+
+
+# ---------------------------------------------------------------------------
+# GraphRAG-03C: durable deletion drain
+# ---------------------------------------------------------------------------
+
+
+class GraphRAGDrainInput(CommandInput):
+    # No arguments: the durable graphrag_deletion tombstone table is the
+    # source-of-truth work list, NOT the command payload. A drain simply processes
+    # whatever is currently due, so it is safe to run any number of times.
+    pass
+
+
+class GraphRAGDrainOutput(CommandOutput):
+    success: bool
+    scanned: int
+    resolved_absent: int
+    converged_current: int
+    superseded: int
+    deferred: int
+    permanent_local_error: int
+    processing_time: float
+
+
+# No retry layer: the drain never raises for per-row failures (they are DEFERRED
+# in-band via next_attempt_at so one failing tombstone cannot abort the batch),
+# and the durable tombstone + the periodic lifespan wake-up ARE the re-drive
+# mechanism — not the command queue (which cannot re-drive a crashed 'running'
+# job). max_attempts=1 keeps a crashed drain from being retried in place; the next
+# wake-up tick re-drives from the durable table.
+@command("graphrag_drain_deletions", app="open_notebook", retry={"max_attempts": 1})
+async def graphrag_drain_deletions_command(
+    input_data: GraphRAGDrainInput,
+) -> GraphRAGDrainOutput:
+    """Process one bounded, fair batch of due GraphRAG deletion tombstones.
+
+    Runs on the worker (where GraphRAG HTTP egress already lives). Enumerates due
+    tombstones, converges each toward its correct derived state (absent / current)
+    and resolves confirmed ones by arm_id CAS; unconfirmed rows are deferred. See
+    open_notebook/integrations/graphrag/drain.py for the lifecycle and fairness
+    guarantees.
+    """
+    start_time = time.time()
+    summary = await drain_pending_deletions()
+    return GraphRAGDrainOutput(
+        success=True,
+        scanned=summary.scanned,
+        resolved_absent=summary.resolved_absent,
+        converged_current=summary.converged_current,
+        superseded=summary.superseded,
+        deferred=summary.deferred,
+        permanent_local_error=summary.permanent_local_error,
+        processing_time=time.time() - start_time,
+    )

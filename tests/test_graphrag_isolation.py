@@ -113,14 +113,18 @@ class TestImportAndStartupIndependence:
         explicit, approved set of call sites.
 
         GraphRAG-02 allowed exactly one (the diagnostic router). GraphRAG-03A
-        adds the lifecycle command; the fail-open enqueue seam in
-        graphs/source.py imports only ``integrations.graphrag.config`` lazily,
-        which this same guard covers. Any referrer outside this set is a scatter
-        regression (AGR-005 §21.2) and must be justified before it lands."""
+        adds the lifecycle command and the fail-open enqueue seam in
+        graphs/source.py. GraphRAG-03C adds the deletion-drain wake-up: the
+        FastAPI lifespan starts a cancellable periodic task, and Source.delete
+        fires a best-effort wake-up. All lazy-import the integration. Any referrer
+        outside this set is a scatter regression (AGR-005 §21.2) and must be
+        justified before it lands."""
         approved = {
             "api/routers/graphrag.py",  # GraphRAG-02 diagnostic endpoint
-            "commands/graphrag_commands.py",  # GraphRAG-03A lifecycle command
+            "commands/graphrag_commands.py",  # 03A lifecycle + 03C drain command
             "open_notebook/graphs/source.py",  # GraphRAG-03A fail-open enqueue seam
+            "api/main.py",  # GraphRAG-03C lifespan drain wake-up
+            "open_notebook/domain/notebook.py",  # 03C best-effort drain wake-up on delete
         }
         referencing = set()
         for base in ("open_notebook", "api", "commands"):
@@ -168,12 +172,14 @@ class TestNoExistingPathModified:
         "relative",
         [
             # graphs/source.py is DELIBERATELY excluded: GraphRAG-03A adds the
-            # approved fail-open enqueue seam there. Every OTHER ingestion and
-            # retrieval path must still be free of GraphRAG references.
+            # approved fail-open enqueue seam there. domain/notebook.py is excluded
+            # too: GraphRAG-03C adds the approved best-effort deletion-drain
+            # wake-up in Source.delete (§27) — an optimisation only, covered by
+            # its own no-direct-HTTP guard in test_graphrag_deletion.py. Every
+            # OTHER ingestion and retrieval path must still be free of GraphRAG.
             "open_notebook/graphs/chat.py",
             "open_notebook/graphs/source_chat.py",
             "open_notebook/graphs/ask.py",
-            "open_notebook/domain/notebook.py",
             "commands/source_commands.py",
             "commands/embedding_commands.py",
             "api/routers/search.py",
@@ -205,26 +211,25 @@ class TestNoExistingPathModified:
         assert "import lightrag" not in text and "from lightrag" not in text
 
     def test_migration_count_matches_approved_phases(self):
-        """Migration count is a scope guard. GraphRAG-02 and 03A added NO
-        migration (count 46 = 23 up + 23 down). GraphRAG-03B adds EXACTLY ONE
-        migration — number 24: the durable deletion tombstone table plus the
-        `graphrag_source_delete` event — taking the on-disk file count to 48
-        (24 up + 24 down). Any other delta means scope creep beyond what is
-        approved. Migrations keep numeric filenames (no per-feature naming), so
-        no migration file is named for GraphRAG even though 24 is GraphRAG-owned;
-        that keeps `graphrag` out of the filename set while the schema lives in
-        the file body."""
+        """Migration count is a scope guard. GraphRAG-02/03A added NO migration
+        (count 46). GraphRAG-03B added migration 24 (durable tombstone + event),
+        taking it to 48. GraphRAG-03C adds EXACTLY ONE more — number 25: the
+        `next_attempt_at` fair-drain scheduling field plus the event OVERWRITE —
+        taking the on-disk file count to 50 (25 up + 25 down). Any other delta
+        means scope creep. Migrations keep numeric filenames, so no migration file
+        is named for GraphRAG even though 24/25 are GraphRAG-owned."""
         migrations = sorted(
             p.name
             for p in (
                 REPO_ROOT / "open_notebook" / "database" / "migrations"
             ).glob("*.surrealql")
         )
-        assert len(migrations) == 48, (
+        assert len(migrations) == 50, (
             f"unexpected migration count {len(migrations)}: {migrations}"
         )
         assert not any("graphrag" in name for name in migrations)
         assert "24.surrealql" in migrations and "24_down.surrealql" in migrations
+        assert "25.surrealql" in migrations and "25_down.surrealql" in migrations
 
     def test_only_index_command_registered_not_later_lifecycle_verbs(self):
         """GraphRAG-03A registers ONLY the index/reindex command. DELETE

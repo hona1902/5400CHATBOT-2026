@@ -1,0 +1,22 @@
+-- Migration 25 (down): restore EXACT GraphRAG-03B / migration-24 event semantics
+-- and remove the next_attempt_at scheduling field.
+--
+-- After this runs, the `graphrag_source_delete` event body is byte-equivalent to
+-- migration 24's (source_id + requested_at + status="pending" + fresh
+-- arm_id=rand::uuid(), no next_attempt_at). The `graphrag_deletion` table itself
+-- and its migration-24 fields survive; the existing `source_delete` vector
+-- cleanup event is untouched.
+--
+-- ORDER: the event is restored to the migration-24 body FIRST (so it no longer
+-- references next_attempt_at), then the field is removed. The runner executes
+-- these in order within one query, matching the up-migration convention.
+
+DEFINE EVENT OVERWRITE graphrag_source_delete ON TABLE source WHEN $after == NONE THEN {
+    UPSERT type::thing("graphrag_deletion", $before.id) SET
+        source_id = $before.id,
+        requested_at = time::now(),
+        status = "pending",
+        arm_id = rand::uuid();
+};
+
+REMOVE FIELD IF EXISTS next_attempt_at ON TABLE graphrag_deletion;

@@ -27,11 +27,14 @@ from open_notebook.integrations.graphrag.config import (
     GraphRAGConfig,
 )
 from open_notebook.integrations.graphrag.models import (
+    AbsenceState,
     DeleteOutcome,
     DeleteState,
+    DocumentsPage,
     GraphQueryResult,
     GraphRAGConfigurationError,
     GraphRAGConflictError,
+    GraphRAGError,
     GraphRAGProtocolError,
     GraphRAGRequestError,
     GraphRAGServerError,
@@ -45,6 +48,12 @@ from open_notebook.integrations.graphrag.models import (
     is_valid_record_id,
     normalize_index_state,
 )
+
+# LightRAG's paginated listing caps page_size at 200 (verified live: 201 -> 422).
+# The absence probe reads a SINGLE page of this size and confirms absence only if
+# that one page enumerated the whole set, so 200 is also the single-response
+# ceiling above which a corpus yields UNKNOWN (never a false ABSENT_CONFIRMED).
+ABSENCE_PROBE_PAGE_SIZE = 200
 
 
 def compute_doc_id(source_id: str) -> str:
@@ -340,6 +349,99 @@ class GraphRAGClient:
         detail = str(payload.get("message", "")) or status
         logger.debug(f"GraphRAG delete doc_id={doc_id} -> {state.value}")
         return DeleteOutcome(doc_id=doc_id, state=state, detail=detail)
+
+    async def list_documents_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = ABSENCE_PROBE_PAGE_SIZE,
+        sort_field: str = "id",
+        sort_direction: str = "asc",
+    ) -> DocumentsPage:
+        """List one page of the sidecar's documents (POST /documents/paginated).
+
+        Verified against v1.5.6: request is
+        ``{status_filters?, page>=1, page_size in [10,200], sort_field in
+        {created_at,updated_at,id,file_path}, sort_direction in {asc,desc}}`` and
+        the response carries ``documents[].id`` plus a ``pagination`` block with
+        ``total_count`` and ``total_pages``. Both are required; a response missing
+        either is a protocol error, not a silent empty page — a caller proving
+        ABSENCE must never mistake a malformed response for "no documents".
+        """
+        payload = await self._request(
+            "POST",
+            "/documents/paginated",
+            json={
+                "page": page,
+                "page_size": page_size,
+                "sort_field": sort_field,
+                "sort_direction": sort_direction,
+            },
+        )
+        documents = payload.get("documents")
+        pagination = payload.get("pagination")
+        if not isinstance(documents, list) or not isinstance(pagination, dict):
+            raise GraphRAGProtocolError(
+                "GraphRAG paginated response is missing documents/pagination"
+            )
+        total_count = pagination.get("total_count")
+        total_pages = pagination.get("total_pages")
+        if not isinstance(total_count, int) or not isinstance(total_pages, int):
+            raise GraphRAGProtocolError(
+                "GraphRAG pagination is missing total_count/total_pages"
+            )
+        # Keep only ids we can actually read. A document dict with no usable id
+        # shortens doc_ids, which makes the completeness check below fail closed
+        # (UNKNOWN) rather than mistaking an unreadable page for a complete one.
+        doc_ids = tuple(
+            str(d["id"])
+            for d in documents
+            if isinstance(d, dict) and d.get("id")
+        )
+        return DocumentsPage(
+            doc_ids=doc_ids,
+            page=page,
+            page_size=page_size,
+            total_count=total_count,
+            total_pages=total_pages,
+        )
+
+    async def confirm_document_absent(self, doc_id: str) -> AbsenceState:
+        """Prove (or refute) that ``doc_id`` is absent, from ONE complete snapshot.
+
+        This is the GraphRAG-03C resolution gate: a durable deletion tombstone may
+        be CAS-resolved only on ``ABSENT_CONFIRMED``. Never raises — every failure
+        or uncertainty collapses to ``UNKNOWN`` so the caller keeps the tombstone
+        pending and re-drives later, never treating an error as success.
+
+        Why a single request and never multi-page traversal (verified live): the
+        listing is offset-paginated, so between two page requests a concurrent
+        delete of a lower-sorted document shifts offsets and could move the target
+        across an already-read page boundary — a false absence. A single response
+        is a consistent server-side snapshot, so ``ABSENT_CONFIRMED`` is returned
+        ONLY when that one response provably enumerated the entire current set
+        (``total_pages <= 1`` and ``total_count == len(doc_ids)``). Any set that
+        would need a second request (``total_pages > 1``) is ``UNKNOWN`` by
+        construction, which is the documented single-response ceiling
+        (page_size = ABSENCE_PROBE_PAGE_SIZE = 200): a corpus larger than one page
+        never yields a false confirmation, it simply stays pending.
+        """
+        try:
+            page = await self.list_documents_page(
+                page=1,
+                page_size=ABSENCE_PROBE_PAGE_SIZE,
+                sort_field="id",
+                sort_direction="asc",
+            )
+        except GraphRAGError:
+            # Timeout, HTTP error, config/version mismatch, or malformed response.
+            return AbsenceState.UNKNOWN
+
+        if doc_id in page.doc_ids:
+            return AbsenceState.FOUND
+        if page.total_pages <= 1 and page.total_count == len(page.doc_ids):
+            return AbsenceState.ABSENT_CONFIRMED
+        return AbsenceState.UNKNOWN
 
     async def track_status(self, track_id: str) -> IndexStatus:
         """Poll indexing progress for a track_id.

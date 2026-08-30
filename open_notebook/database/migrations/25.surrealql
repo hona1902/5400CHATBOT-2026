@@ -1,0 +1,51 @@
+-- Migration 25: GraphRAG-03C fair-drain scheduling state (next_attempt_at).
+--
+-- Adds ONE field to the migration-24 `graphrag_deletion` tombstone so the 03C
+-- draining worker can traverse pending tombstones FAIRLY and BOUNDEDLY without
+-- OFFSET pagination over a mutating set:
+--
+--   drain "due" set = SELECT * FROM graphrag_deletion
+--                     WHERE status = "pending" AND next_attempt_at <= time::now()
+--                     ORDER BY next_attempt_at ASC, id ASC LIMIT <bounded cap>
+--
+-- A tombstone whose remote convergence is NOT yet confirmed (UNKNOWN / transient)
+-- is DEFERRED (next_attempt_at = time::now() + retry_delay) so it leaves the
+-- current due set and later tombstones are processed — no persistent starvation.
+-- A confirmed tombstone is resolved by an arm_id compare-and-set DELETE. `arm_id`
+-- (migration 24) remains the authoritative concurrency fence; `next_attempt_at`
+-- is only a scheduling hint and is NOT a fence.
+--
+-- Additive and minimal: exactly one datetime field + a re-arm reset in the
+-- existing event. NO attempt_count, NO last_error/error text, NO resolved_at, NO
+-- cursor rows (deletion is never abandoned, so no give-up counter is needed and
+-- no raw failure information is ever persisted). Migration 24 is FROZEN and its
+-- file is untouched; the event is changed only via OVERWRITE here.
+--
+-- Statement ORDER matters and is relied upon: the migration runner
+-- (AsyncMigration.from_file) strips comments and joins the remaining statements
+-- into a single space-separated string executed in order by one connection.query
+-- call, and migrations run at API startup BEFORE the app serves traffic
+-- (api/main.py lifespan awaits _run_database_migrations() before `yield`). So:
+--   1) the field is defined FIRST, before the event references it;
+--   2) pre-25 tombstones (created without the field) are backfilled to time::now()
+--      so they are immediately due (a new DEFINE FIELD DEFAULT does not
+--      materialise onto existing rows);
+--   3) the event is OVERWRITTEN last to also stamp next_attempt_at on every
+--      arm/re-arm. A source delete landing in the sub-millisecond pre-overwrite
+--      window still yields a discoverable tombstone (an unmaterialised
+--      next_attempt_at reads as its time::now() default, which is <= time::now()).
+--
+-- See docs/agribank/development/GRAPHRAG_03C_TOMBSTONE_DRAIN.md.
+
+DEFINE FIELD IF NOT EXISTS next_attempt_at ON TABLE graphrag_deletion TYPE datetime DEFAULT time::now();
+
+UPDATE graphrag_deletion SET next_attempt_at = time::now() WHERE next_attempt_at = NONE;
+
+DEFINE EVENT OVERWRITE graphrag_source_delete ON TABLE source WHEN $after == NONE THEN {
+    UPSERT type::thing("graphrag_deletion", $before.id) SET
+        source_id = $before.id,
+        requested_at = time::now(),
+        status = "pending",
+        arm_id = rand::uuid(),
+        next_attempt_at = time::now();
+};

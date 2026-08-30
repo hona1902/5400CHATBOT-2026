@@ -14,7 +14,10 @@ from .embedding_commands import (
     embed_source_command,
     rebuild_embeddings_command,
 )
-from .graphrag_commands import graphrag_index_source_command
+from .graphrag_commands import (
+    graphrag_drain_deletions_command,
+    graphrag_index_source_command,
+)
 from .podcast_commands import generate_podcast_command
 from .source_commands import process_source_command
 
@@ -24,8 +27,9 @@ __all__ = [
     "embed_insight_command",
     "embed_source_command",
     "rebuild_embeddings_command",
-    # GraphRAG lifecycle commands (GraphRAG-03A: index/reindex only)
+    # GraphRAG lifecycle commands (03A index/reindex, 03C deletion drain)
     "graphrag_index_source_command",
+    "graphrag_drain_deletions_command",
     # Other commands
     "generate_podcast_command",
     "process_source_command",
