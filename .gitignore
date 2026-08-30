@@ -156,3 +156,6 @@ history.txt
 .graphify/
 .agribank-overlay-backup/
 
+
+# GraphRAG-04 transient evaluation artifacts (not committed)
+.artifacts/

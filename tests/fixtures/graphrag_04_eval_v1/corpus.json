@@ -1,0 +1,77 @@
+{
+  "benchmark_version": "graphrag_04_eval_v1",
+  "namespace_tag": "__graphrag04_eval_v1__",
+  "description": "Frozen synthetic/fictional retrieval-evaluation corpus. No real entities. Two independent relation chains (research + shipping) that cross at the fictional 'Aurora-7 catalyst' and the fictional city 'Calderon', plus deliberate name/term collisions (Voss, Aurora, Halcyon) and pure distractors. Documents are ordinary prose: they contain NO query ids, NO labels, NO retrieval hints.",
+  "sources": [
+    {
+      "key": "S01_project_halcyon_overview",
+      "title": "Project Halcyon overview",
+      "text": "Project Halcyon is a materials-research programme run by a small applied-chemistry team. The programme is led by Dr. Elena Voss. Its central line of work is the investigation of the Aurora-7 catalyst and how that catalyst behaves during large-scale polymer synthesis."
+    },
+    {
+      "key": "S02_elena_voss_bio",
+      "title": "Dr. Elena Voss profile",
+      "text": "Dr. Elena Voss is a senior chemist at the Meridian Institute, where she has worked since 2031. Her background is in reaction kinetics, and colleagues describe her as the driving scientific figure behind the institute's catalysis group."
+    },
+    {
+      "key": "S03_meridian_institute",
+      "title": "The Meridian Institute",
+      "text": "The Meridian Institute is an independent research laboratory in the city of Calderon. It houses several chemistry groups. The institute's research is funded by the Novak Foundation, which covers its laboratory operating costs."
+    },
+    {
+      "key": "S04_aurora7_catalyst",
+      "title": "The Aurora-7 catalyst",
+      "text": "The Aurora-7 catalyst is a compound that accelerates polymer synthesis reactions. It is highly temperature-sensitive: batches degrade quickly at room temperature and must be shipped cold in refrigerated containers to remain usable."
+    },
+    {
+      "key": "S05_aurora_shipping",
+      "title": "Aurora Shipping company brief",
+      "text": "Aurora Shipping is a freight company headquartered in the port city of Sundari. The company specialises in temperature-controlled cargo and operates a fleet of refrigerated vessels for clients who move perishable or heat-sensitive goods."
+    },
+    {
+      "key": "S06_mv_cormorant",
+      "title": "MV Cormorant vessel record",
+      "text": "The MV Cormorant is a refrigerated cargo vessel operated by Aurora Shipping. Its refrigerated holds are used for heat-sensitive freight. The vessel is captained by Captain Riko Tan."
+    },
+    {
+      "key": "S07_cormorant_route",
+      "title": "Cormorant supply route",
+      "text": "The MV Cormorant runs a regular scheduled route. On that route it carries consignments of the Aurora-7 catalyst, loading them at Port Calderon and delivering them to the city of Sundari."
+    },
+    {
+      "key": "S08_novak_foundation",
+      "title": "The Novak Foundation",
+      "text": "The Novak Foundation is a private philanthropic body. Its grant-making has two separate strands: it funds scientific laboratories, and, quite separately, it runs a community art-grants programme for local galleries."
+    },
+    {
+      "key": "S09_calderon_city",
+      "title": "The city of Calderon",
+      "text": "Calderon is a coastal city. It is known for its deep-water port, which handles refrigerated freight, and for the research district on its eastern side where several laboratories are based."
+    },
+    {
+      "key": "S10_sundari_city",
+      "title": "The city of Sundari",
+      "text": "Sundari is an inland-delta trading city. It is a hub for freight companies and logistics operators, and much of its economy is built around warehousing and the movement of cargo."
+    },
+    {
+      "key": "S11_aurora_bakery",
+      "title": "Aurora Bakery",
+      "text": "Aurora Bakery is a family-run bakery in the small town of Fenwick. It has no connection to shipping or chemistry. The bakery is best known locally for its cardamom loaves and its long queues on market days."
+    },
+    {
+      "key": "S12_marcus_voss",
+      "title": "Dr. Marcus Voss profile",
+      "text": "Dr. Marcus Voss is a botanist based at Fenwick University. He studies alpine mosses and their tolerance of frost. He is not related to any chemistry programme and works entirely on plant biology."
+    },
+    {
+      "key": "S13_halcyon_resort",
+      "title": "Halcyon Beach Resort",
+      "text": "The Halcyon Beach Resort offers seaside villas in the resort town of Marlow. It is a holiday destination with no scientific or industrial function; guests visit for the beaches and the quiet."
+    },
+    {
+      "key": "S14_riko_tan_award",
+      "title": "Captain Riko Tan honoured",
+      "text": "Captain Riko Tan received the Mariner's Guild service award in 2034. The award recognised thirty continuous years of service at sea across a range of cargo vessels."
+    }
+  ]
+}
