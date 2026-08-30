@@ -45,6 +45,8 @@ from open_notebook.integrations.graphrag.models import (
     IndexState,
     IndexStatus,
     QueryMode,
+    RemoteDocument,
+    RemoteDocumentsPage,
     is_valid_record_id,
     normalize_index_state,
 )
@@ -350,23 +352,24 @@ class GraphRAGClient:
         logger.debug(f"GraphRAG delete doc_id={doc_id} -> {state.value}")
         return DeleteOutcome(doc_id=doc_id, state=state, detail=detail)
 
-    async def list_documents_page(
+    async def list_documents_detailed(
         self,
         *,
         page: int = 1,
         page_size: int = ABSENCE_PROBE_PAGE_SIZE,
         sort_field: str = "id",
         sort_direction: str = "asc",
-    ) -> DocumentsPage:
-        """List one page of the sidecar's documents (POST /documents/paginated).
+    ) -> RemoteDocumentsPage:
+        """List one page of documents WITH provenance (POST /documents/paginated).
 
-        Verified against v1.5.6: request is
-        ``{status_filters?, page>=1, page_size in [10,200], sort_field in
-        {created_at,updated_at,id,file_path}, sort_direction in {asc,desc}}`` and
-        the response carries ``documents[].id`` plus a ``pagination`` block with
-        ``total_count`` and ``total_pages``. Both are required; a response missing
-        either is a protocol error, not a silent empty page — a caller proving
-        ABSENCE must never mistake a malformed response for "no documents".
+        The GraphRAG-03D reconcile enumeration primitive. Same request/validation
+        as ``list_documents_page`` but it preserves ``file_path`` (the sidecar's
+        join key = our source_id) and ``status`` per document so reconcile can
+        prove ownership. ``documents``/``pagination`` are both required; a response
+        missing either is a protocol error, never a silent empty page. Non-dict
+        rows are dropped; a dict with no usable id yields ``doc_id == ""`` (kept, so
+        the caller's completeness check can still fail closed). ``content_summary``
+        and any other content-bearing field are deliberately NOT surfaced.
         """
         payload = await self._request(
             "POST",
@@ -390,20 +393,65 @@ class GraphRAGClient:
             raise GraphRAGProtocolError(
                 "GraphRAG pagination is missing total_count/total_pages"
             )
-        # Keep only ids we can actually read. A document dict with no usable id
-        # shortens doc_ids, which makes the completeness check below fail closed
-        # (UNKNOWN) rather than mistaking an unreadable page for a complete one.
-        doc_ids = tuple(
-            str(d["id"])
+        docs = tuple(
+            RemoteDocument(
+                # Strip so a blank/whitespace-only id is treated as unreadable ("")
+                # rather than a usable id — a caller proving completeness must not
+                # count an unusable id as a real document.
+                doc_id=str(d["id"]).strip() if d.get("id") else "",
+                file_path=(
+                    str(d["file_path"]).strip()
+                    if isinstance(d.get("file_path"), str) and d["file_path"].strip()
+                    else None
+                ),
+                status=str(d["status"]) if d.get("status") else None,
+            )
             for d in documents
-            if isinstance(d, dict) and d.get("id")
+            if isinstance(d, dict)
         )
-        return DocumentsPage(
-            doc_ids=doc_ids,
+        # A response that carried non-dict rows was only partially readable; flag it
+        # so a reconcile sweep treats the page as incomplete rather than complete.
+        malformed = len(docs) < len(documents)
+        return RemoteDocumentsPage(
+            documents=docs,
             page=page,
             page_size=page_size,
             total_count=total_count,
             total_pages=total_pages,
+            has_next=bool(pagination.get("has_next")),
+            malformed=malformed,
+        )
+
+    async def list_documents_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = ABSENCE_PROBE_PAGE_SIZE,
+        sort_field: str = "id",
+        sort_direction: str = "asc",
+    ) -> DocumentsPage:
+        """List one page of the sidecar's document ids (POST /documents/paginated).
+
+        The 03C absence-probe projection over ``list_documents_detailed``: it keeps
+        only ids we can actually read, so a document dict with no usable id shortens
+        ``doc_ids`` and makes the caller's completeness check fail closed (UNKNOWN)
+        rather than mistaking an unreadable page for a complete one. This projection
+        preserves the exact GraphRAG-03C contract ``confirm_document_absent`` relies
+        on (page_size ceiling, id sort, single-response snapshot).
+        """
+        detailed = await self.list_documents_detailed(
+            page=page,
+            page_size=page_size,
+            sort_field=sort_field,
+            sort_direction=sort_direction,
+        )
+        doc_ids = tuple(d.doc_id for d in detailed.documents if d.doc_id)
+        return DocumentsPage(
+            doc_ids=doc_ids,
+            page=detailed.page,
+            page_size=detailed.page_size,
+            total_count=detailed.total_count,
+            total_pages=detailed.total_pages,
         )
 
     async def confirm_document_absent(self, doc_id: str) -> AbsenceState:

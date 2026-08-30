@@ -1,7 +1,8 @@
-"""GraphRAG lifecycle commands (GraphRAG-03A INDEX/REINDEX, GraphRAG-03C DRAIN).
+"""GraphRAG lifecycle commands (03A INDEX/REINDEX, 03C DRAIN, 03D RECONCILE).
 
-Implements the indexing verb (03A) and the durable deletion drain (03C).
-RECONCILE and REBUILD are later slices (03D/03E) and are deliberately absent.
+Implements the indexing verb (03A), the durable deletion drain (03C), and the
+defense-in-depth reconcile (03D). REBUILD is a later slice (03E) and is
+deliberately absent.
 
 Design invariants (see docs/agribank/development/GRAPHRAG_03A_INDEXING.md):
 
@@ -41,6 +42,7 @@ from open_notebook.integrations.graphrag.models import (
     GraphRAGValidationError,
     record_id_for,
 )
+from open_notebook.integrations.graphrag.reconcile import reconcile
 from open_notebook.integrations.graphrag.service import GraphRAGService
 
 # Mirror the embedding commands' retry posture: retry transient sidecar/queue
@@ -297,5 +299,78 @@ async def graphrag_drain_deletions_command(
         superseded=summary.superseded,
         deferred=summary.deferred,
         permanent_local_error=summary.permanent_local_error,
+        processing_time=time.time() - start_time,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GraphRAG-03D: defense-in-depth reconcile (drift detection + safe repair)
+# ---------------------------------------------------------------------------
+
+
+class GraphRAGReconcileInput(CommandInput):
+    # AUDIT is the default (detect/classify only, no mutation). REPAIR must be
+    # explicitly requested: it arms durable deletion intents for owned orphans /
+    # should-be-absent docs (drained by 03C) and enqueues source_id-only 03A
+    # index repairs for authoritatively-missing live sources when indexing is ON.
+    # It NEVER deletes remotely itself and NEVER resolves a tombstone.
+    repair: bool = False
+
+
+class GraphRAGReconcileOutput(CommandOutput):
+    success: bool
+    mode: str
+    remote_scanned: int
+    owned_present_unverified: int
+    owned_orphan: int
+    owned_should_be_absent: int
+    foreign: int
+    unknown_ownership: int
+    deletion_intents_armed: int
+    deletion_intents_already_pending: int
+    canonical_scanned: int
+    present_confirmed: int
+    missing_confirmed: int
+    index_repairs_enqueued: int
+    incomplete_inventory: bool
+    errors: int
+    processing_time: float
+
+
+# No retry layer: reconcile is a bounded, re-runnable, idempotent sweep whose
+# repairs route through the EXISTING durable lifecycle (03C tombstones re-driven
+# by the wake-up loop; 03A index jobs with their own retry). A crashed reconcile
+# is simply re-run by an operator; there is nothing to re-drive in place, so
+# max_attempts=1 keeps the queue from retrying a partial sweep.
+@command("graphrag_reconcile", app="open_notebook", retry={"max_attempts": 1})
+async def graphrag_reconcile_command(
+    input_data: GraphRAGReconcileInput,
+) -> GraphRAGReconcileOutput:
+    """Run one bounded GraphRAG reconcile pass (AUDIT default; REPAIR opt-in).
+
+    Compares canonical Sources against sidecar documents, classifies drift, and in
+    REPAIR mode applies only safe repairs by reusing the 03B/03C deletion lifecycle
+    and the 03A index lifecycle. See open_notebook/integrations/graphrag/reconcile.py
+    for the classification/ownership contract and the forensic absence limitation.
+    """
+    start_time = time.time()
+    summary = await reconcile(repair=input_data.repair)
+    return GraphRAGReconcileOutput(
+        success=True,
+        mode=summary.mode,
+        remote_scanned=summary.remote_scanned,
+        owned_present_unverified=summary.owned_present_unverified,
+        owned_orphan=summary.owned_orphan,
+        owned_should_be_absent=summary.owned_should_be_absent,
+        foreign=summary.foreign,
+        unknown_ownership=summary.unknown_ownership,
+        deletion_intents_armed=summary.deletion_intents_armed,
+        deletion_intents_already_pending=summary.deletion_intents_already_pending,
+        canonical_scanned=summary.canonical_scanned,
+        present_confirmed=summary.present_confirmed,
+        missing_confirmed=summary.missing_confirmed,
+        index_repairs_enqueued=summary.index_repairs_enqueued,
+        incomplete_inventory=summary.incomplete_inventory,
+        errors=summary.errors,
         processing_time=time.time() - start_time,
     )

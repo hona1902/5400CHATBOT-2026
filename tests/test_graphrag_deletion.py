@@ -206,15 +206,15 @@ class TestDeletionHelperIsDbOnlyAndNoHttp:
         ):
             assert writer not in src, f"deletion helper must not use {writer}"
 
-    def test_drain_command_registered_but_not_reconcile_rebuild(self):
-        """GraphRAG-03C registers the deletion drain command. RECONCILE (03D) and
-        REBUILD (03E) are later slices and must not exist yet."""
+    def test_drain_and_reconcile_registered_but_not_rebuild(self):
+        """GraphRAG-03C registers the deletion drain and 03D the reconcile command.
+        REBUILD (03E) is a later slice and must not exist yet."""
         import commands
 
         registered = set(commands.__all__)
-        assert "graphrag_drain_deletions_command" in registered
-        assert "graphrag_reconcile_command" not in registered
-        assert "graphrag_rebuild_command" not in registered
+        assert "graphrag_drain_deletions_command" in registered  # 03C
+        assert "graphrag_reconcile_command" in registered  # 03D
+        assert "graphrag_rebuild_command" not in registered  # 03E, not yet
 
     def test_source_delete_hook_has_no_direct_lightrag_http(self):
         """Source.delete() may fire a BEST-EFFORT drain wake-up (03C, §27) — an

@@ -121,7 +121,7 @@ class TestImportAndStartupIndependence:
         justified before it lands."""
         approved = {
             "api/routers/graphrag.py",  # GraphRAG-02 diagnostic endpoint
-            "commands/graphrag_commands.py",  # 03A lifecycle + 03C drain command
+            "commands/graphrag_commands.py",  # 03A lifecycle + 03C drain + 03D reconcile
             "open_notebook/graphs/source.py",  # GraphRAG-03A fail-open enqueue seam
             "api/main.py",  # GraphRAG-03C lifespan drain wake-up
             "open_notebook/domain/notebook.py",  # 03C best-effort drain wake-up on delete
@@ -231,28 +231,34 @@ class TestNoExistingPathModified:
         assert "24.surrealql" in migrations and "24_down.surrealql" in migrations
         assert "25.surrealql" in migrations and "25_down.surrealql" in migrations
 
-    def test_only_index_command_registered_not_later_lifecycle_verbs(self):
-        """GraphRAG-03A registers ONLY the index/reindex command. DELETE
-        (durable/tombstone), RECONCILE, and REBUILD are later slices (03B-03E)
-        and must not exist yet — their premature appearance would mean scope
-        creep past what is approved."""
+    def test_only_approved_lifecycle_commands_registered(self):
+        """The registered GraphRAG command set matches the approved slices: 03A
+        index/reindex, 03C deletion drain, and 03D reconcile. REBUILD (03E) and any
+        standalone delete-source command must NOT exist yet — their premature
+        appearance would mean scope creep past what is approved. Deletion is a
+        DRAIN of durable tombstones, never a separate `graphrag_delete_source`
+        command."""
         import commands
 
         registered = set(commands.__all__)
-        assert "graphrag_index_source_command" in registered
+        assert "graphrag_index_source_command" in registered  # 03A
+        assert "graphrag_drain_deletions_command" in registered  # 03C
+        assert "graphrag_reconcile_command" in registered  # 03D
         forbidden_yet = {
             "graphrag_delete_source_command",
-            "graphrag_reconcile_command",
             "graphrag_rebuild_command",
         }
         assert forbidden_yet & registered == set(), (
-            f"later GraphRAG lifecycle verbs must not be registered in 03A: "
+            f"unapproved GraphRAG lifecycle verbs must not be registered: "
             f"{forbidden_yet & registered}"
         )
-        # No command declaration for those verbs anywhere in commands/.
+        # No command declaration for the not-yet-approved verbs anywhere in
+        # commands/. `graphrag_delete` is absent because deletion is the drain
+        # (`graphrag_drain_deletions`), not a standalone delete command; REBUILD is
+        # 03E. (`graphrag_reconcile` is now approved and deliberately allowed.)
         for path in (REPO_ROOT / "commands").glob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
-            for verb in ("graphrag_delete", "graphrag_reconcile", "graphrag_rebuild"):
+            for verb in ("graphrag_delete_source", "graphrag_rebuild"):
                 assert verb not in text, f"{path.name} must not define {verb} yet"
 
     def test_existing_search_endpoint_untouched(self):

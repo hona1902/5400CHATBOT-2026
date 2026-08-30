@@ -28,6 +28,18 @@ MAX_DRAIN_MAX_ROWS = 5000  # absolute ceiling: a bad env can't force an unbounde
 DEFAULT_DRAIN_RETRY_DELAY_SECONDS = 60  # per-row defer on non-convergence
 MIN_DRAIN_RETRY_DELAY_SECONDS = 5  # floor: positive, never zero-delay retry
 
+# GraphRAG-03D reconcile bounds. All clamped so a bad env value can never force an
+# unbounded remote/canonical scan, an oversized page, or an unbounded result.
+DEFAULT_RECONCILE_PAGE_SIZE = 200  # remote docs per /documents/paginated page
+MIN_RECONCILE_PAGE_SIZE = 10  # LightRAG paginated floor (page_size < 10 -> 422)
+MAX_RECONCILE_PAGE_SIZE = 200  # LightRAG paginated ceiling (page_size > 200 -> 422)
+DEFAULT_RECONCILE_CANONICAL_BATCH = 100  # canonical sources per keyset batch
+MAX_RECONCILE_CANONICAL_BATCH = 500
+DEFAULT_RECONCILE_MAX_RECORDS = 2000  # hard cap on records examined per phase per run
+MAX_RECONCILE_MAX_RECORDS = 50000  # absolute ceiling: a bad env can't force an unbounded scan
+DEFAULT_RECONCILE_MAX_SAMPLE_IDS = 20  # capped sample ids per class in the result
+MAX_RECONCILE_MAX_SAMPLE_IDS = 100
+
 # Pinned upstream revision this integration was written against. Recorded here
 # so a sidecar upgrade that changes the HTTP contract is a deliberate, visible
 # decision rather than a silent runtime surprise.
@@ -149,4 +161,58 @@ def load_drain_config() -> GraphRAGDrainConfig:
         batch_size=max(1, min(MAX_DRAIN_BATCH_SIZE, batch)),
         max_rows=max(1, min(MAX_DRAIN_MAX_ROWS, max_rows)),
         retry_delay_seconds=max(MIN_DRAIN_RETRY_DELAY_SECONDS, retry_delay),
+    )
+
+
+@dataclass(frozen=True)
+class GraphRAGReconcileConfig:
+    """Bounded knobs for the GraphRAG-03D reconcile sweep.
+
+    Separate from the per-request and drain configs: these bound a defense-in-depth
+    inventory pass. Every value is clamped on load so a misconfigured env var can
+    never force an oversized page, an unbounded remote/canonical scan, or an
+    unbounded result payload (task §20/§21).
+    """
+
+    remote_page_size: int  # docs per /documents/paginated page (MIN..MAX)
+    canonical_batch_size: int  # canonical sources per keyset batch (1..MAX)
+    max_records: int  # hard cap on records examined per phase per run (1..MAX)
+    max_sample_ids: int  # cap on sample ids per class in the result (1..MAX)
+
+
+def load_reconcile_config() -> GraphRAGReconcileConfig:
+    """Load and CLAMP the reconcile bounds from the environment."""
+    page_size = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_RECONCILE_PAGE_SIZE"),
+            float(DEFAULT_RECONCILE_PAGE_SIZE),
+        )
+    )
+    canonical_batch = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_RECONCILE_CANONICAL_BATCH"),
+            float(DEFAULT_RECONCILE_CANONICAL_BATCH),
+        )
+    )
+    max_records = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_RECONCILE_MAX_RECORDS"),
+            float(DEFAULT_RECONCILE_MAX_RECORDS),
+        )
+    )
+    max_sample = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_RECONCILE_MAX_SAMPLE_IDS"),
+            float(DEFAULT_RECONCILE_MAX_SAMPLE_IDS),
+        )
+    )
+    return GraphRAGReconcileConfig(
+        remote_page_size=max(
+            MIN_RECONCILE_PAGE_SIZE, min(MAX_RECONCILE_PAGE_SIZE, page_size)
+        ),
+        canonical_batch_size=max(
+            1, min(MAX_RECONCILE_CANONICAL_BATCH, canonical_batch)
+        ),
+        max_records=max(1, min(MAX_RECONCILE_MAX_RECORDS, max_records)),
+        max_sample_ids=max(1, min(MAX_RECONCILE_MAX_SAMPLE_IDS, max_sample)),
     )

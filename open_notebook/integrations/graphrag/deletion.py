@@ -203,6 +203,61 @@ async def resolve_current_tombstone_cas(
     return len(rows) == 1
 
 
+async def pending_deletion_exists(source_id: str) -> bool:
+    """True iff a pending tombstone already exists for ``source_id``.
+
+    Used by GraphRAG-03D reconcile to avoid needlessly re-arming a deletion intent
+    that is already pending (which would churn ``arm_id`` and could make an active
+    03C drain's CAS a no-op). Read-only.
+    """
+    sid = record_id_for(source_id, tables=_INDEXABLE_TABLES)
+    rows = await repo_query(
+        f"SELECT id FROM {DELETION_TABLE} "
+        f"WHERE source_id = $sid AND status = $status LIMIT 1",
+        {"sid": sid, "status": STATUS_PENDING},
+    )
+    return len(rows) > 0
+
+
+async def arm_orphan_deletion(source_id: str) -> bool:
+    """Arm a durable deletion tombstone for a RECONCILE-discovered source (03D).
+
+    GraphRAG-03B's migration event writes a tombstone only when a canonical Source
+    is DELETED. An orphan whose source is already gone (deleted before 03B shipped,
+    or via a path that left no tombstone), and an owned document whose source is
+    live-but-should-be-absent (empty text, or non-empty with indexing OFF), have no
+    such event to fire — so 03D arms the intent here and lets the EXISTING 03C drain
+    converge/resolve it. 03D is therefore NOT a second delete engine: it only writes
+    the same durable intent the event writes, then wakes 03C.
+
+    Returns True iff a NEW tombstone was armed, False if a suitable pending
+    tombstone already existed (no needless re-arm churn — task §24). The
+    check-then-UPSERT is best-effort anti-churn, NOT a lock: the UPSERT key is the
+    deterministic ``type::thing(DELETION_TABLE, $sid)`` (identical to the event's
+    ``type::thing(DELETION_TABLE, $before.id)``), so a concurrent reconcile or a
+    concurrent real delete collapses to ONE row regardless; the guard only avoids
+    regenerating ``arm_id`` when a pending intent is already in flight.
+
+    ``arm_id`` is DB-generated via ``rand::uuid()`` (server-side, never minted in
+    Python — task §23); ``requested_at``/``status``/``next_attempt_at`` mirror the
+    event so 03C drains an orphan-armed tombstone identically to an event-armed one.
+    The source RecordID is rebuilt losslessly (``record_id_for``), so numeric vs
+    string-numeric vs escaped identities bind the correct single tombstone. A
+    dangling ``source_id`` link (the source no longer exists) is allowed — SurrealDB
+    does not enforce ``record<source>`` as a foreign key.
+    """
+    sid = record_id_for(source_id, tables=_INDEXABLE_TABLES)
+    if await pending_deletion_exists(source_id):
+        return False
+    await repo_query(
+        f'UPSERT type::thing("{DELETION_TABLE}", $sid) SET '
+        f"source_id = $sid, requested_at = time::now(), status = $status, "
+        f"arm_id = rand::uuid(), next_attempt_at = time::now()",
+        {"sid": sid, "status": STATUS_PENDING},
+    )
+    return True
+
+
 async def defer_tombstone_cas(arm_id: str, delay_seconds: int) -> bool:
     """Push a non-converged tombstone's ``next_attempt_at`` into the future.
 

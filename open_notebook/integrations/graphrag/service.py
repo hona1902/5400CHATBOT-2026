@@ -28,6 +28,7 @@ from open_notebook.integrations.graphrag.models import (
     IndexAck,
     IndexStatus,
     QueryMode,
+    RemoteDocumentsPage,
     _validate_record_id,
 )
 
@@ -238,6 +239,21 @@ class GraphRAGService:
         doc_id = compute_doc_id(canonical)
         return await self._require_client_for_deletion().confirm_document_absent(
             doc_id
+        )
+
+    async def list_remote_documents_detailed(
+        self, *, page: int, page_size: int
+    ) -> RemoteDocumentsPage:
+        """Enumerate one page of sidecar documents for RECONCILE (GraphRAG-03D).
+
+        Gated on sidecar CONFIG only (base_url), NOT on the indexing flag: the
+        confidentiality half of reconciliation (orphan / should-be-absent
+        detection) must run even with indexing disabled, exactly like the deletion
+        drain (AGR-005 §9; ``_require_client_for_deletion``). Sorted by ``id`` asc
+        for a stable, testable, reproducible traversal order.
+        """
+        return await self._require_client_for_deletion().list_documents_detailed(
+            page=page, page_size=page_size, sort_field="id", sort_direction="asc"
         )
 
     async def track_status(self, track_id: str) -> IndexStatus:

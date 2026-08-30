@@ -386,6 +386,48 @@ class DocumentsPage:
 
 
 @dataclass(frozen=True)
+class RemoteDocument:
+    """One sidecar document as seen by RECONCILE (GraphRAG-03D).
+
+    ``doc_id`` is LightRAG's ``DocStatusResponse.id`` ("" when a row carried no
+    usable id — kept so completeness accounting can fail closed). ``file_path`` is
+    the sidecar's join key: for a document Open Notebook indexed it carries OUR
+    ``source_id`` (never a filesystem path); for a foreign document it may be
+    anything or absent. ``status`` is the upstream pipeline status string. No
+    document text/content is ever carried here (``content_summary`` is deliberately
+    NOT surfaced).
+    """
+
+    doc_id: str
+    file_path: Optional[str]
+    status: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RemoteDocumentsPage:
+    """One normalized page of the sidecar document listing, WITH provenance.
+
+    Richer sibling of ``DocumentsPage``: it keeps ``file_path``/``status`` per
+    document so RECONCILE can prove ownership, whereas the 03C absence probe only
+    needs ids. ``total_count``/``total_pages``/``has_next`` come from the response
+    ``pagination`` block; a single page proves it enumerated the whole set only
+    when ``total_pages <= 1`` and the id count matches ``total_count`` (same proof
+    ``confirm_document_absent`` uses).
+    """
+
+    documents: tuple["RemoteDocument", ...]
+    page: int
+    page_size: int
+    total_count: int
+    total_pages: int
+    has_next: bool
+    #: True when the raw response contained non-dict document rows that had to be
+    #: dropped. A reconcile sweep treats this as an incomplete/imperfect page (it
+    #: could not fully read the inventory) rather than silently under-reporting.
+    malformed: bool = False
+
+
+@dataclass(frozen=True)
 class IndexAck:
     """Acknowledgement that a document was accepted for indexing.
 
