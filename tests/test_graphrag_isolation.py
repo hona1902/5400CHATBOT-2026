@@ -233,33 +233,35 @@ class TestNoExistingPathModified:
 
     def test_only_approved_lifecycle_commands_registered(self):
         """The registered GraphRAG command set matches the approved slices: 03A
-        index/reindex, 03C deletion drain, and 03D reconcile. REBUILD (03E) and any
-        standalone delete-source command must NOT exist yet — their premature
-        appearance would mean scope creep past what is approved. Deletion is a
-        DRAIN of durable tombstones, never a separate `graphrag_delete_source`
-        command."""
+        index/reindex, 03C deletion drain, 03D reconcile, and 03E rebuild. Any
+        standalone delete-source command must NOT exist — its appearance would mean
+        scope creep past what is approved. Deletion is a DRAIN of durable tombstones,
+        never a separate `graphrag_delete_source` command."""
         import commands
 
         registered = set(commands.__all__)
         assert "graphrag_index_source_command" in registered  # 03A
         assert "graphrag_drain_deletions_command" in registered  # 03C
         assert "graphrag_reconcile_command" in registered  # 03D
-        forbidden_yet = {
+        assert "graphrag_rebuild_command" in registered  # 03E (approved)
+        forbidden = {
+            # Deletion is the durable tombstone DRAIN, never a standalone delete
+            # command that could bypass the retention/confirmation lifecycle.
             "graphrag_delete_source_command",
-            "graphrag_rebuild_command",
         }
-        assert forbidden_yet & registered == set(), (
+        assert forbidden & registered == set(), (
             f"unapproved GraphRAG lifecycle verbs must not be registered: "
-            f"{forbidden_yet & registered}"
+            f"{forbidden & registered}"
         )
-        # No command declaration for the not-yet-approved verbs anywhere in
-        # commands/. `graphrag_delete` is absent because deletion is the drain
-        # (`graphrag_drain_deletions`), not a standalone delete command; REBUILD is
-        # 03E. (`graphrag_reconcile` is now approved and deliberately allowed.)
+        # No standalone delete-source command declaration anywhere in commands/:
+        # `graphrag_delete` is absent because deletion is the drain
+        # (`graphrag_drain_deletions`), not a separate delete command. (03E
+        # `graphrag_rebuild` is now approved and deliberately allowed.)
         for path in (REPO_ROOT / "commands").glob("*.py"):
             text = path.read_text(encoding="utf-8").lower()
-            for verb in ("graphrag_delete_source", "graphrag_rebuild"):
-                assert verb not in text, f"{path.name} must not define {verb} yet"
+            assert "graphrag_delete_source" not in text, (
+                f"{path.name} must not define a standalone graphrag_delete_source command"
+            )
 
     def test_existing_search_endpoint_untouched(self):
         """The production search route keeps its own contract.

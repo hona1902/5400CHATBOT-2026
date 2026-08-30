@@ -40,6 +40,17 @@ MAX_RECONCILE_MAX_RECORDS = 50000  # absolute ceiling: a bad env can't force an 
 DEFAULT_RECONCILE_MAX_SAMPLE_IDS = 20  # capped sample ids per class in the result
 MAX_RECONCILE_MAX_SAMPLE_IDS = 100
 
+# GraphRAG-03E rebuild bounds. All clamped so a bad env value can never force an
+# unbounded canonical scan, an oversized batch, or an unbounded result payload.
+# max_sources_per_run is the fairness cap: hitting it yields a continuation cursor
+# rather than silently dropping later sources (task §14/§23).
+DEFAULT_REBUILD_CANONICAL_BATCH = 100  # canonical sources per keyset batch
+MAX_REBUILD_CANONICAL_BATCH = 500
+DEFAULT_REBUILD_MAX_SOURCES = 1000  # hard cap on sources dispatched per run
+MAX_REBUILD_MAX_SOURCES = 50000  # absolute ceiling: a bad env can't force an unbounded sweep
+DEFAULT_REBUILD_MAX_SAMPLE_IDS = 20  # capped sample ids per class in the result
+MAX_REBUILD_MAX_SAMPLE_IDS = 100
+
 # Pinned upstream revision this integration was written against. Recorded here
 # so a sidecar upgrade that changes the HTTP contract is a deliberate, visible
 # decision rather than a silent runtime surprise.
@@ -215,4 +226,63 @@ def load_reconcile_config() -> GraphRAGReconcileConfig:
         ),
         max_records=max(1, min(MAX_RECONCILE_MAX_RECORDS, max_records)),
         max_sample_ids=max(1, min(MAX_RECONCILE_MAX_SAMPLE_IDS, max_sample)),
+    )
+
+
+@dataclass(frozen=True)
+class GraphRAGRebuildConfig:
+    """Bounded knobs for the GraphRAG-03E canonical rebuild sweep.
+
+    Separate from the per-request, drain, and reconcile configs: these bound an
+    operator-triggered canonical fan-out. Every value is clamped on load so a
+    misconfigured env var can never force an oversized batch, an unbounded
+    canonical scan, or an unbounded result payload (task §14/§21/§24).
+
+    ``execute_enabled`` is a DEDICATED, default-OFF mechanism lock for EXECUTE
+    dispatch — SEPARATE from ``OPEN_NOTEBOOK_GRAPHRAG_ENABLED`` (which turns on
+    ordinary per-source 03A indexing). A canonical REBUILD re-sends the whole
+    corpus's text across Boundary B (sidecar → LLM), so merely enabling GraphRAG
+    for ingestion must NOT also unlock a corpus-wide rebuild. This lock does NOT
+    approve Boundary B for real internal data — that remains a separate governance
+    decision, and running EXECUTE against real Sources stays prohibited; the lock
+    only prevents an *accidental* corpus-wide dispatch and keeps EXECUTE an
+    explicit, deliberate operator action.
+    """
+
+    canonical_batch_size: int  # canonical sources per keyset batch (1..MAX)
+    max_sources_per_run: int  # hard cap on sources dispatched per run (1..MAX)
+    max_sample_ids: int  # cap on sample ids per class in the result (1..MAX)
+    execute_enabled: bool  # dedicated default-OFF lock for EXECUTE dispatch
+
+
+def load_rebuild_config() -> GraphRAGRebuildConfig:
+    """Load and CLAMP the rebuild bounds from the environment."""
+    canonical_batch = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_REBUILD_CANONICAL_BATCH"),
+            float(DEFAULT_REBUILD_CANONICAL_BATCH),
+        )
+    )
+    max_sources = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_REBUILD_MAX_SOURCES"),
+            float(DEFAULT_REBUILD_MAX_SOURCES),
+        )
+    )
+    max_sample = int(
+        _parse_positive(
+            _env("OPEN_NOTEBOOK_GRAPHRAG_REBUILD_MAX_SAMPLE_IDS"),
+            float(DEFAULT_REBUILD_MAX_SAMPLE_IDS),
+        )
+    )
+    return GraphRAGRebuildConfig(
+        canonical_batch_size=max(
+            1, min(MAX_REBUILD_CANONICAL_BATCH, canonical_batch)
+        ),
+        max_sources_per_run=max(1, min(MAX_REBUILD_MAX_SOURCES, max_sources)),
+        max_sample_ids=max(1, min(MAX_REBUILD_MAX_SAMPLE_IDS, max_sample)),
+        # Default OFF: EXECUTE dispatch is locked until an operator deliberately
+        # sets this. Only the explicit truthy tokens unlock it.
+        execute_enabled=_env("OPEN_NOTEBOOK_GRAPHRAG_REBUILD_EXECUTE_ENABLED").lower()
+        in {"1", "true", "yes"},
     )

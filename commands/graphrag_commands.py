@@ -1,8 +1,8 @@
-"""GraphRAG lifecycle commands (03A INDEX/REINDEX, 03C DRAIN, 03D RECONCILE).
+"""GraphRAG lifecycle commands (03A INDEX/REINDEX, 03C DRAIN, 03D RECONCILE, 03E REBUILD).
 
-Implements the indexing verb (03A), the durable deletion drain (03C), and the
-defense-in-depth reconcile (03D). REBUILD is a later slice (03E) and is
-deliberately absent.
+Implements the indexing verb (03A), the durable deletion drain (03C), the
+defense-in-depth reconcile (03D), and the operator-triggered canonical rebuild
+dispatcher (03E).
 
 Design invariants (see docs/agribank/development/GRAPHRAG_03A_INDEXING.md):
 
@@ -42,6 +42,7 @@ from open_notebook.integrations.graphrag.models import (
     GraphRAGValidationError,
     record_id_for,
 )
+from open_notebook.integrations.graphrag.rebuild import rebuild
 from open_notebook.integrations.graphrag.reconcile import reconcile
 from open_notebook.integrations.graphrag.service import GraphRAGService
 
@@ -371,6 +372,100 @@ async def graphrag_reconcile_command(
         missing_confirmed=summary.missing_confirmed,
         index_repairs_enqueued=summary.index_repairs_enqueued,
         incomplete_inventory=summary.incomplete_inventory,
+        errors=summary.errors,
+        processing_time=time.time() - start_time,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GraphRAG-03E: operator-triggered canonical REBUILD dispatcher
+# ---------------------------------------------------------------------------
+
+
+class GraphRAGRebuildInput(CommandInput):
+    # PLAN is the default (read-only enumerate/classify/count; no egress). EXECUTE
+    # must be explicitly requested: it re-drives source_id-only 03A index jobs over
+    # CURRENT non-empty sources. `cursor` continues a capped sweep (a canonical
+    # source RecordID string returned as `next_cursor`); it carries NO content.
+    #
+    # REBUILD is a Boundary-B-scale egress event (indexing forwards text to an LLM),
+    # so EXECUTE is operator-triggered ONLY — never auto/startup/scheduled — and is
+    # synthetic-only until Boundary B is approved for real internal data.
+    mode: str = "plan"
+    cursor: Optional[str] = None
+
+
+class GraphRAGRebuildOutput(CommandOutput):
+    success: bool
+    mode: str
+    # Honest completion headline: REBUILD_DISPATCH_COMPLETE means only that the
+    # sources discovered in THIS sweep/continuation were fully dispatched (no
+    # continuation, no enqueue failure). It never means every enqueued 03A job
+    # completed (INDEX_COMMAND_COMPLETION) or that remote content was verified
+    # (REMOTE_CONTENT_CONVERGENCE_VERIFIED — impossible on LightRAG v1.5.6).
+    completion: str
+    execute_allowed: bool
+    execute_not_allowed: bool
+    canonical_scanned: int
+    eligible_nonempty: int
+    empty: int
+    vanished: int
+    planned: int
+    enqueued: int
+    enqueue_failures: int
+    continuation_required: bool
+    next_cursor: Optional[str] = None
+    dispatch_complete: bool
+    skipped_disabled: bool
+    skipped_not_configured: bool
+    preflight_unhealthy: bool
+    invalid_cursor: bool
+    errors: int
+    processing_time: float
+
+
+# No retry layer: rebuild is a bounded, re-runnable, idempotent dispatcher whose work
+# routes through the EXISTING 03A index lifecycle (each enqueued job has its own retry
+# and reloads CURRENT source). A crashed rebuild is simply re-run by an operator — from
+# the beginning (03A is idempotent/convergent, duplicate enqueues are safe) or resumed
+# from the returned continuation cursor. There is nothing to re-drive in place, so
+# max_attempts=1 keeps the queue from retrying a partial sweep.
+@command("graphrag_rebuild", app="open_notebook", retry={"max_attempts": 1})
+async def graphrag_rebuild_command(
+    input_data: GraphRAGRebuildInput,
+) -> GraphRAGRebuildOutput:
+    """Run one bounded GraphRAG rebuild pass (PLAN default; EXECUTE opt-in).
+
+    PLAN enumerates CURRENT canonical sources and counts dispatch candidates without
+    any remote call or mutation. EXECUTE preflights (flag + config + content-free
+    health) then enqueues source_id-only 03A index jobs for CURRENT non-empty
+    sources; the worker reloads each CURRENT source at execution. Empty sources are
+    reported, never rebuilt (cleanup stays with 03D/03C). See
+    open_notebook/integrations/graphrag/rebuild.py for the completion/continuation
+    contract and the Boundary-B constraints.
+    """
+    start_time = time.time()
+    summary = await rebuild(mode=input_data.mode, cursor=input_data.cursor)
+    return GraphRAGRebuildOutput(
+        success=True,
+        mode=summary.mode,
+        completion=summary.completion,
+        execute_allowed=summary.execute_allowed,
+        execute_not_allowed=summary.execute_not_allowed,
+        canonical_scanned=summary.canonical_scanned,
+        eligible_nonempty=summary.eligible_nonempty,
+        empty=summary.empty,
+        vanished=summary.vanished,
+        planned=summary.planned,
+        enqueued=summary.enqueued,
+        enqueue_failures=summary.enqueue_failures,
+        continuation_required=summary.continuation_required,
+        next_cursor=summary.next_cursor,
+        dispatch_complete=summary.dispatch_complete,
+        skipped_disabled=summary.skipped_disabled,
+        skipped_not_configured=summary.skipped_not_configured,
+        preflight_unhealthy=summary.preflight_unhealthy,
+        invalid_cursor=summary.invalid_cursor,
         errors=summary.errors,
         processing_time=time.time() - start_time,
     )
