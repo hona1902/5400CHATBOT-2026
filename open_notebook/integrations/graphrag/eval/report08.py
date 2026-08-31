@@ -282,16 +282,14 @@ class ReportInputs:
     ks: Sequence[int] = DEFAULT_K_BUDGETS
 
 
-def summarize(inputs: ReportInputs) -> Dict[str, object]:
-    evals = inputs.evaluations
-    cs = inputs.corpus_size
-    ks = inputs.ks
+def _metrics_block(
+    evals: Sequence[QueryEvaluation08], cs: int, ks: Sequence[int]
+) -> Dict[str, object]:
+    """Full metric block for a set of queries (all / a split / a class)."""
     return {
-        "k_budgets": list(ks),
         "n_queries": len(evals),
         "n_answerable": sum(1 for e in evals if e.answerable),
         "n_negative": sum(1 for e in evals if not e.answerable),
-        "candidate_fraction_denominator": cs,
         VECTOR_SYSTEM: _vector_block(evals, ks),
         GQ_SYSTEM: _graph_block(evals, GQ_SYSTEM, cs),
         GD_SYSTEM: {
@@ -308,6 +306,30 @@ def summarize(inputs: ReportInputs) -> Dict[str, object]:
         },
         "gq_gd_parity": _parity_block(evals),
         "latency": _latency_block(evals),
+    }
+
+
+def summarize(inputs: ReportInputs) -> Dict[str, object]:
+    evals = inputs.evaluations
+    cs = inputs.corpus_size
+    ks = inputs.ks
+    splits = sorted({e.split for e in evals})
+    classes = sorted({e.query_class for e in evals})
+    return {
+        "k_budgets": list(ks),
+        "candidate_fraction_denominator": cs,
+        # HOLDOUT is authoritative for value conclusions (task §41); DEV is
+        # execution-correctness only. Both are reported; the value decision reads
+        # by_split["holdout"].
+        "overall": _metrics_block(evals, cs, ks),
+        "by_split": {
+            s: _metrics_block([e for e in evals if e.split == s], cs, ks)
+            for s in splits
+        },
+        "by_class": {
+            c: _metrics_block([e for e in evals if e.query_class == c], cs, ks)
+            for c in classes
+        },
     }
 
 

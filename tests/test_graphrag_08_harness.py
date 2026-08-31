@@ -207,13 +207,16 @@ def test_report_artifact_is_content_free_and_structured():
 
     summary = artifact["summary"]
     assert summary["candidate_fraction_denominator"] == 8
-    assert r.VECTOR_SYSTEM in summary and r.GQ_SYSTEM in summary and r.GD_SYSTEM in summary
-    assert "gq_gd_parity" in summary and "complementarity" in summary
+    overall = summary["overall"]
+    assert r.VECTOR_SYSTEM in overall and r.GQ_SYSTEM in overall and r.GD_SYSTEM in overall
+    assert "gq_gd_parity" in overall and "complementarity" in overall
+    # by_split / by_class breakdowns present (HOLDOUT authoritative for value).
+    assert "by_split" in summary and "by_class" in summary
     # Vector recovered the full two-source set at k>=2.
-    assert summary[r.VECTOR_SYSTEM]["full_set_recovered@3"] == 1.0
+    assert overall[r.VECTOR_SYSTEM]["full_set_recovered@3"] == 1.0
     # GD final-answer invariant surfaced (holds = every GD call had it False).
     assert (
-        summary[r.GD_SYSTEM]["gd_diagnostics"][
+        overall[r.GD_SYSTEM]["gd_diagnostics"][
             "final_answer_generation_invariant_holds"
         ]
         is True
@@ -233,7 +236,7 @@ def test_parity_counts_gq_vs_gd():
         _mk_eval("Q2", "two_hop", True, ["A", "B"], ["A", "B"], ["A"], ["A", "B"]),
     ]
     summary = r.summarize(r.ReportInputs(evals, corpus_size=8))
-    parity = summary["gq_gd_parity"]
+    parity = summary["overall"]["gq_gd_parity"]
     assert parity["paired_count"] == 2
     assert parity["gq_eq_gd_count"] == 1  # Q1 sets equal; Q2 differs (gq={A}, gd={A,B})
     assert parity["gd_only_total"] == 1  # Q2: B present in gd, absent in gq

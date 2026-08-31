@@ -61,6 +61,11 @@ class PrecheckState:
     fixture_hash_before: str = ""
     fixture_hash_after: str = ""
     failures: List[str] = field(default_factory=list)
+    #: GraphRAG-08B content-free telemetry (survives a pre-ANALYZE abort).
+    run_validity: str = "UNKNOWN"
+    graphrag_indexed_count: Optional[int] = None
+    retry_accounting: Optional[dict] = None
+    failed_logical_ids: List[Optional[str]] = field(default_factory=list)
 
 
 # ---- sidecar helpers -------------------------------------------------------
@@ -259,6 +264,7 @@ async def run_micro_precheck(
                     index_ready_timeout_s=600.0, poll_interval_s=5.0
                 ),
                 combined_sha256=st.fixture_hash_before,
+                graphrag_config=load_config(),
             )
             try:
                 st.state = "FULL_INDEX"
@@ -287,7 +293,9 @@ async def run_micro_precheck(
                 )
             # exiting the context drops the temp namespace (removes sources+model)
     except Exception as exc:  # noqa: BLE001
-        st.failures.append(f"{st.state}: {type(exc).__name__}: {exc}")
+        # Type name only — never str(exc), which could carry provider/LightRAG text
+        # into the failure record (GraphRAG-08B raw-containment; review LOW-1).
+        st.failures.append(f"{st.state}: {type(exc).__name__}")
     finally:
         # ---- stop sidecar + restore graph flag (§49/§50) --------------------
         try:
@@ -312,6 +320,210 @@ async def run_micro_precheck(
     return st
 
 
+async def run_full_benchmark(
+    *, artifact_dir: Optional[Path] = None
+) -> PrecheckState:
+    """AUTHORIZED full frozen 75-Source / 60-query value benchmark (one run).
+
+    Same isolated, owned, content-free machinery as the micro-precheck, but over
+    ALL 75 Sources and ALL 60 queries (DEV + HOLDOUT). candidate_fraction uses the
+    full 75-Source denominator. Value interpretation is done from the artifact
+    (HOLDOUT authoritative); this function only executes + cleans up.
+    """
+    from open_notebook.integrations.graphrag.config import load_config
+    from open_notebook.integrations.graphrag.eval import dataset08 as d
+    from open_notebook.integrations.graphrag.eval import report08 as r
+    from open_notebook.integrations.graphrag.eval.gd_seam import GDQueryClient
+    from open_notebook.integrations.graphrag.eval.isolation08 import (
+        isolated_surreal_eval_runtime,
+        normal_identity,
+    )
+    from open_notebook.integrations.graphrag.eval.runner08 import (
+        EvalRunConfig08,
+        GraphRAG08EvalRunner,
+    )
+    from open_notebook.integrations.graphrag.service import GraphRAGService
+
+    st = PrecheckState()
+    ok, h = d.verify_integrity()
+    st.fixture_hash_before = h if ok else "MISMATCH"
+    if not ok or h != "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d":
+        st.failures.append("fixture integrity mismatch before full run")
+        st.state = "PREFLIGHT_FAIL"
+        return st
+
+    bench = d.load_benchmark08()
+    d.validate_frozen_shape(bench)
+    sk = tuple(s.key for s in bench.sources)          # all 75
+    qids = tuple(q.query_id for q in bench.queries)   # all 60 (DEV + HOLDOUT)
+    st.selected_source_keys = sk
+    st.selected_query_ids = qids
+
+    st.normal_namespace, st.normal_database = normal_identity()
+    st.normal_source_count_before = await _normal_source_count()
+
+    import os
+
+    prior_graph_flag = os.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED")
+    evaluations = None
+    try:
+        os.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] = "true"
+        st.state = "SIDECAR_START"
+        start_sidecar()
+        st.sidecar_started = True
+        health = await await_sidecar_health(load_config())
+        logger.info(f"[gr08-full] sidecar healthy version={health.get('version')}")
+
+        st.state = "ISOLATION_CREATE"
+        async with isolated_surreal_eval_runtime() as ctx:
+            st.run_id = ctx.run_id
+            st.temp_namespace = ctx.namespace
+            st.temp_database = ctx.database
+            st.state = "MODEL_SEED"
+            st.temp_model_id, st.prior_default_embedding = await seed_temp_embedding_model()
+            st.embedding_dimension_observed = await _embedding_dim_probe()
+            if st.embedding_dimension_observed != _EXPECTED_EMBED_DIM:
+                raise RuntimeError(
+                    f"embedding dim {st.embedding_dimension_observed} != {_EXPECTED_EMBED_DIM}"
+                )
+
+            service = GraphRAGService(load_config())
+            gd_client = GDQueryClient(load_config())
+            runner = GraphRAG08EvalRunner(
+                bench,
+                service=service,
+                gd_client=gd_client,
+                selected_source_keys=sk,
+                selected_query_ids=qids,
+                allow_holdout=True,  # AUTHORIZED full run executes HOLDOUT
+                config=EvalRunConfig08(
+                    run_type="FULL_BENCHMARK",
+                    index_ready_timeout_s=1800.0,
+                    poll_interval_s=5.0,
+                ),
+                combined_sha256=st.fixture_hash_before,
+                graphrag_config=load_config(),
+            )
+            out_dir = artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
+            try:
+                st.state = "FULL_INDEX"
+                await runner.create_and_index()
+                st.created_ids = list(runner.created_ids)
+                _capture_index_telemetry(st, runner)
+                st.state = "FULL_QUERY"
+                evaluations = await runner.run()
+                metadata = {
+                    **runner.build_metadata(),
+                    "run_type": "FULL_BENCHMARK",
+                    "full_run_authorization": "REAUTHORIZATION_2",
+                    "value_run": True,
+                    "holdout_used": True,
+                    "full_benchmark_executed": True,
+                    "benchmark_corpus_size": len(bench.sources),
+                }
+                st.state = "ANALYZE"
+                artifact = r.build_artifact(
+                    metadata, evaluations, corpus_size=runner.corpus_size
+                )
+                r.write_artifact(out_dir / "benchmark.json", artifact)
+                _write_manifest(out_dir / "manifest.json", st, runner)
+            except Exception:
+                # GraphRAG-08B: preserve content-free failure telemetry BEFORE
+                # destructive cleanup, so a failed-before-query run is diagnosable.
+                st.created_ids = list(runner.created_ids)
+                _capture_index_telemetry(st, runner)
+                st.run_validity = "FAILED"
+                try:
+                    _write_failure_telemetry(out_dir, st, runner)
+                except Exception as exc:  # noqa: BLE001 - never block cleanup
+                    st.failures.append(f"failure telemetry write: {type(exc).__name__}")
+                raise
+            finally:
+                st.state = "CLEANUP"
+                try:
+                    cr = await runner.cleanup()
+                    st.lightrag_cleanup_ok = cr.clean and not cr.errors
+                except Exception as exc:  # noqa: BLE001
+                    st.failures.append(f"runner cleanup: {type(exc).__name__}")
+                st.temp_model_cleanup_ok = await restore_default_and_delete_model(
+                    st.temp_model_id or "", st.prior_default_embedding
+                )
+    except Exception as exc:  # noqa: BLE001
+        # Type name only — never str(exc), which could carry provider/LightRAG text
+        # into the failure record (GraphRAG-08B raw-containment; review LOW-1).
+        st.failures.append(f"{st.state}: {type(exc).__name__}")
+    finally:
+        try:
+            stop_sidecar()
+        except Exception as exc:  # noqa: BLE001
+            st.failures.append(f"sidecar stop: {type(exc).__name__}")
+        st.sidecar_stopped = not sidecar_running()
+        if prior_graph_flag is None:
+            os.environ.pop("OPEN_NOTEBOOK_GRAPHRAG_ENABLED", None)
+        else:
+            os.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] = prior_graph_flag
+
+    st.normal_source_count_after = await _normal_source_count()
+    ok2, h2 = d.verify_integrity()
+    st.fixture_hash_after = h2 if ok2 else "MISMATCH"
+    complete = not st.failures and evaluations is not None
+    st.state = "COMPLETE" if complete else "FAILED"
+    st.run_validity = (
+        "COMPLETE_VALID"
+        if complete and st.fixture_hash_after == st.fixture_hash_before
+        else "FAILED"
+    )
+    return st
+
+
+def _atomic_write_json(path: Path, obj: dict) -> None:
+    """Crash-safe JSON write: temp file then atomic replace (task §13)."""
+    import os
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(obj, fh, indent=2, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        # Never leave a stray partial temp file behind (review LOW-2).
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _capture_index_telemetry(st: PrecheckState, runner) -> None:
+    """Copy the runner's content-free indexing telemetry into the state.
+
+    Called on BOTH the success and the failure path, so a run that aborts during
+    FULL_INDEX still preserves retry accounting + failure diagnostics (task §10)."""
+    tel = runner.index_telemetry()
+    st.graphrag_indexed_count = tel.get("graphrag_indexed_count")
+    st.retry_accounting = tel.get("retry_accounting")
+    st.failed_logical_ids = list(tel.get("failed_logical_ids") or [])
+
+
+def _write_failure_telemetry(out_dir: Path, st: PrecheckState, runner) -> None:
+    """Persist a content-free failure telemetry artifact BEFORE cleanup (task §10/§12)."""
+    tel = runner.index_telemetry()
+    artifact = {
+        "run_type": "FULL_VALUE_BENCHMARK",
+        "full_run_authorization": "REAUTHORIZATION_2",
+        "benchmark_version": "graphrag_08_eval_v1",
+        "run_id": st.run_id,
+        "run_validity": "FAILED",
+        "value_decision_made": False,
+        "dev_executed": 0,
+        "holdout_executed": 0,
+        "fixture_hash": st.fixture_hash_before,
+        "temp_namespace": st.temp_namespace,
+        "index_telemetry": tel,
+    }
+    _atomic_write_json(out_dir / "failure_telemetry.json", artifact)
+
+
 def _write_manifest(path: Path, st: PrecheckState, runner) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -334,4 +546,4 @@ def _write_manifest(path: Path, st: PrecheckState, runner) -> None:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
 
-__all__ = ["run_micro_precheck", "PrecheckState"]
+__all__ = ["run_micro_precheck", "run_full_benchmark", "PrecheckState"]

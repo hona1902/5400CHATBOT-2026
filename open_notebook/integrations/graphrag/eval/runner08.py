@@ -77,6 +77,8 @@ class EvalRunConfig08:
     index_ready_timeout_s: float = 240.0
     poll_interval_s: float = 3.0
     run_type: str = "MICRO_PRECHECK"
+    #: 1 initial attempt + at most 1 bounded transient retry per Source (task §2).
+    max_index_attempts_per_source: int = 2
 
 
 @dataclass(frozen=True)
@@ -227,11 +229,16 @@ class GraphRAG08EvalRunner:
         selected_query_ids: Tuple[str, ...],
         config: Optional[EvalRunConfig08] = None,
         combined_sha256: Optional[str] = None,
+        allow_holdout: bool = False,
+        graphrag_config: object = None,
     ) -> None:
         self.benchmark = benchmark
         self.service = service
         self.gd_client = gd_client
         self.config = config or EvalRunConfig08()
+        # Eval-only GraphRAGConfig used ONLY to read a FAILED doc's error text for
+        # transient-vs-non-retryable classification (task §4). None -> fail closed.
+        self.graphrag_config = graphrag_config
         self.combined_sha256 = combined_sha256
         self.run_id = f"gr08-{uuid.uuid4().hex[:12]}"
         self.state = "PLANNED"
@@ -246,20 +253,79 @@ class GraphRAG08EvalRunner:
             q for q in benchmark.queries if q.query_id in qid_set
         )
         # DEV-only guard: the micro-precheck must never touch HOLDOUT (task §14/§84).
-        holdout = [q for q in self.selected_queries if q.split is Split.HOLDOUT]
-        if holdout:
-            raise EvalIsolationError(
-                f"micro-precheck selected {len(holdout)} HOLDOUT query(ies); "
-                "the precheck is DEV-only"
-            )
+        # The authorized FULL value run sets allow_holdout=True to execute HOLDOUT;
+        # it stays False everywhere else, so the precheck can never touch HOLDOUT.
+        if not allow_holdout:
+            holdout = [q for q in self.selected_queries if q.split is Split.HOLDOUT]
+            if holdout:
+                raise EvalIsolationError(
+                    f"micro-precheck selected {len(holdout)} HOLDOUT query(ies); "
+                    "the precheck is DEV-only"
+                )
         self.key_to_source_id: Dict[str, str] = {}
         self.created_ids: List[str] = []
         self.track_ids: Dict[str, str] = {}
+        #: Sources proven to have reached IndexState.PROCESSED (the 100%-gate signal).
+        self.processed_ids: set[str] = set()
+        #: Per-Source index attempt count (telemetry only; ≤ max_index_attempts).
+        self.index_attempts: Dict[str, int] = {}
+        #: Content-free per-failure diagnostics (GraphRAG-08B; never raw text).
+        self.index_diagnostics: List[Dict[str, object]] = []
+        #: Canonical ids whose indexing ultimately failed (aborting the run).
+        self.failed_source_ids: List[str] = []
 
     @property
     def corpus_size(self) -> int:
         """Denominator for candidate_fraction = the run's created Sources (task §35)."""
         return len(self.created_ids)
+
+    def _logical_id(self, canonical: str) -> Optional[str]:
+        for key, cid in self.key_to_source_id.items():
+            if cid == canonical:
+                return key
+        return None
+
+    def retry_accounting(self) -> Dict[str, int]:
+        """Content-free per-Source index-attempt summary (execution reliability only).
+
+        Valid on BOTH a completed run and an aborted-before-query run (GraphRAG-08B):
+        it reads only counters populated during indexing, so it survives a pre-ANALYZE
+        abort."""
+        att = self.index_attempts
+        cap = self.config.max_index_attempts_per_source
+        failed = set(self.failed_source_ids)
+        first = sum(1 for c, n in att.items() if n == 1 and c in self.processed_ids)
+        retried = sum(1 for n in att.values() if n >= 2)
+        retry_succeeded = sum(
+            1 for c, n in att.items() if n >= 2 and c in self.processed_ids
+        )
+        retry_exhausted = sum(1 for c in failed if att.get(c, 0) >= cap)
+        non_retryable = sum(1 for c in failed if att.get(c, 0) < cap)
+        return {
+            "sources_indexed_first_attempt": first,
+            "sources_retried": retried,
+            "retry_succeeded": retry_succeeded,
+            "retry_exhausted": retry_exhausted,
+            "non_retryable_failures": non_retryable,
+            "max_attempts_observed": max(att.values()) if att else 0,
+        }
+
+    def index_telemetry(self) -> Dict[str, object]:
+        """Content-free indexing telemetry (survives a pre-ANALYZE abort; task §10/§11)."""
+        return {
+            "run_id": self.run_id,
+            "selected_source_count": len(self.selected_sources),
+            "created_source_count": len(self.created_ids),
+            "graphrag_indexed_count": len(self.processed_ids),
+            "max_index_attempts_per_source": self.config.max_index_attempts_per_source,
+            "retry_accounting": self.retry_accounting(),
+            "failed_canonical_ids": list(self.failed_source_ids),
+            "failed_logical_ids": [self._logical_id(c) for c in self.failed_source_ids],
+            "per_source_attempts": {
+                (self._logical_id(c) or c): n for c, n in self.index_attempts.items()
+            },
+            "failure_diagnostics": list(self.index_diagnostics),
+        }
 
     def manifest(self) -> RunManifest:
         return RunManifest(
@@ -308,8 +374,8 @@ class GraphRAG08EvalRunner:
         self.state = "FULL_INDEX"
         await self._assert_isolation()
         await self._vector_embed_all()
-        await self._graph_index_all()
-        await self._await_graph_ready()
+        await self._graph_index_with_retry()
+        self._assert_complete_corpus()
 
     async def _assert_isolation(self) -> None:
         from open_notebook.database.repository import repo_query
@@ -344,29 +410,122 @@ class GraphRAG08EvalRunner:
                     f"vector embedding failed for {canonical}: {out.error_message}"
                 )
 
-    async def _graph_index_all(self) -> None:
-        for src in self.selected_sources:
-            canonical = self.key_to_source_id[src.key]
-            ack = await self.service.index_source(  # type: ignore[attr-defined]
-                source_id=canonical, canonical_text=src.text
-            )
-            if not ack.accepted or not ack.track_id:
-                raise IndexNotReadyError(
-                    f"GraphRAG index not accepted for {canonical}: {ack.detail}"
-                )
-            self.track_ids[canonical] = ack.track_id
+    def _canonical_text(self) -> Dict[str, str]:
+        return {
+            self.key_to_source_id[s.key]: s.text for s in self.selected_sources
+        }
 
-    async def _await_graph_ready(self) -> None:
+    async def _submit_index_bounded(
+        self, canonical: str, text: str, attempts: Dict[str, int], *, reindex: bool
+    ) -> str:
+        """Submit one Source for indexing, with a submit-time transient retry within
+        the per-Source attempt cap (task §2). Returns the track_id or aborts."""
+        from open_notebook.integrations.graphrag.eval.index_retry08 import (
+            classify_submit_exception,
+            diagnose_submit_exception,
+        )
+
+        cap = self.config.max_index_attempts_per_source
+        do_reindex = reindex
+        while True:
+            if attempts[canonical] >= cap:
+                raise IndexNotReadyError(
+                    f"GraphRAG index attempts exhausted for {canonical}"
+                )
+            attempts[canonical] += 1
+            try:
+                if do_reindex:
+                    # Approved reindex path = delete-then-insert (03A/03B).
+                    try:
+                        await self.service.delete_document_for_source(  # type: ignore[attr-defined]
+                            source_id=canonical
+                        )
+                    except Exception:  # noqa: BLE001 - best-effort predelete
+                        pass
+                ack = await self.service.index_source(  # type: ignore[attr-defined]
+                    source_id=canonical, canonical_text=text
+                )
+                if not ack.accepted or not ack.track_id:
+                    # Not-accepted is a deterministic rejection: never retried.
+                    raise IndexNotReadyError(
+                        f"GraphRAG index not accepted for {canonical}: {ack.detail}"
+                    )
+                return ack.track_id
+            except IndexNotReadyError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                diag = diagnose_submit_exception(
+                    exc,
+                    attempt_number=attempts[canonical],
+                    canonical_source_id=canonical,
+                    logical_source_id=self._logical_id(canonical),
+                )
+                self.index_diagnostics.append(diag.as_dict())
+                # Retry ONLY a clearly transient submit failure, within the cap.
+                if attempts[canonical] < cap and classify_submit_exception(exc):
+                    do_reindex = True
+                    continue
+                self.failed_source_ids.append(canonical)
+                raise IndexNotReadyError(
+                    f"GraphRAG index submit failed for {canonical}: {type(exc).__name__}"
+                ) from exc
+
+    async def _graph_index_with_retry(self) -> None:
+        """Index every selected Source, with a bounded (max 2 attempts/Source)
+        transient retry, and NEVER proceed on a partial corpus (task §2/§7/§8).
+
+        A Source that reaches DocStatus.FAILED is retried ONCE via the reindex path
+        iff (a) it is under the attempt cap AND (b) its failure is classified
+        TRANSIENT from the sidecar's error text. A NON_RETRYABLE / UNKNOWN cause, or
+        cap exhaustion, aborts the whole run (FULL_INDEX_FAIL) — no partial corpus.
+        """
+        from open_notebook.integrations.graphrag.eval.index_retry08 import (
+            diagnose_failed_track,
+        )
+
+        texts = self._canonical_text()
+        attempts: Dict[str, int] = {c: 0 for c in self.created_ids}
+        self.index_attempts = attempts  # telemetry: reflects final per-Source counts
+        pending: Dict[str, str] = {}
+        for canonical in self.created_ids:
+            pending[canonical] = await self._submit_index_bounded(
+                canonical, texts[canonical], attempts, reindex=False
+            )
+        self.track_ids = dict(pending)
+
         deadline = time.monotonic() + self.config.index_ready_timeout_s
-        pending = dict(self.track_ids)
         while pending and time.monotonic() < deadline:
             for canonical, track in list(pending.items()):
                 status = await self.service.track_status(track)  # type: ignore[attr-defined]
                 if status.state == IndexState.PROCESSED:
                     del pending[canonical]
+                    self.processed_ids.add(canonical)
                 elif status.state == IndexState.FAILED:
-                    raise IndexNotReadyError(
-                        f"GraphRAG indexing FAILED for {canonical}"
+                    # Content-safe diagnostic (never raw text); decision is unchanged
+                    # (retry iff diag.retry_allowed == classify_failed_track TRANSIENT).
+                    diag = await diagnose_failed_track(
+                        self.graphrag_config,
+                        track,
+                        attempt_number=attempts[canonical],
+                        canonical_source_id=canonical,
+                        logical_source_id=self._logical_id(canonical),
+                    )
+                    self.index_diagnostics.append(diag.as_dict())
+                    if attempts[canonical] >= self.config.max_index_attempts_per_source:
+                        self.failed_source_ids.append(canonical)
+                        raise IndexNotReadyError(
+                            f"GraphRAG indexing FAILED for {canonical} after "
+                            f"{attempts[canonical]} attempt(s) — full corpus not indexed"
+                        )
+                    if not diag.retry_allowed:
+                        self.failed_source_ids.append(canonical)
+                        raise IndexNotReadyError(
+                            f"GraphRAG indexing FAILED for {canonical} "
+                            f"(cause={diag.classification}, not retryable) — full corpus not indexed"
+                        )
+                    # transient + under cap: one reindex retry, then re-poll.
+                    pending[canonical] = await self._submit_index_bounded(
+                        canonical, texts[canonical], attempts, reindex=True
                     )
             if pending:
                 await asyncio.sleep(self.config.poll_interval_s)
@@ -374,6 +533,26 @@ class GraphRAG08EvalRunner:
             raise IndexNotReadyError(
                 f"{len(pending)} source(s) not PROCESSED within "
                 f"{self.config.index_ready_timeout_s}s — readiness not proven"
+            )
+
+    def _assert_complete_corpus(self) -> None:
+        """Hard 100%-corpus gate (task §7/§8): every selected Source must be created
+        and (having reached here) vector- + graph-indexed. No partial-corpus eval."""
+        n = len(self.selected_sources)
+        if len(self.created_ids) != n or len(set(self.created_ids)) != n:
+            raise IndexNotReadyError(
+                f"canonical source count {len(self.created_ids)} != selected {n}"
+            )
+        if len(self.track_ids) != n:
+            raise IndexNotReadyError(
+                f"graph-indexed source count {len(self.track_ids)} != selected {n}"
+            )
+        # Independent processed-readiness check (not merely 'submitted'): every
+        # created Source must have reached PROCESSED (review LOW-2 / task §7).
+        if self.processed_ids != set(self.created_ids):
+            missing = len(set(self.created_ids) - self.processed_ids)
+            raise IndexNotReadyError(
+                f"{missing} source(s) not PROCESSED — full corpus not indexed"
             )
 
     # -- retrieval -----------------------------------------------------------
@@ -529,6 +708,7 @@ class GraphRAG08EvalRunner:
             "selected_source_count": len(self.selected_sources),
             "selected_query_count": len(self.selected_queries),
             "candidate_fraction_denominator": self.corpus_size,
+            "retry_accounting": self.retry_accounting(),
             "namespace_tag": self.benchmark.namespace_tag,
             "id_namespace": f"source:{self.config.id_prefix}*",
             "synthetic_only": True,
