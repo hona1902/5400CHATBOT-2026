@@ -281,6 +281,16 @@ class GraphRAG08EvalRunner:
     # -- setup ---------------------------------------------------------------
     async def create_and_index(self) -> None:
         from open_notebook.database.repository import repo_query
+        from open_notebook.integrations.graphrag.eval.isolation08 import (
+            require_active_isolation,
+        )
+
+        # Option-A HARD BLOCK (GraphRAG-08A §28): the live path may only create
+        # canonical Sources inside a dedicated temporary Surreal namespace. This
+        # refuses to run against the normal application DB even if a caller wired
+        # it that way — the earlier Option-B normal-DB mode is not an authorized
+        # GraphRAG-08 live path.
+        require_active_isolation()
 
         tag = self.benchmark.namespace_tag
         for i, src in enumerate(self.selected_sources):
