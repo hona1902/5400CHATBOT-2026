@@ -66,6 +66,18 @@ class PrecheckState:
     graphrag_indexed_count: Optional[int] = None
     retry_accounting: Optional[dict] = None
     failed_logical_ids: List[Optional[str]] = field(default_factory=list)
+    #: GraphRAG-08C preflight-safety + sidecar-readiness observability.
+    authorization_label: str = "UNSPECIFIED"
+    normal_db_before: Optional[dict] = None
+    normal_db_after: Optional[dict] = None
+    #: NORMAL_DB_UNCHANGED verdict — YES only from two valid concrete observations,
+    #: never from null == null (task §3/§18). NOT_PROVEN blocks operational sign-off.
+    normal_db_unchanged: str = "NOT_PROVEN"
+    preflight_blocked: bool = False
+    isolation_entered: bool = False
+    sidecar_diagnostic: Optional[dict] = None
+    failure_stage: str = ""
+    failure_reason_code: str = ""
 
 
 # ---- sidecar helpers -------------------------------------------------------
@@ -109,6 +121,102 @@ async def await_sidecar_health(config, *, timeout_s: float = 120.0) -> Dict[str,
         last = health.detail
         await asyncio.sleep(3.0)
     raise RuntimeError(f"sidecar not healthy within {timeout_s}s: {last}")
+
+
+def _container_id() -> Optional[str]:
+    """First running-or-not compose container id (content-free), or None."""
+    out = _compose(["ps", "-a", "-q"])
+    if out.returncode != 0:
+        return None
+    cid = (out.stdout or "").strip().splitlines()
+    return cid[0].strip() if cid and cid[0].strip() else None
+
+
+def _inspect_line(container_id: str) -> Optional[str]:
+    """Targeted ``docker inspect`` of ONLY coarse fields (never logs/env; §21)."""
+    from open_notebook.integrations.graphrag.eval.sidecar_diag08 import INSPECT_FORMAT
+
+    out = subprocess.run(
+        ["docker", "inspect", "-f", INSPECT_FORMAT, container_id],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if out.returncode != 0:
+        return None
+    line = (out.stdout or "").strip()
+    return line or None
+
+
+def _port_open(host: str, port: int, *, timeout_s: float = 2.0) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+async def gather_sidecar_diagnostic(
+    config, *, timeout_seconds: float, elapsed_seconds: Optional[float]
+):
+    """Best-effort content-safe SIDECAR_START diagnostic (task §7/§8/§21).
+
+    Reads ONLY coarse facts: container running/exit/health/restart via a targeted
+    inspect template, TCP port openness, and a single health probe's success/status
+    class (never its body). Never raises — a probing failure degrades the diagnostic
+    to INSPECT_UNAVAILABLE rather than masking the original startup failure. Tests
+    monkeypatch this whole function."""
+    from urllib.parse import urlparse
+
+    from open_notebook.integrations.graphrag.client import GraphRAGClient
+    from open_notebook.integrations.graphrag.eval.sidecar_diag08 import (
+        build_sidecar_diagnostic,
+        parse_inspect_line,
+        with_health,
+    )
+
+    # -- container facts (coarse) --
+    obs = parse_inspect_line(None)
+    try:
+        cid = _container_id()
+        if cid is not None:
+            obs = parse_inspect_line(_inspect_line(cid))
+    except Exception:  # noqa: BLE001 - probing must never mask the real failure
+        obs = parse_inspect_line(None)
+
+    # -- port + one coarse health probe (status/success only, never body) --
+    port_open: Optional[bool] = None
+    health_reachable: Optional[bool] = None
+    health_status_code: Optional[int] = None
+    healthy = False
+    try:
+        base = getattr(config, "base_url", "") or ""
+        parsed = urlparse(base)
+        if parsed.hostname and parsed.port:
+            port_open = _port_open(parsed.hostname, int(parsed.port))
+        if base:
+            client = GraphRAGClient(config)
+            health = await client.health()
+            health_reachable = True
+            healthy = bool(getattr(health, "healthy", False))
+            code = getattr(health, "status_code", None)
+            health_status_code = int(code) if isinstance(code, int) else None
+    except Exception:  # noqa: BLE001 - unreachable health -> coarse reachable=False
+        health_reachable = False
+
+    obs = with_health(
+        obs,
+        port_open=port_open,
+        health_reachable=health_reachable,
+        health_status_code=health_status_code,
+        healthy=healthy,
+        timeout_reached=True,
+    )
+    return build_sidecar_diagnostic(
+        obs, timeout_seconds=timeout_seconds, elapsed_seconds=elapsed_seconds
+    )
 
 
 # ---- temp embedding Model seed (normal supported path) ---------------------
@@ -321,7 +429,9 @@ async def run_micro_precheck(
 
 
 async def run_full_benchmark(
-    *, artifact_dir: Optional[Path] = None
+    *,
+    authorization_label: str = "UNSPECIFIED",
+    artifact_dir: Optional[Path] = None,
 ) -> PrecheckState:
     """AUTHORIZED full frozen 75-Source / 60-query value benchmark (one run).
 
@@ -329,13 +439,22 @@ async def run_full_benchmark(
     ALL 75 Sources and ALL 60 queries (DEV + HOLDOUT). candidate_fraction uses the
     full 75-Source denominator. Value interpretation is done from the artifact
     (HOLDOUT authoritative); this function only executes + cleans up.
+
+    GraphRAG-08C pre-run safety ORDER (task §5): fixture verification -> normal DB
+    identity + baseline count verification -> (STOP BEFORE sidecar if unreadable) ->
+    sidecar startup (with content-safe diagnostics on failure) -> isolation runtime.
+    ``authorization_label`` is provenance METADATA only (task §13/§14): it never
+    affects the fixture, provider, model, retry policy, concurrency, query selection,
+    HOLDOUT access, or metrics.
     """
     from open_notebook.integrations.graphrag.config import load_config
     from open_notebook.integrations.graphrag.eval import dataset08 as d
+    from open_notebook.integrations.graphrag.eval import preflight08 as pf
     from open_notebook.integrations.graphrag.eval import report08 as r
     from open_notebook.integrations.graphrag.eval.gd_seam import GDQueryClient
     from open_notebook.integrations.graphrag.eval.isolation08 import (
         isolated_surreal_eval_runtime,
+        make_run_id,
         normal_identity,
     )
     from open_notebook.integrations.graphrag.eval.runner08 import (
@@ -345,10 +464,22 @@ async def run_full_benchmark(
     from open_notebook.integrations.graphrag.service import GraphRAGService
 
     st = PrecheckState()
+    st.authorization_label = authorization_label
+    # Pre-isolation run id so a PREFLIGHT / SIDECAR_START abort still has a stable id
+    # for durable content-free failure telemetry (task §11).
+    st.run_id = make_run_id()
+
+    # ---- 1) fixture verification (§5) --------------------------------------
     ok, h = d.verify_integrity()
     st.fixture_hash_before = h if ok else "MISMATCH"
+    st.fixture_hash_after = st.fixture_hash_before
+    out_dir = artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
     if not ok or h != "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d":
         st.failures.append("fixture integrity mismatch before full run")
+        st.failure_stage = "PREFLIGHT"
+        st.failure_reason_code = "FIXTURE_HASH_MISMATCH"
+        st.normal_db_unchanged = pf.UNCHANGED_NOT_PROVEN
+        st.preflight_blocked = True
         st.state = "PREFLIGHT_FAIL"
         return st
 
@@ -359,8 +490,32 @@ async def run_full_benchmark(
     st.selected_source_keys = sk
     st.selected_query_ids = qids
 
+    # ---- 2)+3) normal DB identity + baseline count verification (§2/§5) -----
+    # A full run must NOT begin unless the normal DB baseline reads as CONCRETE
+    # values; an unreadable baseline FAILS CLOSED here, BEFORE any sidecar/provider
+    # action (task §2/§5/§16). null is never accepted as "unchanged" (task §3).
     st.normal_namespace, st.normal_database = normal_identity()
-    st.normal_source_count_before = await _normal_source_count()
+    before = await pf.read_normal_db_baseline()
+    st.normal_db_before = before.as_dict()
+    st.normal_source_count_before = before.source_count
+    try:
+        pf.require_readable_baseline(before)
+    except pf.NormalDbBaselineError:
+        st.failures.append(f"normal DB baseline unreadable: {before.reason_code}")
+        st.failure_stage = "PREFLIGHT"
+        st.failure_reason_code = before.reason_code
+        st.normal_db_unchanged = pf.UNCHANGED_NOT_PROVEN
+        st.preflight_blocked = True
+        st.state = "PREFLIGHT_FAIL"
+        try:
+            _write_preisolation_failure_telemetry(
+                out_dir, st,
+                failure_stage="PREFLIGHT",
+                failure_reason_code=before.reason_code,
+            )
+        except Exception as exc:  # noqa: BLE001 - never mask the block
+            st.failures.append(f"preflight telemetry write: {type(exc).__name__}")
+        return st  # STOP BEFORE sidecar startup (§5/§16)
 
     import os
 
@@ -368,14 +523,43 @@ async def run_full_benchmark(
     evaluations = None
     try:
         os.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] = "true"
+        # ---- 4) sidecar startup — ONLY after the baseline is proven (§5) ----
         st.state = "SIDECAR_START"
+        started_at = time.monotonic()
         start_sidecar()
         st.sidecar_started = True
-        health = await await_sidecar_health(load_config())
-        logger.info(f"[gr08-full] sidecar healthy version={health.get('version')}")
+        try:
+            health = await await_sidecar_health(load_config())
+            logger.info(f"[gr08-full] sidecar healthy version={health.get('version')}")
+        except Exception:
+            # GraphRAG-08C: content-safe SIDECAR_START diagnostics + durable
+            # pre-isolation failure telemetry (task §7/§11/§22), BEFORE re-raising.
+            elapsed = time.monotonic() - started_at
+            try:
+                diag = await gather_sidecar_diagnostic(
+                    load_config(), timeout_seconds=120.0, elapsed_seconds=elapsed
+                )
+                st.sidecar_diagnostic = diag.as_dict()
+                st.failure_reason_code = diag.failure_reason_code
+            except Exception as exc:  # noqa: BLE001 - diagnostic must not mask failure
+                st.failures.append(f"sidecar diagnostic: {type(exc).__name__}")
+            st.failure_stage = "SIDECAR_START"
+            st.normal_db_unchanged = pf.UNCHANGED_NOT_PROVEN
+            try:
+                _write_preisolation_failure_telemetry(
+                    out_dir, st,
+                    failure_stage="SIDECAR_START",
+                    failure_reason_code=st.failure_reason_code or "SIDECAR_START_UNKNOWN",
+                    sidecar_diagnostic=st.sidecar_diagnostic,
+                )
+            except Exception as exc:  # noqa: BLE001 - never block cleanup
+                st.failures.append(f"sidecar telemetry write: {type(exc).__name__}")
+            raise
 
+        # ---- 5) isolation runtime — ONLY after sidecar healthy (§5) ---------
         st.state = "ISOLATION_CREATE"
         async with isolated_surreal_eval_runtime() as ctx:
+            st.isolation_entered = True
             st.run_id = ctx.run_id
             st.temp_namespace = ctx.namespace
             st.temp_database = ctx.database
@@ -404,7 +588,9 @@ async def run_full_benchmark(
                 combined_sha256=st.fixture_hash_before,
                 graphrag_config=load_config(),
             )
-            out_dir = artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
+            value_out_dir = (
+                artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
+            )
             try:
                 st.state = "FULL_INDEX"
                 await runner.create_and_index()
@@ -415,7 +601,8 @@ async def run_full_benchmark(
                 metadata = {
                     **runner.build_metadata(),
                     "run_type": "FULL_BENCHMARK",
-                    "full_run_authorization": "REAUTHORIZATION_2",
+                    # Provenance METADATA only (task §13/§14) — never affects execution.
+                    "full_run_authorization": st.authorization_label,
                     "value_run": True,
                     "holdout_used": True,
                     "full_benchmark_executed": True,
@@ -425,8 +612,8 @@ async def run_full_benchmark(
                 artifact = r.build_artifact(
                     metadata, evaluations, corpus_size=runner.corpus_size
                 )
-                r.write_artifact(out_dir / "benchmark.json", artifact)
-                _write_manifest(out_dir / "manifest.json", st, runner)
+                r.write_artifact(value_out_dir / "benchmark.json", artifact)
+                _write_manifest(value_out_dir / "manifest.json", st, runner)
             except Exception:
                 # GraphRAG-08B: preserve content-free failure telemetry BEFORE
                 # destructive cleanup, so a failed-before-query run is diagnosable.
@@ -434,7 +621,7 @@ async def run_full_benchmark(
                 _capture_index_telemetry(st, runner)
                 st.run_validity = "FAILED"
                 try:
-                    _write_failure_telemetry(out_dir, st, runner)
+                    _write_failure_telemetry(value_out_dir, st, runner)
                 except Exception as exc:  # noqa: BLE001 - never block cleanup
                     st.failures.append(f"failure telemetry write: {type(exc).__name__}")
                 raise
@@ -463,14 +650,27 @@ async def run_full_benchmark(
         else:
             os.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] = prior_graph_flag
 
-    st.normal_source_count_after = await _normal_source_count()
+    # ---- 6) post-run normal DB verification (§6) ---------------------------
+    # Re-read the baseline through the SAME verified mechanism, after runtime
+    # restoration. NORMAL_DB_UNCHANGED is YES only when BOTH observations are valid
+    # concrete observations and satisfy the approved comparison; otherwise NOT_PROVEN
+    # (which blocks operational sign-off) even if benchmark-owned cleanup passed.
+    after = await pf.read_normal_db_baseline()
+    st.normal_db_after = after.as_dict()
+    st.normal_source_count_after = after.source_count
+    st.normal_db_unchanged = pf.compare_normal_db(before, after)
+
     ok2, h2 = d.verify_integrity()
     st.fixture_hash_after = h2 if ok2 else "MISMATCH"
     complete = not st.failures and evaluations is not None
     st.state = "COMPLETE" if complete else "FAILED"
     st.run_validity = (
         "COMPLETE_VALID"
-        if complete and st.fixture_hash_after == st.fixture_hash_before
+        if (
+            complete
+            and st.fixture_hash_after == st.fixture_hash_before
+            and st.normal_db_unchanged == pf.UNCHANGED_YES
+        )
         else "FAILED"
     )
     return st
@@ -505,12 +705,69 @@ def _capture_index_telemetry(st: PrecheckState, runner) -> None:
     st.failed_logical_ids = list(tel.get("failed_logical_ids") or [])
 
 
+def build_preisolation_failure_artifact(
+    st: PrecheckState,
+    *,
+    failure_stage: str,
+    failure_reason_code: str,
+    sidecar_diagnostic: Optional[dict] = None,
+    cleanup_outcome: Optional[dict] = None,
+) -> dict:
+    """Content-free failure artifact for a PREFLIGHT / SIDECAR_START abort (task §11).
+
+    Durable even though NO temp namespace was ever created (ISOLATION_ENTERED=NO).
+    Records only ids, labels, coarse baseline/sidecar status, and zeroed execution
+    counters — never raw content, provider text, or secrets (§12)."""
+    return {
+        "run_type": "FULL_VALUE_BENCHMARK",
+        "authorization_label": st.authorization_label,
+        "benchmark_version": "graphrag_08_eval_v1",
+        "run_id": st.run_id,
+        "run_validity": "FAILED",
+        "isolation_entered": False,
+        "failure_stage": failure_stage,
+        "failure_reason_code": failure_reason_code,
+        "fixture_hash": st.fixture_hash_before,
+        "normal_db_baseline": st.normal_db_before,
+        "normal_db_unchanged": st.normal_db_unchanged,
+        "sidecar_diagnostic": sidecar_diagnostic,
+        "dev_executed": 0,
+        "holdout_executed": 0,
+        "value_decision_made": False,
+        "cleanup_restoration": cleanup_outcome
+        or {
+            "sidecar_stopped": st.sidecar_stopped,
+            "temp_namespace_created": False,
+        },
+    }
+
+
+def _write_preisolation_failure_telemetry(
+    out_dir: Path,
+    st: PrecheckState,
+    *,
+    failure_stage: str,
+    failure_reason_code: str,
+    sidecar_diagnostic: Optional[dict] = None,
+) -> None:
+    """Atomic write of the pre-isolation failure artifact (task §11/§12)."""
+    artifact = build_preisolation_failure_artifact(
+        st,
+        failure_stage=failure_stage,
+        failure_reason_code=failure_reason_code,
+        sidecar_diagnostic=sidecar_diagnostic,
+    )
+    _atomic_write_json(out_dir / "preflight_failure.json", artifact)
+
+
 def _write_failure_telemetry(out_dir: Path, st: PrecheckState, runner) -> None:
     """Persist a content-free failure telemetry artifact BEFORE cleanup (task §10/§12)."""
     tel = runner.index_telemetry()
     artifact = {
         "run_type": "FULL_VALUE_BENCHMARK",
-        "full_run_authorization": "REAUTHORIZATION_2",
+        # Provenance METADATA only (task §13/§14): the explicit authorization label,
+        # never a hard-coded per-attempt string.
+        "full_run_authorization": st.authorization_label,
         "benchmark_version": "graphrag_08_eval_v1",
         "run_id": st.run_id,
         "run_validity": "FAILED",
@@ -546,4 +803,10 @@ def _write_manifest(path: Path, st: PrecheckState, runner) -> None:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
 
-__all__ = ["run_micro_precheck", "run_full_benchmark", "PrecheckState"]
+__all__ = [
+    "run_micro_precheck",
+    "run_full_benchmark",
+    "PrecheckState",
+    "gather_sidecar_diagnostic",
+    "build_preisolation_failure_artifact",
+]
