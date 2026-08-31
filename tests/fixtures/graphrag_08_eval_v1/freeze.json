@@ -1,0 +1,14 @@
+{
+  "benchmark_version": "graphrag_08_eval_v1",
+  "combined_sha256": "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d",
+  "corpus_sha256": "a4fa880e222f19eb4f1c944b66f102ccab47e24735cd1266e5ac475cb940ee4a",
+  "dev_count": 30,
+  "frozen": true,
+  "frozen_note": "graphrag_08_eval_v1 frozen after R1/R2 + static validation + independent review fixes (MEDIUM-1/2/3, LOW-4/5). Any content change requires graphrag_08_eval_v2 (task 25/26/42).",
+  "holdout_count": 30,
+  "namespace_tag": "__graphrag08_eval_v1__",
+  "negative_count": 12,
+  "queries_sha256": "8f61d19d17597e89541123a3cce34ba7f4e1470dee6d4292d1768d067a6a1229",
+  "query_count": 60,
+  "source_count": 75
+}
