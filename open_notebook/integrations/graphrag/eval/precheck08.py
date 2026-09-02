@@ -78,6 +78,10 @@ class PrecheckState:
     sidecar_diagnostic: Optional[dict] = None
     failure_stage: str = ""
     failure_reason_code: str = ""
+    #: GraphRAG-08D launcher import-path preflight (content-free); fixes the
+    #: attempt-#4 ``No module named 'commands'`` defect by fail-closing BEFORE any
+    #: normal-DB read / sidecar / isolation / Source creation / provider traffic.
+    launcher_preflight: Optional[dict] = None
 
 
 # ---- sidecar helpers -------------------------------------------------------
@@ -449,6 +453,7 @@ async def run_full_benchmark(
     """
     from open_notebook.integrations.graphrag.config import load_config
     from open_notebook.integrations.graphrag.eval import dataset08 as d
+    from open_notebook.integrations.graphrag.eval import launcher_preflight08 as lp
     from open_notebook.integrations.graphrag.eval import preflight08 as pf
     from open_notebook.integrations.graphrag.eval import report08 as r
     from open_notebook.integrations.graphrag.eval.gd_seam import GDQueryClient
@@ -489,6 +494,40 @@ async def run_full_benchmark(
     qids = tuple(q.query_id for q in bench.queries)   # all 60 (DEV + HOLDOUT)
     st.selected_source_keys = sk
     st.selected_query_ids = qids
+
+    # ---- 1.5) launcher import-path preflight (GraphRAG-08D §5/§8/§9) --------
+    # Resolve the repo root deterministically from the eval module's own location
+    # (never the shell cwd) and verify the EXACT import surface the full-index path
+    # requires (``commands.embedding_commands``). This FAILS CLOSED here — before the
+    # normal-DB read, sidecar, isolation, Source creation, and any provider traffic —
+    # so an invalid import environment can never again be discovered only after 75
+    # Sources have been created (the attempt-#4 defect: ``No module named
+    # 'commands'`` inside ``runner08._vector_embed_all``).
+    try:
+        launcher = lp.run_launcher_preflight()
+        st.launcher_preflight = launcher.as_dict()
+        lp.require_launcher_ready(launcher)
+    except Exception as exc:  # noqa: BLE001 - ANY launcher-preflight error fails closed
+        # A LauncherImportPathError carries a precise reason code; any other error
+        # (e.g. an unresolvable/deleted cwd) still fails closed under the umbrella
+        # code, so the durable telemetry is never lost. This is strictly BEFORE the
+        # normal-DB read / sidecar / provider, so no live work can have started.
+        reason = getattr(exc, "reason_code", None) or lp.LauncherReasonCode.IMPORT_PATH_INVALID
+        st.failures.append(f"launcher import path invalid: {reason}")
+        st.failure_stage = "PREFLIGHT"
+        st.failure_reason_code = reason
+        st.normal_db_unchanged = pf.UNCHANGED_NOT_PROVEN
+        st.preflight_blocked = True
+        st.state = "PREFLIGHT_FAIL"
+        try:
+            _write_preisolation_failure_telemetry(
+                out_dir, st,
+                failure_stage="PREFLIGHT",
+                failure_reason_code=reason,
+            )
+        except Exception as exc2:  # noqa: BLE001 - never mask the block
+            st.failures.append(f"preflight telemetry write: {type(exc2).__name__}")
+        return st  # STOP BEFORE normal-DB read / sidecar / provider (§8)
 
     # ---- 2)+3) normal DB identity + baseline count verification (§2/§5) -----
     # A full run must NOT begin unless the normal DB baseline reads as CONCRETE
@@ -728,6 +767,7 @@ def build_preisolation_failure_artifact(
         "failure_stage": failure_stage,
         "failure_reason_code": failure_reason_code,
         "fixture_hash": st.fixture_hash_before,
+        "launcher_preflight": st.launcher_preflight,
         "normal_db_baseline": st.normal_db_before,
         "normal_db_unchanged": st.normal_db_unchanged,
         "sidecar_diagnostic": sidecar_diagnostic,
