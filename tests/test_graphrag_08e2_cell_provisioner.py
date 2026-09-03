@@ -24,7 +24,10 @@ from open_notebook.integrations.graphrag.eval import dataset08 as d
 
 FIXTURE_HASH = "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d"
 RUN = "run08e2a"
-VERSION = cp.VERIFIED_LIGHTRAG_VERSION
+# Real LightRAG v1.5.6 /health reports the release WITHOUT a leading "v" (confirmed by
+# the 08E Stage-A real-sidecar smoke). The fake mirrors that reality; the provisioner's
+# pinned expected_version ("v1.5.6") must canonicalize to it (GraphRAG-08E.3).
+VERSION = "1.5.6"
 
 
 # ---------------------------------------------------------------------------

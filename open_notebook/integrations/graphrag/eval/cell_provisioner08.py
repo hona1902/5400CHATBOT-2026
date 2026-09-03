@@ -50,6 +50,7 @@ from datetime import datetime, timezone
 from typing import (
     AsyncIterator,
     Dict,
+    List,
     Optional,
     Protocol,
     Set,
@@ -83,6 +84,30 @@ DEFAULT_DIAGNOSTIC_HOST = "127.0.0.1"
 DEFAULT_STARTUP_TIMEOUT_S = 120.0
 DEFAULT_HEALTH_POLL_INTERVAL_S = 3.0
 DEFAULT_GRACEFUL_STOP_TIMEOUT_S = 15.0
+
+
+# ---------------------------------------------------------------------------
+# Version attestation (GraphRAG-08E.3 Defect A). LightRAG's /health reports the
+# release WITHOUT a leading ``v`` (e.g. ``1.5.6``) while the pinned constant carries
+# it (``v1.5.6``); the real Stage-A smoke failed a naive string equality on exactly
+# that. Canonicalise with the trusted, already-present ``packaging`` parser: it treats
+# ``v1.5.6`` and ``1.5.6`` as the same PEP 440 release but keeps a different patch/
+# minor/major or a malformed form NON-equivalent (fail closed). NOT permissive.
+# ---------------------------------------------------------------------------
+
+
+def versions_equivalent(expected: Optional[str], reported: Optional[str]) -> bool:
+    """True iff ``reported`` is the SAME release as ``expected`` (a leading ``v`` is
+    ignored, so ``v1.5.6`` == ``1.5.6``). ``1.5.5``/``1.5.7``/``2.0.0`` and any absent/
+    unparseable form are NOT equivalent (fail closed, task §5/§23)."""
+    from packaging.version import InvalidVersion, parse
+
+    if not expected or not reported:
+        return False
+    try:
+        return parse(str(expected).strip()) == parse(str(reported).strip())
+    except (InvalidVersion, TypeError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +204,14 @@ def _is_safe_identifier(value: str) -> bool:
 def _norm(path: str) -> str:
     """Case/relative-normalised REAL path (resolves symlinks/junctions, §25/§68)."""
     return os.path.normcase(os.path.realpath(path))
+
+
+def _paths_equal(a: Optional[str], b: Optional[str]) -> bool:
+    """True iff two paths resolve to the same real, case-normalised location. A missing
+    value is never equal (fail closed for storage-mount attestation, task §27)."""
+    if not a or not b:
+        return False
+    return _norm(a) == _norm(b)
 
 
 def is_within_root(target: str, root: str) -> bool:
@@ -555,10 +588,50 @@ class DockerCellProcessController:
         return TerminationResult(stopped=stopped, forced=True)
 
 
+def parse_health_payload(payload: object) -> CellHealthObservation:
+    """Extract ONLY content-safe fields from a raw v1.5.6 /health payload (task §11/§32).
+
+    Pulls liveness, the reported version, and — the GraphRAG-08E.3 Defect-B correction —
+    the DIRECT bound workspace (``configuration.workspace``) and ``working_directory``.
+    Everything else in ``configuration`` (bindings, hosts, models) is DISCARDED, so a
+    provider host/secret can never reach the observation. A non-dict payload is treated
+    as reachable-but-unhealthy."""
+    if not isinstance(payload, dict):
+        return CellHealthObservation(
+            reachable=True, healthy=False, version=None,
+            reported_workspace=None, working_dir=None,
+        )
+    status = str(payload.get("status", "")).strip().lower()
+    healthy = status in {"healthy", "ok"}
+    # Only ``core_version`` is the LightRAG RELEASE (e.g. "1.5.6"); ``api_version``
+    # (e.g. "0187") is a different identifier and must NOT stand in for the pin check.
+    raw_version = payload.get("core_version")
+    version = str(raw_version) if raw_version else None
+    # DIRECT workspace self-report — extract ONLY configuration.workspace (never the
+    # rest of the configuration block, which carries binding/host info).
+    workspace: Optional[str] = None
+    cfg = payload.get("configuration")
+    if isinstance(cfg, dict):
+        w = cfg.get("workspace")
+        workspace = str(w) if w not in (None, "") else None
+    wd = payload.get("working_directory")
+    working_dir = str(wd) if wd else None
+    return CellHealthObservation(
+        reachable=True, healthy=healthy, version=version,
+        reported_workspace=workspace, working_dir=working_dir,
+    )
+
+
 class LightRagCellHealthProber:
-    """Live health prober: reuses the pinned GraphRAG health client for liveness +
-    version, and reads a bound-workspace/working-dir hint from the health payload when
-    v1.5.6 exposes it (authenticated /health config). Content-safe."""
+    """Live health prober: raw content-safe GET /health of the cell's own sidecar.
+
+    Reads liveness, version, and the DIRECT workspace self-report from
+    ``configuration.workspace`` (GraphRAG-08E.3: the pinned v1.5.6 /health DOES expose
+    the bound workspace + ``working_directory``; the earlier ``L2`` assumption was wrong
+    because the shared GraphRAG client simply discarded them). Only those fields are
+    kept — never the full configuration — so no provider host/secret leaks. Eval-only:
+    the offline suite injects a fake; this real prober is used only under a live/smoke
+    run against the cell's loopback sidecar (no provider)."""
 
     def __init__(self, *, api_key: Optional[str] = None) -> None:
         self._api_key = api_key
@@ -566,29 +639,132 @@ class LightRagCellHealthProber:
     async def probe(
         self, *, base_url: str, host: str, port: int
     ) -> CellHealthObservation:
-        from open_notebook.integrations.graphrag.client import GraphRAGClient
-        from open_notebook.integrations.graphrag.config import GraphRAGConfig
+        import httpx
 
-        cfg = GraphRAGConfig(
-            enabled=True, base_url=base_url, timeout=10.0, api_key=self._api_key
-        )
-        client = GraphRAGClient(cfg)
+        url = base_url.rstrip("/") + "/health"
+        headers = {"X-API-Key": self._api_key} if self._api_key else {}
         try:
-            health = await client.health()
-        except Exception:  # noqa: BLE001 - unreachable → coarse reachable=False
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                return CellHealthObservation(
+                    reachable=True, healthy=False, version=None,
+                    reported_workspace=None, working_dir=None,
+                )
+            payload = resp.json()
+        except Exception:  # noqa: BLE001 - unreachable/parse error → coarse not-ready
             return CellHealthObservation(
                 reachable=False, healthy=False, version=None,
                 reported_workspace=None, working_dir=None,
             )
-        return CellHealthObservation(
-            reachable=True,
-            healthy=bool(getattr(health, "healthy", False)),
-            version=getattr(health, "version", None),
-            # v1.5.6 /health does not reliably expose the bound workspace to an
-            # unauthenticated caller; when it is absent the provisioner BLOCKS
-            # readiness (task §16) rather than assuming a match.
-            reported_workspace=getattr(health, "workspace", None),
-            working_dir=getattr(health, "working_directory", None),
+        return parse_health_payload(payload)
+
+
+# ---------------------------------------------------------------------------
+# Runtime workspace/storage attestation (GraphRAG-08E.3 Defect B). The DIRECT
+# /health self-report proves which workspace the SERVER bound; the host-side storage
+# ROOT the container is mounted from is visible ONLY via inspecting the exact OWNED
+# container (task §13/§27). This attestor supplies that OWNERSHIP-bound evidence with a
+# targeted inspect that extracts ONLY the WORKSPACE env value + the rag_storage mount —
+# never the full Env[] — so a provider secret cannot leak (task §11/§12/§29).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CellRuntimeAttestation:
+    """Content-safe runtime config of the exact OWNED cell container (no secret)."""
+
+    evidence_available: bool
+    container_identity: Optional[str]
+    running: Optional[bool]
+    workspace_config: Optional[str]  # the WORKSPACE env the owned container received
+    storage_source: Optional[str]    # host mount source bound to the rag-storage dir
+    storage_dest: Optional[str]      # in-container mount destination
+
+
+class CellRuntimeAttestor(Protocol):
+    """Attest the exact owned cell container's runtime workspace/storage config.
+
+    The LIVE implementation inspects ONLY the owned container (by its owned identity)
+    and returns ONLY the WORKSPACE env value + the rag-storage mount — never other env.
+    Offline tests inject a fake."""
+
+    async def attest(self, handle: CellProcessHandle) -> CellRuntimeAttestation: ...
+
+
+#: Go-template that emits ONLY the WORKSPACE env value (never any other variable), so a
+#: provider key in Env[] can never be printed (task §12/§29).
+_WORKSPACE_ENV_TEMPLATE = (
+    '{{range .Config.Env}}{{if eq (index (split . "=") 0) "WORKSPACE"}}'
+    '{{index (split . "=") 1}}{{end}}{{end}}'
+)
+_MOUNTS_TEMPLATE = "{{range .Mounts}}{{.Destination}}|{{.Source}}{{println}}{{end}}"
+_STATE_TEMPLATE = "{{.State.Running}}"
+
+
+def parse_runtime_inspect(
+    *,
+    identity: str,
+    inspect_ok: bool,
+    state_running: Optional[str],
+    workspace_env: Optional[str],
+    mounts_text: Optional[str],
+    storage_dest: str,
+) -> CellRuntimeAttestation:
+    """Pure parser for the targeted-inspect outputs → a content-safe attestation.
+
+    Split out from the Docker calls so it is unit-testable (incl. a secret-injection
+    test, task §29). Reads ONLY the WORKSPACE value + the mount whose destination is the
+    rag-storage dir; a secret accidentally present in ``mounts_text`` for another mount
+    is not extracted. Missing/unparseable evidence yields ``evidence_available=False``."""
+    if not inspect_ok:
+        return CellRuntimeAttestation(
+            evidence_available=False, container_identity=None, running=None,
+            workspace_config=None, storage_source=None, storage_dest=None,
+        )
+    running = None
+    if state_running is not None:
+        running = state_running.strip().lower() == "true"
+    ws = (workspace_env or "").strip() or None
+    source = None
+    dest = None
+    for line in (mounts_text or "").splitlines():
+        parts = line.split("|", 1)
+        if len(parts) == 2 and parts[0].strip() == storage_dest:
+            dest = parts[0].strip()
+            source = parts[1].strip() or None
+            break
+    return CellRuntimeAttestation(
+        evidence_available=True, container_identity=identity, running=running,
+        workspace_config=ws, storage_source=source, storage_dest=dest,
+    )
+
+
+class DockerRuntimeAttestor:
+    """Attest the owned container via targeted ``docker inspect`` (content-safe)."""
+
+    def _inspect(self, fmt: str, name: str) -> Tuple[bool, str]:
+        out = subprocess.run(
+            ["docker", "inspect", "-f", fmt, name],
+            capture_output=True, text=True, timeout=30,
+        )
+        return out.returncode == 0, (out.stdout or "")
+
+    async def attest(self, handle: CellProcessHandle) -> CellRuntimeAttestation:
+        name = handle.identifier
+        state_ok, state = self._inspect(_STATE_TEMPLATE, name)
+        if not state_ok:
+            return parse_runtime_inspect(
+                identity=name, inspect_ok=False, state_running=None,
+                workspace_env=None, mounts_text=None,
+                storage_dest=LIGHTRAG_WORKING_DIR_MOUNT,
+            )
+        _, ws_env = self._inspect(_WORKSPACE_ENV_TEMPLATE, name)
+        _, mounts = self._inspect(_MOUNTS_TEMPLATE, name)
+        return parse_runtime_inspect(
+            identity=name, inspect_ok=True, state_running=state,
+            workspace_env=ws_env, mounts_text=mounts,
+            storage_dest=LIGHTRAG_WORKING_DIR_MOUNT,
         )
 
 
@@ -608,9 +784,11 @@ class ProvisionerConfig:
     startup_timeout_s: float = DEFAULT_STARTUP_TIMEOUT_S
     health_poll_interval_s: float = DEFAULT_HEALTH_POLL_INTERVAL_S
     graceful_stop_timeout_s: float = DEFAULT_GRACEFUL_STOP_TIMEOUT_S
-    #: When True the runtime workspace must be positively confirmed by the health
-    #: prober; if it cannot be read, readiness is BLOCKED (task §16). Only a test with
-    #: a prober that DOES report the workspace should relax this.
+    #: When True the runtime workspace must be positively ATTESTED before PROVISIONED
+    #: (GraphRAG-08E.3): via the DIRECT /health ``configuration.workspace`` self-report
+    #: AND/OR an owned-container runtime attestor. If NEITHER supplies evidence, readiness
+    #: is BLOCKED — never assumed from the intended input (task §15/§16/§24/§28). Only a
+    #: test that deliberately drops both evidence sources should relax this.
     require_runtime_workspace: bool = True
 
 
@@ -632,6 +810,9 @@ class ProvisionedCell:
     process_pid: Optional[int]
     started_at: str
     state: str
+    #: Runtime workspace/storage attestation provenance (GraphRAG-08E.3).
+    workspace_attestation_kind: str = ""  # DIRECT_HEALTH_CONFIG / DERIVED_OWNED_CONTAINER_CONFIG / both
+    workspace_direct_runtime_report: bool = False
     fresh_extraction_state: bool = True
     owned: bool = True
 
@@ -663,6 +844,8 @@ class ProvisionedCell:
             "process_pid": self.process_pid,
             "started_at": self.started_at,
             "state": self.state,
+            "workspace_attestation_kind": self.workspace_attestation_kind,
+            "workspace_direct_runtime_report": self.workspace_direct_runtime_report,
             "fresh_extraction_state": self.fresh_extraction_state,
             "owned": self.owned,
             "ready": self.ready,
@@ -683,6 +866,8 @@ class _CellRuntime:
     storage_created: bool = False
     version: Optional[str] = None
     started_at: Optional[str] = None
+    workspace_attestation_kind: str = ""
+    workspace_direct_runtime_report: bool = False
 
 
 @dataclass
@@ -721,6 +906,7 @@ class LightRagCellProvisioner:
         process_controller: CellProcessController,
         health_prober: CellHealthProber,
         port_allocator: Optional[PortAllocator] = None,
+        runtime_attestor: Optional[CellRuntimeAttestor] = None,
     ) -> None:
         if not config.eval_root or not os.path.isabs(config.eval_root):
             raise CellProvisionConfigurationError(
@@ -730,6 +916,10 @@ class LightRagCellProvisioner:
         self._proc = process_controller
         self._prober = health_prober
         self._ports = port_allocator or EphemeralPortAllocator()
+        # Owned-container runtime attestor (GraphRAG-08E.3): supplies the ownership-bound
+        # workspace + host storage-mount evidence the /health self-report cannot. When
+        # None, workspace attestation relies solely on the DIRECT /health report.
+        self._attestor = runtime_attestor
         self._active: Dict[str, _CellRuntime] = {}
 
     # -- public contract (cell_isolation08.CellProvisioner) ------------------
@@ -911,32 +1101,102 @@ class LightRagCellProvisioner:
                 f"cell {rt.identity.cell_id} not healthy within {timeout_s}s"
             )
         rt.state = ProvisionState.HEALTH_VERIFIED
-        # Version pin (task §15): a healthy process reporting the wrong version fails
-        # BEFORE the cell is usable — no fallback/upgrade.
-        if obs.version != self._cfg.expected_version:
+        # Version pin (task §15/§23, GraphRAG-08E.3 Defect A): SEMANTIC equivalence via
+        # the trusted packaging parser — 'v1.5.6' (pin) == '1.5.6' (what /health reports)
+        # — but a different release or a malformed form fails BEFORE the cell is usable.
+        # No fallback/upgrade.
+        if not versions_equivalent(self._cfg.expected_version, obs.version):
             rt.state = ProvisionState.VERSION_FAILED
             raise CellVersionMismatchError(
-                f"cell {rt.identity.cell_id} version {obs.version!r} != "
-                f"{self._cfg.expected_version!r}"
+                f"cell {rt.identity.cell_id} version {obs.version!r} not equivalent to "
+                f"pinned {self._cfg.expected_version!r}"
             )
         rt.version = obs.version
         rt.state = ProvisionState.VERSION_VERIFIED
-        # Runtime workspace binding (task §16): a health-only 200 is NOT enough; the
-        # process must be proven bound to THIS cell's workspace, else readiness BLOCKS.
+        # Runtime workspace/storage ATTESTATION (task §16/§24-§28, GraphRAG-08E.3
+        # Defect B): a health-only 200 is NOT enough. The cell must be PROVEN bound to
+        # THIS cell's workspace + owned storage by real evidence — the DIRECT /health
+        # self-report and/or the owned-container runtime attestor — else readiness BLOCKS.
         if self._cfg.require_runtime_workspace:
-            if obs.reported_workspace is None:
-                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
-                raise CellWorkspaceMismatchError(
-                    f"cell {rt.identity.cell_id} runtime workspace unverifiable — "
-                    "blocking readiness"
-                )
-            if obs.reported_workspace != rt.identity.workspace:
-                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
-                raise CellWorkspaceMismatchError(
-                    f"cell {rt.identity.cell_id} bound to workspace "
-                    f"{obs.reported_workspace!r} != {rt.identity.workspace!r}"
-                )
+            await self._attest_workspace(rt, obs)
         rt.state = ProvisionState.WORKSPACE_VERIFIED
+
+    async def _attest_workspace(
+        self, rt: _CellRuntime, obs: CellHealthObservation
+    ) -> None:
+        """Positively attest the process is bound to the expected workspace + owned
+        storage, from REAL runtime evidence (never the intended input, task §8/§16).
+
+        Two evidence sources, at least ONE required (fail closed if neither, §24/§28):
+          * DIRECT — the server's own /health ``configuration.workspace`` self-report;
+          * DERIVED — an owned-container runtime attestor (ownership-bound; the ONLY
+            source of the host storage-mount evidence, §13/§27/§30).
+        A present-but-mismatched value from EITHER source fails closed (§26/§27)."""
+        expected_ws = rt.identity.workspace
+        kinds: List[str] = []
+        attested = False
+
+        direct = obs.reported_workspace
+        rt.workspace_direct_runtime_report = direct is not None
+        if direct is not None:
+            if direct != expected_ws:
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellWorkspaceMismatchError(
+                    f"cell {rt.identity.cell_id} /health reports workspace "
+                    f"{direct!r} != {expected_ws!r}"
+                )
+            attested = True
+            kinds.append("DIRECT_HEALTH_CONFIG")
+
+        if self._attestor is not None:
+            assert rt.handle is not None
+            att = await self._attestor.attest(rt.handle)
+            if not att.evidence_available:
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellWorkspaceMismatchError(
+                    f"cell {rt.identity.cell_id} runtime attestation evidence unavailable"
+                )
+            # Ownership: evidence MUST come from the exact owned container (§30).
+            if att.container_identity != rt.handle.identifier:
+                rt.state = ProvisionState.OWNERSHIP_FAILED
+                raise CellProvisionOwnershipError(
+                    f"cell {rt.identity.cell_id} attestation from foreign container "
+                    f"{att.container_identity!r} != {rt.handle.identifier!r}"
+                )
+            if att.running is not True:
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellWorkspaceMismatchError(
+                    f"cell {rt.identity.cell_id} owned container not running at attest"
+                )
+            if att.workspace_config != expected_ws:
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellWorkspaceMismatchError(
+                    f"cell {rt.identity.cell_id} container workspace config "
+                    f"{att.workspace_config!r} != {expected_ws!r}"
+                )
+            # Storage-root attestation (§13/§27): the owned container's rag-storage mount
+            # must be our exact run-owned working dir. This host-side binding is visible
+            # ONLY here, not via /health.
+            if att.storage_dest != LIGHTRAG_WORKING_DIR_MOUNT or not _paths_equal(
+                att.storage_source, rt.working_dir
+            ):
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellWorkspaceMismatchError(
+                    f"cell {rt.identity.cell_id} storage mount "
+                    f"{att.storage_source!r}->{att.storage_dest!r} is not the owned root"
+                )
+            attested = True
+            kinds.append("DERIVED_OWNED_CONTAINER_CONFIG")
+
+        if not attested:
+            # Neither a DIRECT report nor an attestor gave evidence: absence NEVER
+            # implies PASS (§24/§28).
+            rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+            raise CellWorkspaceMismatchError(
+                f"cell {rt.identity.cell_id} runtime workspace unverifiable — "
+                "no attestation evidence (blocking readiness)"
+            )
+        rt.workspace_attestation_kind = "+".join(kinds)
 
     # -- teardown (task §19/§20/§21) -----------------------------------------
 
@@ -1089,6 +1349,8 @@ class LightRagCellProvisioner:
             process_pid=rt.handle.pid,
             started_at=rt.started_at,
             state=rt.state,
+            workspace_attestation_kind=rt.workspace_attestation_kind,
+            workspace_direct_runtime_report=rt.workspace_direct_runtime_report,
         )
 
 
@@ -1149,12 +1411,18 @@ __all__ = [
     "assert_cell_paths_safe",
     "FreshnessResult",
     "scan_workspace_freshness",
+    "versions_equivalent",
     "CellProcessSpec",
     "CellProcessHandle",
     "TerminationResult",
     "CellProcessController",
     "CellHealthObservation",
     "CellHealthProber",
+    "parse_health_payload",
+    "CellRuntimeAttestation",
+    "CellRuntimeAttestor",
+    "parse_runtime_inspect",
+    "DockerRuntimeAttestor",
     "PortAllocator",
     "EphemeralPortAllocator",
     "port_is_open",
