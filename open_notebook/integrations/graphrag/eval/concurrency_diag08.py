@@ -566,22 +566,40 @@ async def run_sweep(
     plan: ConcurrencyDiagnosticPlan,
     *,
     run_id: str,
-    index_level_fn,
+    index_cell_fn,
+    cell_provisioner,
+    working_dir: str,
     authorized_live: bool = False,
     require_isolation: bool = True,
 ) -> SweepResult:
-    """Execute a bounded concurrency sweep — FAIL-CLOSED, injected, isolation-gated.
+    """Execute a bounded concurrency sweep — FAIL-CLOSED, cell-isolated (task §21).
 
-    This is the FUTURE live path, designed but never called in the 08E implementation
+    This is the FUTURE live path, designed but never called in the 08E.1 implementation
     phase (no caller passes ``authorized_live=True``). It performs NO provider/sidecar/DB
-    work itself: the caller injects ``index_level_fn(level, source_keys, repetition) ->
-    List[AttemptRecord]`` which owns the real (Option-A isolated, per-ID owned) indexing.
-    Guards (task §12/§13):
+    work itself. Every experimental cell — one (concurrency level, repetition) — is wrapped
+    in a ``cell_isolation08.diagnostic_cell08`` context that (via the injected
+    ``cell_provisioner``) gives the cell a FRESH LightRAG process + a UNIQUE per-cell
+    workspace, so no prior cell's LLM cache / graph state can leak in. The injected indexer
+    cannot bypass cell isolation: it is only ever called INSIDE an entered, validated cell.
+
+    Guards:
       * ``authorized_live`` must be True (explicit per-run live authorization);
       * active Option-A isolation is required (``isolation08.require_active_isolation``)
         unless ``require_isolation`` is disabled for a mock unit test;
-      * the plan must pass ``validate_plan`` (bounded).
-    It NEVER mutates concurrency/retry/allowlist and NEVER decides a root cause."""
+      * the plan must pass ``validate_plan`` (bounded);
+      * each cell must pass the cell-isolation validity gate — a failure raises
+        ``DiagnosticCellIsolationFailure`` and STOPS the sweep (no mid-run repair, §19);
+      * a duplicate cell identity fails closed via the ``CellRegistry`` (§22).
+    It NEVER mutates concurrency/retry/allowlist and NEVER decides a root cause.
+
+    ``index_cell_fn(level, cell, repetition) -> List[AttemptRecord]`` receives the entered
+    ``DiagnosticCell`` (with its isolated workspace) and owns the real indexing within it."""
+    from open_notebook.integrations.graphrag.eval.cell_isolation08 import (
+        CellIdentity,
+        CellRegistry,
+        diagnostic_cell08,
+    )
+
     validate_plan(plan)
     if not authorized_live:
         raise LiveDiagnosticNotAuthorizedError(
@@ -594,26 +612,34 @@ async def run_sweep(
 
         require_active_isolation()  # normal-DB path blocked (Option-A required)
 
+    registry = CellRegistry()  # defense-in-depth cell-identity uniqueness (§22)
     records: List[AttemptRecord] = []
     for lvl in plan.levels:
-        source_keys_placeholder: Tuple[str, ...] = ()  # caller derives from its benchmark
         for rep in range(1, lvl.repetitions + 1):
-            level_records = await index_level_fn(lvl, source_keys_placeholder, rep)
-            # Defense in depth (review LOW-2): a misbehaving injected indexer must not be
-            # able to exceed the validated plan. One terminal record per Source per rep is
-            # the diagnostic shape; more than the level's Source count, or a running total
-            # over the plan's total submissions, fails closed.
-            if len(level_records) > lvl.source_count:
-                raise DiagnosticBudgetExceededError(
-                    f"level {lvl.concurrency}: indexer returned {len(level_records)} "
-                    f"records > source_count {lvl.source_count}"
-                )
-            records.extend(level_records)
-            if len(records) > plan.total_submissions:
-                raise DiagnosticBudgetExceededError(
-                    f"cumulative records {len(records)} > plan total "
-                    f"{plan.total_submissions}"
-                )
+            identity = CellIdentity(
+                run_id=run_id, concurrency=lvl.concurrency, repetition=rep
+            )
+            # Each cell gets fresh, isolated LightRAG state; the indexer runs ONLY inside.
+            async with diagnostic_cell08(
+                identity,
+                provisioner=cell_provisioner,
+                registry=registry,
+                working_dir=working_dir,
+            ) as cell:
+                cell_records = await index_cell_fn(lvl, cell, rep)
+                # Defense in depth (review LOW-2): a misbehaving injected indexer must not
+                # exceed the validated plan.
+                if len(cell_records) > lvl.source_count:
+                    raise DiagnosticBudgetExceededError(
+                        f"level {lvl.concurrency}: indexer returned {len(cell_records)} "
+                        f"records > source_count {lvl.source_count}"
+                    )
+                records.extend(cell_records)
+                if len(records) > plan.total_submissions:
+                    raise DiagnosticBudgetExceededError(
+                        f"cumulative records {len(records)} > plan total "
+                        f"{plan.total_submissions}"
+                    )
     agg = aggregate(records)
     return SweepResult(
         run_id=run_id,

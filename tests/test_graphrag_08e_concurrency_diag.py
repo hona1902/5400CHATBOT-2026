@@ -256,7 +256,36 @@ def test_interpretation_h2_shape():
     assert interp["root_cause_confirmed"] is False
 
 
-# ---- §13/§19 live orchestration is fail-closed ------------------------------
+# ---- §13/§19/§21 live orchestration is fail-closed + cell-isolated ----------
+
+from open_notebook.integrations.graphrag.eval import (
+    cell_isolation08 as ci,  # noqa: E402
+)
+
+_WD = "/tmp/gr08e_diag_working_dir"  # notional working_dir for offline path proofs
+
+
+class _MockProvisioner:
+    """Offline provisioner: gives each cell its own isolated workspace, no sidecar."""
+
+    def __init__(self, *, fresh=True, owned=True):
+        self.provisioned = []
+        self.disposed = []
+        self._fresh = fresh
+        self._owned = owned
+
+    async def provision(self, identity):
+        self.provisioned.append(identity.workspace)
+        return ci.CellProvision(
+            workspace=identity.workspace,
+            storage_dir=ci.cell_storage_dir(_WD, identity.workspace),
+            fresh_extraction_state=self._fresh,
+            owned=self._owned,
+        )
+
+    async def dispose(self, identity, provision):
+        self.disposed.append(identity.workspace)
+        return ci.CellDisposal(disposed=True, owned=self._owned)
 
 
 def test_run_sweep_requires_live_authorization():
@@ -266,7 +295,10 @@ def test_run_sweep_requires_live_authorization():
         raise AssertionError("must not be called")
 
     with pytest.raises(cd.LiveDiagnosticNotAuthorizedError):
-        asyncio.run(cd.run_sweep(plan, run_id="x", index_level_fn=never))
+        asyncio.run(cd.run_sweep(
+            plan, run_id="run0", index_cell_fn=never,
+            cell_provisioner=_MockProvisioner(), working_dir=_WD,
+        ))
 
 
 def test_run_sweep_requires_isolation_when_authorized():
@@ -281,21 +313,24 @@ def test_run_sweep_requires_isolation_when_authorized():
     )
 
     with pytest.raises(IsolationOwnershipError):
-        asyncio.run(
-            cd.run_sweep(plan, run_id="x", index_level_fn=never, authorized_live=True)
-        )
+        asyncio.run(cd.run_sweep(
+            plan, run_id="run0", index_cell_fn=never,
+            cell_provisioner=_MockProvisioner(), working_dir=_WD, authorized_live=True,
+        ))
 
 
 def test_run_sweep_with_mock_indexer_is_offline():
-    """Authorized + isolation bypassed for a MOCK-only unit test: no provider/DB touched."""
+    """Authorized + isolation bypassed for a MOCK-only unit test: no provider/DB touched.
+    Each cell is entered/exited via the isolation contract with a unique workspace."""
     plan = cd.ConcurrencyDiagnosticPlan(
         levels=(cd.DiagnosticLevel(1, 1, 1), cd.DiagnosticLevel(2, 2, 1))
     )
     calls = {"n": 0}
+    prov = _MockProvisioner()
 
-    async def mock_index_level(level, keys, rep):
+    async def mock_index_cell(level, cell, rep):
         calls["n"] += 1
-        # Simulate: level 1 clean, level 2 one provider-capacity failure.
+        assert cell.validity.valid  # cell entered under a valid isolation boundary
         if level.concurrency == 1:
             return [_rec(1, "S001", cd.TERMINAL_SUCCESS)]
         return [
@@ -303,15 +338,17 @@ def test_run_sweep_with_mock_indexer_is_offline():
             _rec(2, "S002", cd.TERMINAL_FAILED, error_text="over capacity"),
         ]
 
-    res = asyncio.run(
-        cd.run_sweep(
-            plan, run_id="mock", index_level_fn=mock_index_level,
-            authorized_live=True, require_isolation=False,
-        )
-    )
+    res = asyncio.run(cd.run_sweep(
+        plan, run_id="mockrun", index_cell_fn=mock_index_cell,
+        cell_provisioner=prov, working_dir=_WD,
+        authorized_live=True, require_isolation=False,
+    ))
     assert calls["n"] == 2
     assert res.aggregate["total_failures"] == 1
     assert res.interpretation["root_cause_confirmed"] is False
+    # every cell provisioned AND disposed a UNIQUE workspace (no reuse)
+    assert len(prov.provisioned) == 2 and len(set(prov.provisioned)) == 2
+    assert set(prov.provisioned) == set(prov.disposed)
 
 
 def test_run_sweep_rejects_indexer_over_budget():
@@ -319,7 +356,7 @@ def test_run_sweep_rejects_indexer_over_budget():
     Source count fails closed (review LOW-2 defense-in-depth)."""
     plan = cd.ConcurrencyDiagnosticPlan(levels=(cd.DiagnosticLevel(1, 1, 1),))
 
-    async def greedy_index_level(level, keys, rep):
+    async def greedy_index_cell(level, cell, rep):
         return [  # 3 records for a source_count==1 level -> over budget
             _rec(1, "S001", cd.TERMINAL_SUCCESS),
             _rec(1, "S002", cd.TERMINAL_SUCCESS),
@@ -327,12 +364,11 @@ def test_run_sweep_rejects_indexer_over_budget():
         ]
 
     with pytest.raises(cd.DiagnosticBudgetExceededError):
-        asyncio.run(
-            cd.run_sweep(
-                plan, run_id="x", index_level_fn=greedy_index_level,
-                authorized_live=True, require_isolation=False,
-            )
-        )
+        asyncio.run(cd.run_sweep(
+            plan, run_id="run0", index_cell_fn=greedy_index_cell,
+            cell_provisioner=_MockProvisioner(), working_dir=_WD,
+            authorized_live=True, require_isolation=False,
+        ))
 
 
 # ---- §19 adversarial: no policy/allowlist/concurrency mutation --------------
