@@ -605,6 +605,20 @@ async def run_sweep(
         raise LiveDiagnosticNotAuthorizedError(
             "run_sweep requires explicit per-run live authorization (authorized_live=True)"
         )
+    # A provisioned cell is MANDATORY before the injected indexer can be reached
+    # (task §35/§58): the indexer runs only INSIDE an entered, validated cell, so a
+    # missing provisioner fails closed here — never a bypass to a bare live indexer.
+    if cell_provisioner is None:
+        raise LiveDiagnosticNotAuthorizedError(
+            "run_sweep requires a live cell provisioner (no provisioned cell, no indexing)"
+        )
+    if not (
+        callable(getattr(cell_provisioner, "provision", None))
+        and callable(getattr(cell_provisioner, "dispose", None))
+    ):
+        raise LiveDiagnosticNotAuthorizedError(
+            "cell_provisioner must implement the provision/dispose contract"
+        )
     if require_isolation:
         from open_notebook.integrations.graphrag.eval.isolation08 import (
             require_active_isolation,
