@@ -967,6 +967,28 @@ class LightRagCellProvisioner:
             return None
         return self._base_url(rt.port), rt.port
 
+    def active_provisioned_cell(
+        self, identity: CellIdentity
+    ) -> Optional[ProvisionedCell]:
+        """Read-only handle to a currently-active, PROVISIONED cell (or None).
+
+        This is the ownership-bound bridge the GraphRAG-08E.4 live indexer uses to
+        reach the EXACT cell it must index — the returned ``ProvisionedCell`` carries
+        the cell's own ``base_url``/``port``/``workspace``/``storage_dir``/
+        ``process_identifier``, all tied to this run_id+cell_id. It is a pure accessor:
+        it starts nothing, indexes nothing, and calls no provider (task §8/§22)."""
+        rt = self._active.get(identity.cell_id)
+        if (
+            rt is None
+            or rt.state != ProvisionState.PROVISIONED
+            or rt.port is None
+            or rt.version is None
+            or rt.handle is None
+            or rt.started_at is None
+        ):
+            return None
+        return self._provisioned_cell(rt)
+
     # -- provisioning state machine (atomic / self-cleaning, LOW-2) ----------
 
     async def _provision_cell(self, identity: CellIdentity) -> ProvisionedCell:
