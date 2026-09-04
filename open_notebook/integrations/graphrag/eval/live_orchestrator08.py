@@ -56,6 +56,9 @@ from open_notebook.integrations.graphrag.eval.live_indexer08 import (
     LiveIndexerConfig,
     ProvisionerLike,
 )
+from open_notebook.integrations.graphrag.eval.provider_binding08 import (
+    DiagnosticProviderBinding08,
+)
 
 FROZEN_FIXTURE_HASH = (
     "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d"
@@ -104,13 +107,17 @@ class OrchestratorDeps:
     #: (benchmark, keys) -> {key: DiagnosticSource} — creates the canonical Sources +
     #: canonical embedding INSIDE isolation (the ONLY provider embedding call path).
     source_preparer: Callable[[object, Tuple[str, ...]], Awaitable[Dict[str, DiagnosticSource]]]
-    #: (working_dir, runtime_attestor) -> a cell provisioner (real: LightRagCellProvisioner
-    #: with DockerCellProcessController + LightRagCellHealthProber + the attestor).
-    provisioner_factory: Callable[[str, object], ProvisionerLike]
+    #: (working_dir, runtime_attestor, provider_binding) -> a cell provisioner (real:
+    #: LightRagCellProvisioner with DockerCellProcessController + LightRagCellHealthProber
+    #: + the attestor + the frozen provider binding, require_provider_binding=True).
+    provisioner_factory: Callable[[str, object, object], ProvisionerLike]
     #: per-cell LightRAG index client factory (bound to each cell endpoint, 08E.4).
     client_factory: CellIndexClientFactory
     #: the REQUIRED owned-container runtime attestor (08E.3). None -> fail closed.
     runtime_attestor: Optional[object]
+    #: the REQUIRED frozen provider binding (08E.5). None -> fail closed. Carries only
+    #: public config + secret env NAMES (no value).
+    provider_binding: Optional[DiagnosticProviderBinding08] = None
     #: optional content-free artifact sink (never receives raw content).
     artifact_writer: Optional[Callable[[dict], None]] = None
     indexer_config: LiveIndexerConfig = field(default_factory=LiveIndexerConfig)
@@ -169,11 +176,29 @@ class LiveDiagnosticOrchestrator08:
             raise LiveDiagnosticConfigError(
                 "DockerRuntimeAttestor is required for live indexing (missing) — fail closed"
             )
+        # required frozen provider binding (GraphRAG-08E.5 §16) — pure config check, before
+        # any provider path. Presence of the binding/secret must NOT imply authorization.
+        binding = self._deps.provider_binding
+        if binding is None:
+            raise LiveDiagnosticConfigError(
+                "provider binding is required for live indexing (missing) — fail closed"
+            )
+        binding.validate()  # exactly the frozen benchmark binding, else fail closed
         # -- 2) live-authorization gate: deny by default, BEFORE isolation/provider --
         if not authorized_live:
             raise LiveDiagnosticNotAuthorizedError(
                 "live diagnostic requires explicit authorized_live=True (deny by default)"
             )
+        # Fail FAST + content-safe on a missing provider secret (name only, §35/§61) —
+        # AFTER authorization, still pre-provider; the VALUE is resolved later, at container
+        # launch (§8).
+        import os
+
+        for secret_env in binding.required_secret_envs():
+            if not os.environ.get(secret_env, "").strip():
+                raise LiveDiagnosticConfigError(
+                    f"REQUIRED_RUNTIME_SECRET_MISSING={secret_env}"
+                )
 
         rid = run_id or "gr08e4run"
         indexer: Optional[LiveCellIndexer08] = None
@@ -194,9 +219,9 @@ class LiveDiagnosticOrchestrator08:
                     config=self._deps.indexer_config,
                 )
                 indexer = built
-                # -- 6) per-cell provisioner + injected attestor (task §23) --
+                # -- 6) per-cell provisioner + injected attestor + provider binding --
                 provisioner = self._deps.provisioner_factory(
-                    working_dir, self._deps.runtime_attestor
+                    working_dir, self._deps.runtime_attestor, binding
                 )
 
                 # -- 7) per-cell indexer closure; run ONLY inside a valid cell --
@@ -341,6 +366,9 @@ def default_live_deps(
     from open_notebook.integrations.graphrag.eval.live_indexer08 import (
         real_cell_index_client_factory,
     )
+    from open_notebook.integrations.graphrag.eval.provider_binding08 import (
+        frozen_provider_binding,
+    )
 
     async def _prepare_sources(benchmark, keys: Tuple[str, ...]) -> Dict[str, DiagnosticSource]:
         # Create canonical Sources inside the active Option-A isolation + canonical
@@ -370,8 +398,12 @@ def default_live_deps(
             out[key] = DiagnosticSource(key=key, canonical_id=canonical, text=src.text)
         return out
 
-    def _provisioner_factory(working_dir: str, attestor):
-        cfg = ProvisionerConfig(eval_root=eval_root)
+    def _provisioner_factory(working_dir: str, attestor, provider_binding):
+        cfg = ProvisionerConfig(
+            eval_root=eval_root,
+            provider_binding=provider_binding,
+            require_provider_binding=True,  # GraphRAG-08E.5: cells must be binding-attested
+        )
         return LightRagCellProvisioner(
             cfg,
             process_controller=DockerCellProcessController(),
@@ -387,6 +419,7 @@ def default_live_deps(
         provisioner_factory=_provisioner_factory,
         client_factory=real_cell_index_client_factory(api_key=api_key),
         runtime_attestor=DockerRuntimeAttestor(),
+        provider_binding=frozen_provider_binding(),
     )
 
 

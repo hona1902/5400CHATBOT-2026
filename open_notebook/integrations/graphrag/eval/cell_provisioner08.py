@@ -68,6 +68,9 @@ from open_notebook.integrations.graphrag.eval.cell_isolation08 import (
     cell_storage_dir,
     sanitize_workspace,
 )
+from open_notebook.integrations.graphrag.eval.provider_binding08 import (
+    DiagnosticProviderBinding08,
+)
 
 #: Pinned diagnostic sidecar image (mirrors deploy/graphrag-poc compose; live-only).
 DEFAULT_LIGHTRAG_IMAGE = f"ghcr.io/hkuds/lightrag:{VERIFIED_LIGHTRAG_VERSION}"
@@ -155,6 +158,11 @@ class CellWorkspaceMismatchError(CellProvisionError):
 
 class CellCleanupError(CellProvisionError):
     """Teardown could not be POSITIVELY verified — residue may remain (fail closed)."""
+
+
+class CellProviderBindingError(CellProvisionError):
+    """The cell's runtime provider binding is absent/wrong or its secret is missing
+    (GraphRAG-08E.5) — readiness BLOCKS before any provider-backed indexing."""
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +330,12 @@ def scan_workspace_freshness(cell_storage: str) -> FreshnessResult:
 
 @dataclass(frozen=True)
 class CellProcessSpec:
-    """Content-free spec for one fresh LightRAG cell process (NO credential)."""
+    """Content-safe spec for one fresh LightRAG cell process (NO secret VALUE).
+
+    ``provider_binding`` (GraphRAG-08E.5) carries the frozen provider CONFIG — public
+    binding/model/host strings + the NAMES of the secret env vars — so a cell container is
+    launched with the OpenRouter models instead of the image's Ollama default. It holds no
+    secret value, so it is safe on the spec's repr/logs (task §12)."""
 
     cell_id: str
     workspace: str
@@ -330,6 +343,7 @@ class CellProcessSpec:
     host: str
     port: int
     image: str
+    provider_binding: Optional[DiagnosticProviderBinding08] = None
 
 
 @dataclass(frozen=True)
@@ -539,17 +553,44 @@ class DockerCellProcessController:
 
     async def start(self, spec: CellProcessSpec) -> CellProcessHandle:
         name = f"gr08e2_{spec.cell_id}"
-        api_key = os.environ.get(self._api_key_env, "").strip()
         args = [
             "docker", "run", "-d", "--name", name,
             "-p", f"{spec.host}:{spec.port}:{LIGHTRAG_CONTAINER_PORT}",
             "-e", f"WORKSPACE={spec.workspace}",
             "-v", f"{spec.working_dir}:{LIGHTRAG_WORKING_DIR_MOUNT}",
         ]
+        # Secret VALUES go ONLY through the subprocess env; Docker inherits them via a bare
+        # ``-e <NAME>`` (never ``-e NAME=<value>``), so no key ever reaches argv/logs (§10).
+        subenv = dict(os.environ)
+        inherit: list[str] = []
+        # Frozen provider bindings (GraphRAG-08E.5): PUBLIC values on argv; provider keys
+        # resolved LATE from their source env and injected by inheritance.
+        if spec.provider_binding is not None:
+            for k, v in spec.provider_binding.container_public_env().items():
+                args += ["-e", f"{k}={v}"]
+            for container_var, source_env in (
+                spec.provider_binding.container_secret_env_map().items()
+            ):
+                val = os.environ.get(source_env, "").strip()
+                if not val:
+                    # Name the MISSING variable only — never a value (§35/§61).
+                    raise CellProcessStartError(
+                        f"cell {spec.cell_id}: required provider secret env "
+                        f"{source_env} is missing"
+                    )
+                subenv[container_var] = val
+                inherit.append(container_var)
+        # Sidecar auth key (separate secret, §6): also inherited, never on argv.
+        api_key = os.environ.get(self._api_key_env, "").strip()
         if api_key:
-            args += ["-e", f"LIGHTRAG_API_KEY={api_key}"]
+            subenv["LIGHTRAG_API_KEY"] = api_key
+            inherit.append("LIGHTRAG_API_KEY")
+        for nm in inherit:
+            args += ["-e", nm]  # bare NAME -> value inherited from subenv, not on argv
         args.append(spec.image)
-        out = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        out = subprocess.run(
+            args, capture_output=True, text=True, timeout=120, env=subenv
+        )
         if out.returncode != 0:
             # Never echo stderr (may carry env/secret); surface only the return code.
             raise CellProcessStartError(
@@ -672,7 +713,10 @@ class LightRagCellHealthProber:
 
 @dataclass(frozen=True)
 class CellRuntimeAttestation:
-    """Content-safe runtime config of the exact OWNED cell container (no secret)."""
+    """Content-safe runtime config of the exact OWNED cell container (no secret VALUE).
+
+    GraphRAG-08E.5 adds the PUBLIC provider-binding config (binding/model names) and a
+    presence-only readout of the provider secret env — the value is NEVER read."""
 
     evidence_available: bool
     container_identity: Optional[str]
@@ -680,6 +724,14 @@ class CellRuntimeAttestation:
     workspace_config: Optional[str]  # the WORKSPACE env the owned container received
     storage_source: Optional[str]    # host mount source bound to the rag-storage dir
     storage_dest: Optional[str]      # in-container mount destination
+    llm_binding: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_host: Optional[str] = None
+    embedding_binding: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embedding_host: Optional[str] = None
+    llm_secret_present: Optional[bool] = None       # presence ONLY, never the value
+    embedding_secret_present: Optional[bool] = None
 
 
 class CellRuntimeAttestor(Protocol):
@@ -701,6 +753,26 @@ _WORKSPACE_ENV_TEMPLATE = (
 _MOUNTS_TEMPLATE = "{{range .Mounts}}{{.Destination}}|{{.Source}}{{println}}{{end}}"
 _STATE_TEMPLATE = "{{.State.Running}}"
 
+#: Whitelist template that emits ONLY the PUBLIC provider-binding env vars (binding, model,
+#: host) as ``KEY=VALUE`` lines — never the ``*_API_KEY`` vars (§20/§43). A provider key can
+#: never be printed by this template.
+_BINDING_ENV_TEMPLATE = (
+    '{{range .Config.Env}}{{$k := index (split . "=") 0}}'
+    '{{if or (eq $k "LLM_BINDING") (eq $k "LLM_MODEL") (eq $k "LLM_BINDING_HOST") '
+    '(eq $k "EMBEDDING_BINDING") (eq $k "EMBEDDING_MODEL") (eq $k "EMBEDDING_BINDING_HOST")'
+    '}}{{println .}}{{end}}{{end}}'
+)
+
+
+def _presence_template(var: str) -> str:
+    """Template that prints ``PRESENT`` iff ``var`` exists in the container env — NEVER its
+    value (§21). Used to attest provider-secret PRESENCE only."""
+    return (
+        '{{range .Config.Env}}{{if eq (index (split . "=") 0) "'
+        + var
+        + '"}}PRESENT{{end}}{{end}}'
+    )
+
 
 def parse_runtime_inspect(
     *,
@@ -710,13 +782,16 @@ def parse_runtime_inspect(
     workspace_env: Optional[str],
     mounts_text: Optional[str],
     storage_dest: str,
+    binding_env_text: Optional[str] = None,
+    llm_secret_present_raw: Optional[str] = None,
+    embedding_secret_present_raw: Optional[str] = None,
 ) -> CellRuntimeAttestation:
     """Pure parser for the targeted-inspect outputs → a content-safe attestation.
 
     Split out from the Docker calls so it is unit-testable (incl. a secret-injection
-    test, task §29). Reads ONLY the WORKSPACE value + the mount whose destination is the
-    rag-storage dir; a secret accidentally present in ``mounts_text`` for another mount
-    is not extracted. Missing/unparseable evidence yields ``evidence_available=False``."""
+    test, task §29). Reads ONLY the WORKSPACE value, the rag-storage mount, the 4 PUBLIC
+    provider-binding values, and provider-secret PRESENCE — never a secret value, never an
+    unrelated env var. Missing/unparseable evidence yields ``evidence_available=False``."""
     if not inspect_ok:
         return CellRuntimeAttestation(
             evidence_available=False, container_identity=None, running=None,
@@ -734,9 +809,34 @@ def parse_runtime_inspect(
             dest = parts[0].strip()
             source = parts[1].strip() or None
             break
+    # PUBLIC binding values (whitelisted keys only).
+    binding_kv: Dict[str, str] = {}
+    for line in (binding_env_text or "").splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k.strip() in (
+            "LLM_BINDING", "LLM_MODEL", "LLM_BINDING_HOST",
+            "EMBEDDING_BINDING", "EMBEDDING_MODEL", "EMBEDDING_BINDING_HOST",
+        ):
+            binding_kv[k.strip()] = v.strip()
+    llm_present = (
+        None if llm_secret_present_raw is None
+        else llm_secret_present_raw.strip() == "PRESENT"
+    )
+    emb_present = (
+        None if embedding_secret_present_raw is None
+        else embedding_secret_present_raw.strip() == "PRESENT"
+    )
     return CellRuntimeAttestation(
         evidence_available=True, container_identity=identity, running=running,
         workspace_config=ws, storage_source=source, storage_dest=dest,
+        llm_binding=binding_kv.get("LLM_BINDING"),
+        llm_model=binding_kv.get("LLM_MODEL"),
+        llm_host=binding_kv.get("LLM_BINDING_HOST"),
+        embedding_binding=binding_kv.get("EMBEDDING_BINDING"),
+        embedding_model=binding_kv.get("EMBEDDING_MODEL"),
+        embedding_host=binding_kv.get("EMBEDDING_BINDING_HOST"),
+        llm_secret_present=llm_present,
+        embedding_secret_present=emb_present,
     )
 
 
@@ -761,10 +861,24 @@ class DockerRuntimeAttestor:
             )
         _, ws_env = self._inspect(_WORKSPACE_ENV_TEMPLATE, name)
         _, mounts = self._inspect(_MOUNTS_TEMPLATE, name)
+        # GraphRAG-08E.5: PUBLIC provider-binding values + provider-secret PRESENCE only.
+        _, binding_env = self._inspect(_BINDING_ENV_TEMPLATE, name)
+        from open_notebook.integrations.graphrag.eval.provider_binding08 import (
+            CONTAINER_EMBEDDING_SECRET,
+            CONTAINER_LLM_SECRET,
+        )
+
+        _, llm_secret = self._inspect(_presence_template(CONTAINER_LLM_SECRET), name)
+        _, emb_secret = self._inspect(
+            _presence_template(CONTAINER_EMBEDDING_SECRET), name
+        )
         return parse_runtime_inspect(
             identity=name, inspect_ok=True, state_running=state,
             workspace_env=ws_env, mounts_text=mounts,
             storage_dest=LIGHTRAG_WORKING_DIR_MOUNT,
+            binding_env_text=binding_env,
+            llm_secret_present_raw=llm_secret,
+            embedding_secret_present_raw=emb_secret,
         )
 
 
@@ -790,6 +904,13 @@ class ProvisionerConfig:
     #: is BLOCKED — never assumed from the intended input (task §15/§16/§24/§28). Only a
     #: test that deliberately drops both evidence sources should relax this.
     require_runtime_workspace: bool = True
+    #: The frozen provider binding injected into each cell container (GraphRAG-08E.5).
+    provider_binding: Optional[DiagnosticProviderBinding08] = None
+    #: When True the cell's runtime provider binding (LLM/embedding binding+model +
+    #: provider-secret presence) must be ATTESTED before PROVISIONED, and a binding must be
+    #: configured — else readiness BLOCKS (task §16/§22). Live runs set this True; the
+    #: provider-free smoke/offline suites leave it False.
+    require_provider_binding: bool = False
 
 
 @dataclass(frozen=True)
@@ -813,6 +934,8 @@ class ProvisionedCell:
     #: Runtime workspace/storage attestation provenance (GraphRAG-08E.3).
     workspace_attestation_kind: str = ""  # DIRECT_HEALTH_CONFIG / DERIVED_OWNED_CONTAINER_CONFIG / both
     workspace_direct_runtime_report: bool = False
+    #: Runtime provider-binding attestation outcome (GraphRAG-08E.5).
+    provider_binding_verified: bool = False
     fresh_extraction_state: bool = True
     owned: bool = True
 
@@ -846,6 +969,7 @@ class ProvisionedCell:
             "state": self.state,
             "workspace_attestation_kind": self.workspace_attestation_kind,
             "workspace_direct_runtime_report": self.workspace_direct_runtime_report,
+            "provider_binding_verified": self.provider_binding_verified,
             "fresh_extraction_state": self.fresh_extraction_state,
             "owned": self.owned,
             "ready": self.ready,
@@ -868,6 +992,7 @@ class _CellRuntime:
     started_at: Optional[str] = None
     workspace_attestation_kind: str = ""
     workspace_direct_runtime_report: bool = False
+    provider_binding_verified: bool = False
 
 
 @dataclass
@@ -912,6 +1037,14 @@ class LightRagCellProvisioner:
             raise CellProvisionConfigurationError(
                 "ProvisionerConfig.eval_root must be a non-empty absolute path"
             )
+        # GraphRAG-08E.5: if provider binding is required it must be configured AND be the
+        # frozen benchmark binding — validated up front, before any cell is provisioned.
+        if config.require_provider_binding:
+            if config.provider_binding is None:
+                raise CellProviderBindingError(
+                    "require_provider_binding is set but no provider_binding is configured"
+                )
+            config.provider_binding.validate()
         self._cfg = config
         self._proc = process_controller
         self._prober = health_prober
@@ -1081,6 +1214,7 @@ class LightRagCellProvisioner:
             host=self._cfg.host,
             port=port,
             image=self._cfg.image,
+            provider_binding=self._cfg.provider_binding,
         )
         try:
             rt.handle = await self._proc.start(spec)
@@ -1142,6 +1276,65 @@ class LightRagCellProvisioner:
         if self._cfg.require_runtime_workspace:
             await self._attest_workspace(rt, obs)
         rt.state = ProvisionState.WORKSPACE_VERIFIED
+        # Provider-binding ATTESTATION (GraphRAG-08E.5, task §22): before the cell may be
+        # used for provider-backed indexing, prove the owned container is bound to the
+        # frozen OpenRouter LLM/embedding models AND that the provider secret is present —
+        # else a cell could silently fall back to the image's Ollama default. Fail closed.
+        if self._cfg.require_provider_binding:
+            await self._attest_provider_binding(rt)
+
+    async def _attest_provider_binding(self, rt: _CellRuntime) -> None:
+        """Verify the owned container's runtime provider binding matches the frozen config
+        and the provider secret is present (presence only, never the value)."""
+        binding = self._cfg.provider_binding
+        assert binding is not None  # guaranteed by __init__ when require_provider_binding
+        if self._attestor is None:
+            rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+            raise CellProviderBindingError(
+                f"cell {rt.identity.cell_id} provider binding unverifiable (no attestor)"
+            )
+        assert rt.handle is not None
+        att = await self._attestor.attest(rt.handle)
+        # Evidence + ownership + liveness (defense-in-depth symmetry with the workspace
+        # gate): the binding evidence must come from the EXACT owned, running container.
+        if not att.evidence_available:
+            rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+            raise CellProviderBindingError(
+                f"cell {rt.identity.cell_id} provider-binding evidence unavailable"
+            )
+        if att.container_identity != rt.handle.identifier:
+            rt.state = ProvisionState.OWNERSHIP_FAILED
+            raise CellProvisionOwnershipError(
+                f"cell {rt.identity.cell_id} binding attestation from foreign container "
+                f"{att.container_identity!r} != {rt.handle.identifier!r}"
+            )
+        if att.running is not True:
+            rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+            raise CellProviderBindingError(
+                f"cell {rt.identity.cell_id} owned container not running at binding attest"
+            )
+        checks = {
+            "llm_binding": (att.llm_binding, binding.llm_binding),
+            "llm_model": (att.llm_model, binding.llm_model),
+            "llm_host": (att.llm_host, binding.llm_host),
+            "embedding_binding": (att.embedding_binding, binding.embedding_binding),
+            "embedding_model": (att.embedding_model, binding.embedding_model),
+            "embedding_host": (att.embedding_host, binding.embedding_host),
+        }
+        for field, (observed, expected) in checks.items():
+            if observed != expected:
+                rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+                raise CellProviderBindingError(
+                    f"cell {rt.identity.cell_id} runtime {field} {observed!r} != frozen "
+                    f"{expected!r} (no Ollama/default fallback allowed)"
+                )
+        if att.llm_secret_present is not True or att.embedding_secret_present is not True:
+            rt.state = ProvisionState.WORKSPACE_VERIFY_FAILED
+            raise CellProviderBindingError(
+                f"cell {rt.identity.cell_id} provider secret not present on container "
+                "(presence check failed)"
+            )
+        rt.provider_binding_verified = True
 
     async def _attest_workspace(
         self, rt: _CellRuntime, obs: CellHealthObservation
@@ -1373,6 +1566,7 @@ class LightRagCellProvisioner:
             state=rt.state,
             workspace_attestation_kind=rt.workspace_attestation_kind,
             workspace_direct_runtime_report=rt.workspace_direct_runtime_report,
+            provider_binding_verified=rt.provider_binding_verified,
         )
 
 
@@ -1428,6 +1622,7 @@ __all__ = [
     "CellVersionMismatchError",
     "CellWorkspaceMismatchError",
     "CellCleanupError",
+    "CellProviderBindingError",
     "ProvisionState",
     "is_within_root",
     "assert_cell_paths_safe",

@@ -21,6 +21,7 @@ from open_notebook.integrations.graphrag.eval import dataset08 as d
 from open_notebook.integrations.graphrag.eval import index_retry08 as ir
 from open_notebook.integrations.graphrag.eval import live_indexer08 as li
 from open_notebook.integrations.graphrag.eval import live_orchestrator08 as lo
+from open_notebook.integrations.graphrag.eval import provider_binding08 as pb
 
 FIXTURE_HASH = "a58a68535c345e18f0263904f818e4e2068a164056408665d8bb9233eceb143d"
 RUN = "run08e4a"
@@ -39,6 +40,9 @@ def _no_network(monkeypatch):
     # The fake isolation runtime stands in for active Option-A isolation.
     from open_notebook.integrations.graphrag.eval import isolation08
     monkeypatch.setattr(isolation08, "require_active_isolation", lambda: None)
+    # Synthetic provider secret so the orchestrator's content-safe presence check passes
+    # (GraphRAG-08E.5); the fake provisioner never launches a real container with it.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-08e4-openrouter-key")
     yield
 
 
@@ -208,9 +212,10 @@ def _mk_deps(order, working_dir, *, attestor=_UNSET, client_script=None,
         model_seeder=model_seeder,
         model_restorer=model_restorer,
         source_preparer=source_preparer,
-        provisioner_factory=lambda wd, att: prov,
+        provisioner_factory=lambda wd, att, binding: prov,
         client_factory=factory,
         runtime_attestor=attestor,
+        provider_binding=pb.frozen_provider_binding(),
         artifact_writer=artifact_writer,
     )
     return deps, prov, factory, iso, order
