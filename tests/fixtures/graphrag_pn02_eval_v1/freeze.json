@@ -1,0 +1,16 @@
+{
+  "fixture_name": "graphrag_pn02_eval_v1",
+  "namespace_tag": "__graphrag_pn02_eval_v1__",
+  "fixture_sha256": "9ce7df742810424d9ef7b7b34962187d9061245f81471f5fb1d7f2608f6899a6",
+  "notebook_count": 3,
+  "canonical_source_count": 21,
+  "unique_source_count": 18,
+  "shared_source_count": 3,
+  "workspace_membership_count": 24,
+  "query_count": 24,
+  "negative_count": 3,
+  "multihop_count": 3,
+  "frozen": true,
+  "hash_method": "SHA-256 over canonical sorted-key JSON serialization of {fixture_version, notebooks, source contents, membership matrix, query list + ground truth} (PN02A §16). No timestamps, no derived routing/workspace ids.",
+  "frozen_note": "graphrag_pn02_eval_v1 candidate-frozen at GraphRAG-PN02B. Any content change requires graphrag_pn02_eval_v2 (task §63/§64). Hash immutable after PN02B checkpoint."
+}
