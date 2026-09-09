@@ -44,6 +44,8 @@ from open_notebook.integrations.graphrag.eval.attestpn02d import (
 from open_notebook.integrations.graphrag.eval.authlivepn02d import (
     PN02ProviderRunAuthorization,
     ProviderRunNotAuthorized,
+    RunIdConsistencyError,
+    assert_run_ids_consistent,
     mint_indexing_authorization,
     mint_provider_run_authorization,
     mint_query_authorization,
@@ -98,6 +100,7 @@ from open_notebook.integrations.graphrag.eval.removallivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.reportpn02 import build_report
 from open_notebook.integrations.graphrag.eval.routelivepn02d import (
+    NotebookRuntimeRoute,
     PN02Router,
     attest_route,
     build_route_table,
@@ -162,11 +165,17 @@ class B1OfflineDriver:
         *,
         git_baseline_commit: str = "OFFLINE",
         git_baseline_tag: str = "OFFLINE",
+        route_table: Optional[Mapping[str, NotebookRuntimeRoute]] = None,
     ) -> None:
         self._fx = fx
         self._deps = deps
         self._git_commit = git_baseline_commit
         self._git_tag = git_baseline_tag
+        # Additive (design §15): a LIVE run injects the runtime manager's REAL route
+        # table (real base_urls); the offline path leaves this None → default
+        # placeholder endpoints (unchanged behaviour). The scientific orchestration is
+        # otherwise identical for both paths.
+        self._route_table = dict(route_table) if route_table is not None else None
 
     async def run(
         self,
@@ -234,10 +243,19 @@ class B1OfflineDriver:
                 run_id, DriverTechnicalOutcome.FAILED_PROVIDER_AUTHORIZATION,
                 "provider_run_not_authorized", budget, cleanup_holder,
             )
+        # L-1 (design §8): the driver/operation run_id MUST equal the capability's
+        # run_id — a capability minted for another run can never drive this run.
+        try:
+            assert_run_ids_consistent(run_id, auth)
+        except RunIdConsistencyError:
+            return self._fail(
+                run_id, DriverTechnicalOutcome.FAILED_PROVIDER_AUTHORIZATION,
+                "run_id_cross_check_failed", budget, cleanup_holder,
+            )
         validate_boundary_b(DEFAULT_BOUNDARY_B)  # defensive re-check (design §36)
 
         # -- 3) routing validation (design §11). ----------------------------------
-        router = PN02Router(build_route_table(self._fx))
+        router = PN02Router(self._route_table or build_route_table(self._fx))
 
         # -- 4) provider-binding materialization (auth precedes binding, §10). ----
         present = (

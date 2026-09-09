@@ -110,6 +110,37 @@ class ProviderRunAuthorizationError(ValueError):
     """The inputs to mint a PN02ProviderRunAuthorization were invalid (fail-closed)."""
 
 
+class RunIdConsistencyError(RuntimeError):
+    """A per-operation run_id did not match every capability's run_id (design §8/L-1).
+
+    The B0C-A run_id cross-check (finding L-1) makes this a hard fail-closed guard:
+    ``operation.run_id == provider_run_auth.run_id == indexing/query_auth.run_id ==
+    driver.run_id == manifest.run_id``. A mismatch is refused BEFORE any backend or
+    network dispatch, not merely at mint time — so a capability minted for one run can
+    never drive an operation labelled with a different run_id.
+    """
+
+
+def assert_run_ids_consistent(run_id: str, *auths: object) -> None:
+    """Fail closed unless ``run_id`` equals every supplied capability's ``run_id`` (L-1).
+
+    ``None`` capabilities are skipped (an optional stage may be absent); every present
+    capability MUST carry an identical ``run_id`` attribute. Raises
+    ``RunIdConsistencyError`` on the first mismatch (or an empty run_id).
+    """
+    if not run_id:
+        raise RunIdConsistencyError("run_id must be non-empty (design §8/L-1)")
+    for auth in auths:
+        if auth is None:
+            continue
+        observed = getattr(auth, "run_id", None)
+        if observed != run_id:
+            raise RunIdConsistencyError(
+                f"run_id cross-check failed: capability run_id {observed!r} != "
+                f"operation run_id {run_id!r} (fail-closed, design §8/L-1)"
+            )
+
+
 # --------------------------------------------------------------------------- #
 # Frozen provider-config identity (secret-free, design §7/§R1.11)
 # --------------------------------------------------------------------------- #
@@ -229,6 +260,14 @@ def mint_provider_run_authorization(
     """
     # 1) genuine real-preflight capability required first (design §6).
     require_real_preflight_authorization(real_preflight_auth)
+    # 1b) B0CB-H1 hardening: the preflight capability MUST have been minted for the
+    #     SAME fixture we are authorizing — otherwise a preflight cap for another
+    #     fixture (same run_id) could authorize this run. Bind the fixture identity.
+    if real_preflight_auth.fixture_hash != fixture_hash:  # type: ignore[union-attr]
+        raise ProviderRunAuthorizationError(
+            "real-preflight capability fixture_hash does not match the fixture being "
+            "authorized (fail-closed, B0CB-H1)"
+        )
     # 2) fixture-hash hard gate (design §37).
     if fixture_hash != expected_fixture_hash:
         raise ProviderRunAuthorizationError(
@@ -409,6 +448,8 @@ __all__ = [
     "IndexingAuthorizationMissing",
     "QueryAuthorizationMissing",
     "ProviderRunAuthorizationError",
+    "RunIdConsistencyError",
+    "assert_run_ids_consistent",
     "frozen_provider_config_id",
     "PN02ProviderRunAuthorization",
     "mint_provider_run_authorization",

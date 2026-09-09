@@ -23,8 +23,10 @@ from open_notebook.integrations.graphrag.eval.authlivepn02d import (
     IndexingAuthorization,
     PN02ProviderRunAuthorization,
     ProviderOperationClass,
+    assert_run_ids_consistent,
     require_indexing_authorization,
     require_operation_allowed,
+    require_provider_run_authorization,
 )
 from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
     BudgetClass,
@@ -138,7 +140,16 @@ class MembershipIndexExecutor:
         self._budget = budget
         self._store = mapping_store
         self._indexing_auth = require_indexing_authorization(indexing_auth)
-        self._provider_run_auth = provider_run_auth
+        # L-2 (design §8): validate the provider-run capability TYPE at init, so a
+        # real (or offline) executor can never be constructed with a look-alike object
+        # that merely has similar fields (unforgeable ``_AUTH_KEY``-minted capability).
+        self._provider_run_auth = require_provider_run_authorization(provider_run_auth)
+        # L-1 (design §8): the run identity is the provider-run capability's run_id;
+        # every other capability must agree (cross-checked again before each dispatch).
+        self._run_id = self._provider_run_auth.run_id
+        assert_run_ids_consistent(
+            self._run_id, self._provider_run_auth, self._indexing_auth
+        )
         self._client_factory = client_factory
         self._memberships = frozenset(memberships)
         self._max_attempts = max_attempts_per_operation
@@ -154,6 +165,10 @@ class MembershipIndexExecutor:
     ) -> IndexOperationRecord:
         """Index ONE membership edge; submit -> poll -> terminal, bounded retry (§16/§17)."""
         require_indexing_authorization(self._indexing_auth)
+        # L-1: fail closed BEFORE dispatch if any capability's run_id drifted.
+        assert_run_ids_consistent(
+            self._run_id, self._provider_run_auth, self._indexing_auth
+        )
         require_operation_allowed(
             self._provider_run_auth, ProviderOperationClass.GRAPH_INDEX
         )

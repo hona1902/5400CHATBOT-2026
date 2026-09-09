@@ -22,7 +22,9 @@ from open_notebook.integrations.graphrag.eval.authlivepn02d import (
     PN02ProviderRunAuthorization,
     ProviderOperationClass,
     QueryAuthorization,
+    assert_run_ids_consistent,
     require_operation_allowed,
+    require_provider_run_authorization,
     require_query_authorization,
 )
 from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
@@ -89,14 +91,24 @@ class GDQueryExecutor:
     ) -> None:
         self._router = router
         self._budget = budget
-        self._provider_run_auth = provider_run_auth
+        # L-2 (design §8): unforgeable capability-type guard at init.
+        self._provider_run_auth = require_provider_run_authorization(provider_run_auth)
         self._query_auth = require_query_authorization(query_auth)
+        # L-1 (design §8): pin the run identity + cross-check every capability.
+        self._run_id = self._provider_run_auth.run_id
+        assert_run_ids_consistent(
+            self._run_id, self._provider_run_auth, self._query_auth
+        )
         self._attestations = dict(attestations)
         self._backend_factory = backend_factory
         self._allowlist = frozenset(source_allowlist)
 
     def _authorize(self, notebook_id: str) -> NotebookRuntimeRoute:
         require_query_authorization(self._query_auth)
+        # L-1: fail closed BEFORE dispatch on any run_id drift.
+        assert_run_ids_consistent(
+            self._run_id, self._provider_run_auth, self._query_auth
+        )
         require_operation_allowed(
             self._provider_run_auth, ProviderOperationClass.GD_QUERY_DATA
         )
