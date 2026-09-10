@@ -30,6 +30,7 @@ lifecycle with a mock controller + mock prober and launch NO real container
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import (
     Awaitable,
@@ -70,6 +71,7 @@ from open_notebook.integrations.graphrag.eval.realsidecarpn02d import (
     assert_no_provider_binding_in_command,
     build_run_command,
     make_spec,
+    wait_healthy,
 )
 from open_notebook.integrations.graphrag.eval.routelivepn02d import (
     NotebookRuntimeRoute,
@@ -77,6 +79,14 @@ from open_notebook.integrations.graphrag.eval.routelivepn02d import (
 )
 
 _LOOPBACK_HOST = "127.0.0.1"
+
+#: PN02D-B1-PF1: bounded readiness wait for a provider-free preflight sidecar. A real
+#: LightRAG container reports ``container_running`` from ``docker run -d`` well BEFORE its
+#: HTTP app answers ``/health``; the preflight must wait for actual readiness before
+#: probing the version signals, or the signals are unavailable and the gate fails closed
+#: against a container that would have become healthy. Bounded + fail-closed on timeout.
+PREFLIGHT_READINESS_TIMEOUT_S = 120.0
+PREFLIGHT_READINESS_POLL_S = 2.0
 
 
 class RuntimeLifecycleError(RuntimeError):
@@ -139,6 +149,16 @@ class PreflightRunnerLike(Protocol):
 
     async def launch(self, argv: Sequence[str]) -> CellProcessHandle: ...
 
+    async def wait_ready(self, handle: CellProcessHandle) -> None:
+        """Block until the launched container's HTTP app is healthy (PN02D-B1-PF1).
+
+        MUST be awaited AFTER ``launch`` and BEFORE ``version_signals`` — a container that
+        is ``running`` (``docker run -d`` returned) is not yet serving ``/health``. MUST
+        fail closed (raise ``PreflightRunError``) if readiness is not reached within a
+        bounded timeout, so a never-ready runtime can never be attested. It performs NO
+        provider call and reads only a health status code (content-safe)."""
+        ...
+
     async def version_signals(
         self, handle: CellProcessHandle
     ) -> Tuple[str, str, str]: ...
@@ -156,12 +176,26 @@ class RealProviderFreePreflightRunner:
     (runtime-reported core version), ``DockerCLI.runtime_version`` (in-container
     installed import version), and ``DockerCLI.image_version_label`` (pinned image
     label) — each must be present or it fails closed. It publishes NO port and injects
-    NO provider secret. Not exercised against real Docker in B0C-B: tests inject a fake
-    ``DockerCLI`` transport and drive THIS runner's real decision logic.
+    NO provider secret.
+
+    PN02D-B1-PF1: ``wait_ready`` (a bounded readiness poll reusing
+    ``realsidecarpn02d.wait_healthy``) MUST run between ``launch`` and ``version_signals``
+    — a real container is ``running`` from ``docker run -d`` before its HTTP app answers
+    ``/health``, so probing the version signals immediately (the B0C-B behaviour that was
+    only ever exercised against a fake instant-health ``DockerCLI``) fails closed against a
+    container that would have become healthy. ``now``/``sleep``/``readiness_timeout_s`` are
+    injectable so the readiness race is unit-testable deterministically.
     """
 
     def __init__(
-        self, docker: object = None, image: str = REAL_LIGHTRAG_IMAGE
+        self,
+        docker: object = None,
+        image: str = REAL_LIGHTRAG_IMAGE,
+        *,
+        readiness_timeout_s: float = PREFLIGHT_READINESS_TIMEOUT_S,
+        readiness_poll_s: float = PREFLIGHT_READINESS_POLL_S,
+        now: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if docker is None:
             from open_notebook.integrations.graphrag.eval.realsidecarpn02d import (
@@ -171,6 +205,10 @@ class RealProviderFreePreflightRunner:
             docker = DockerCLI()
         self._docker = docker
         self._image = image
+        self._readiness_timeout_s = readiness_timeout_s
+        self._readiness_poll_s = readiness_poll_s
+        self._now = now
+        self._sleep = sleep
         self._net_by_container: Dict[str, str] = {}
 
     @staticmethod
@@ -223,6 +261,30 @@ class RealProviderFreePreflightRunner:
             raise PreflightRunError(
                 f"provider-free preflight launch failed: {type(exc).__name__}"
             ) from exc
+
+    async def wait_ready(self, handle: CellProcessHandle) -> None:
+        """Bounded, fail-closed wait for the launched container to become healthy (PF1).
+
+        Reuses ``realsidecarpn02d.wait_healthy`` (no duplicate polling): polls
+        ``inspect_state`` + ``health`` until a 2xx health code (ready) or the bounded
+        timeout. On timeout — or if the container stops — it raises ``PreflightRunError``
+        so a never-ready runtime can never reach ``version_signals``/attestation. Reads
+        only a health status code; performs NO provider call. Cleanup of the (still-owned)
+        container is handled by ``terminate``/``teardown_preflight``."""
+        name = handle.identifier
+        healthy, _elapsed, _obs = wait_healthy(
+            self._docker,  # type: ignore[arg-type]
+            name,
+            timeout_seconds=self._readiness_timeout_s,
+            poll_seconds=self._readiness_poll_s,
+            now=self._now,
+            sleep=self._sleep,
+        )
+        if not healthy:
+            raise PreflightRunError(
+                "provider-free preflight container did not become healthy within "
+                f"{self._readiness_timeout_s:g}s (fail-closed, PF1)"
+            )
 
     async def version_signals(
         self, handle: CellProcessHandle
@@ -408,7 +470,14 @@ class RealPN02RuntimeManager:
                     self._preflight_handles[nb.notebook_id] = handle
                     self._preflight_identities.add(handle.identifier)
                     identities.append(handle.identifier)
-                    # THREE independent signals from the RUNNING container.
+                    # PN02D-B1-PF1: WAIT for the container's HTTP app to become healthy
+                    # BEFORE probing the version signals. `launch` only proves the
+                    # container is RUNNING (`docker run -d`); the LightRAG app answers
+                    # `/health` seconds later. Probing immediately (the pre-PF1 behaviour)
+                    # made the signals unavailable and failed the gate closed against a
+                    # container that would have become healthy. Fail-closed on timeout.
+                    await self.preflight_runner.wait_ready(handle)
+                    # THREE independent signals from the RUNNING, now-READY container.
                     hc, iv, il = await self.preflight_runner.version_signals(handle)
                     version = attest_version(
                         health_core_version=hc,

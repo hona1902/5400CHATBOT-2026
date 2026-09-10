@@ -26,6 +26,7 @@ from open_notebook.integrations.graphrag.eval.authlivepn02d import (
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_B1_R2_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
+    EXPECTED_PF1_CHECKPOINT_TAG,
     B1R2CheckpointError,
     GitBaselineError,
     LiveProviderRunAuthorization,
@@ -58,27 +59,47 @@ def _future_grant(**overrides):
 # --------------------------------------------------------------------------- #
 
 def test_expected_b1_r2_tag_frozen_in_governance():
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_B1_R2_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_B1_R2_CHECKPOINT_TAG
+    # PN02D-B1-PF1: governance now approves the SUCCESSOR PF1 checkpoint (the readiness fix
+    # moves HEAD past the historical B1-R2 commit, superseding the B1-R2 Git gate). The
+    # historical B1-R2 identity is a DISTINCT, retained constant.
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_PF1_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_PF1_CHECKPOINT_TAG
+    assert EXPECTED_PF1_CHECKPOINT_TAG != EXPECTED_B1_R2_CHECKPOINT_TAG
 
 
-def test_real_b1_r2_checkpoint_git_state_is_valid():
-    # CHECKPOINT-LIFECYCLE aware (State A pre-checkpoint / State B post-checkpoint). Stays
-    # green before AND after the real annotated B1-R2 tag is created at the approved HEAD.
-    obs = RealTrustedB1R2Reader().observe(EXPECTED_B1_R2_CHECKPOINT_TAG)
+def test_current_approved_checkpoint_git_state_is_valid():
+    # CHECKPOINT-LIFECYCLE aware for the CURRENT approved identity (PF1). State A = the
+    # successor tag is absent (pre-checkpoint) → gate unsatisfied; State B = the exact PF1
+    # tag exists at the authorized HEAD. Stays green before AND after the PF1 checkpoint,
+    # and is UNAFFECTED by the historical B1-R2 tag (see the immutability test below).
+    approved = current_approved_b1_r2_checkpoint()
+    assert approved == EXPECTED_PF1_CHECKPOINT_TAG
+    obs = RealTrustedB1R2Reader().observe(approved)
     if not obs.observed_tag_exists:
-        # STATE A — pre-checkpoint: real tag absent → Git prerequisite NOT satisfied.
+        # STATE A — pre-checkpoint: successor tag absent → Git prerequisite NOT satisfied.
         assert obs.observed_tag_peel == ""
         assert B.b1_r2_preflight().real_b1_r2_tag_exists is False
     else:
         # STATE B — post-checkpoint: EXACT tag present, valid peeled commit, at HEAD.
-        assert obs.checkpoint_tag == EXPECTED_B1_R2_CHECKPOINT_TAG
+        assert obs.checkpoint_tag == approved
         assert len(obs.observed_tag_peel) == 40 and all(
             c in "0123456789abcdef" for c in obs.observed_tag_peel
         )
         assert obs.observed_tag_peel == obs.observed_head  # tag at authorized HEAD
     # Neither state authorizes a provider run — checkpoint existence != authorization.
     assert PN02_PROVIDER_RUN_AUTHORIZED is False
+
+
+def test_historical_b1_r2_tag_is_immutable_and_not_current_approved():
+    # PN02D-B1-PF1 §4/§21: the historical B1-R2 annotated tag permanently records approved
+    # commit 611532c and must never be moved. It is NO LONGER the governance-approved
+    # identity (PF1 superseded it). When present in Git it ALWAYS peels to 611532c
+    # regardless of the current HEAD; after the PF1 commit moves HEAD, peel != HEAD (which
+    # is exactly why the B1-R2 gate is superseded and a successor was required).
+    assert EXPECTED_B1_R2_CHECKPOINT_TAG != current_approved_b1_r2_checkpoint()
+    obs = RealTrustedB1R2Reader().observe(EXPECTED_B1_R2_CHECKPOINT_TAG)
+    if obs.observed_tag_exists:
+        assert obs.observed_tag_peel == "611532c22b74ed931ad7bb92bdc7e9b0a1431b0a"
 
 
 def test_implementation_checkpoint_binds_to_b0cb():
@@ -101,7 +122,7 @@ def test_fixture_hash_frozen():
 
 def test_manifest_frozen_and_content_safe():
     m = B.b1_r2_authorization_manifest()
-    assert m["expected_b1_r2_checkpoint_tag"] == EXPECTED_B1_R2_CHECKPOINT_TAG
+    assert m["expected_b1_r2_checkpoint_tag"] == EXPECTED_PF1_CHECKPOINT_TAG
     assert m["b1_r2_tag_exists_in_git_now"] is False
     assert m["approved_implementation_checkpoint"]["tag"] == B0CB_TAG
     assert m["run_id"] == B.B1_RUN_ID
@@ -196,12 +217,12 @@ def test_git_gate_satisfiable_does_not_authorize_provider_run():
     # (trusted reader observes the EXACT tag at HEAD), that is only the control-plane Git
     # prerequisite — the provider-run governance flag stays NO.
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_B1_R2_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
+        tag=EXPECTED_PF1_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
     )
     assert verify_b1_r2_checkpoint(
         reader=reader, operator_grant=_future_grant(approved_git_commit=FUTURE_B1_R2_COMMIT),
-        approved_expected_checkpoint=EXPECTED_B1_R2_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_B1_R2_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_PF1_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_PF1_CHECKPOINT_TAG),
     ) == []  # Git gate satisfiable
     assert PN02_PROVIDER_RUN_AUTHORIZED is False  # but provider run NOT authorized
 
@@ -304,6 +325,19 @@ def test_is_valid_commit_sha_unit():
     for bad in (None, 123, "", "   ", "HEAD", "main", "a" * 39, "a" * 41, "g" * 40,
                 "5ABEAAA09B7157232B1AC5A234C9D8C50B542585"):
         assert B.is_valid_commit_sha(bad) is False
+
+
+def test_superseded_historical_b1_r2_identity_cannot_substitute_for_pf1():
+    # PN02D-B1-PF1 §21: the historical B1-R2 tag is superseded — a grant/verify path naming
+    # it as the approved identity is rejected because the current grant identity is the PF1
+    # successor (they must match). This holds regardless of the B1-R2 tag existing in Git.
+    reasons = verify_b1_r2_checkpoint(
+        reader=C.b1r2_reader_ok(tag=EXPECTED_B1_R2_CHECKPOINT_TAG),
+        operator_grant=_future_grant(),  # grant.b1_r2_checkpoint == PF1 (current approved)
+        approved_expected_checkpoint=EXPECTED_B1_R2_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(),
+    )
+    assert "b1_r2_grant_identity_mismatch" in reasons
 
 
 @pytest.mark.parametrize("bad_expected", [B0CA_TAG, B0CB_TAG, "arbitrary-tag", "graphrag-05-forensic-approved"])
@@ -422,12 +456,12 @@ def test_future_positive_verify_becomes_satisfiable_via_trusted_reader():
     # With a trusted reader observing the EXACT expected tag at the future commit, and a
     # baseline at that commit, the B1-R2 verifier passes. No real tag is created.
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_B1_R2_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
+        tag=EXPECTED_PF1_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
     )
     reasons = verify_b1_r2_checkpoint(
         reader=reader, operator_grant=_future_grant(),
-        approved_expected_checkpoint=EXPECTED_B1_R2_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_B1_R2_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_PF1_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_PF1_CHECKPOINT_TAG),
     )
     assert reasons == []
 
@@ -438,19 +472,19 @@ def test_future_positive_full_mint_via_production_signature_under_patch():
     # tag/commit. It uses the PRODUCTION mint signature (no trust-root params) and creates
     # NO real tag. The unpatched/real path stays fail-closed (see the pre-tag test).
     grant = _future_grant(approved_git_commit=FUTURE_B1_R2_COMMIT)
-    baseline = C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_B1_R2_CHECKPOINT_TAG)
+    baseline = C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_PF1_CHECKPOINT_TAG)
     preflight = mint_real_preflight_authorization(
         gate0_passed=True, gate1_passed=True, fixture_hash=_fixture_hash(),
         run_id=B.B1_RUN_ID, runtime_count=3,
     )
-    with C.approved_b1r2_governance(tag=EXPECTED_B1_R2_CHECKPOINT_TAG, head=FUTURE_B1_R2_COMMIT):
+    with C.approved_b1r2_governance(tag=EXPECTED_PF1_CHECKPOINT_TAG, head=FUTURE_B1_R2_COMMIT):
         auth = mint_live_provider_run_authorization(
             operator_grant=grant, real_preflight_auth=preflight,
             git_baseline_attestation=baseline, observed_fixture_hash=_fixture_hash(),
         )
     assert isinstance(auth, LiveProviderRunAuthorization)
     assert auth.run_id == B.B1_RUN_ID
-    assert auth.b1_r2_checkpoint == EXPECTED_B1_R2_CHECKPOINT_TAG
+    assert auth.b1_r2_checkpoint == EXPECTED_PF1_CHECKPOINT_TAG
     assert auth.as_public_dict()["b1_r2_checkpoint_attested"] is True
 
 

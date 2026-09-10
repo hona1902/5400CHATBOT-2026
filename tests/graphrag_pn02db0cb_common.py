@@ -147,8 +147,12 @@ class FakePreflightRunner:
     preflight (M2)."""
 
     version_attested: bool = True
+    #: PN02D-B1-PF1: when False, ``wait_ready`` fails closed (models a never-ready sidecar).
+    ready: bool = True
     launched: List[List[str]] = field(default_factory=list)
     terminated: List[str] = field(default_factory=list)
+    #: PN02D-B1-PF1: ordered record of readiness/version calls per handle (ordering test).
+    calls: List[str] = field(default_factory=list)
     _counter: int = 0
 
     async def launch(self, argv):
@@ -159,7 +163,19 @@ class FakePreflightRunner:
         name = argv_l[argv_l.index("--name") + 1] if "--name" in argv_l else f"pf-{self._counter}"
         return CellProcessHandle(identifier=f"preflight-{self._counter}-{name}", kind="fake")
 
+    async def wait_ready(self, handle: CellProcessHandle) -> None:
+        # PN02D-B1-PF1: readiness gate. Must be awaited BEFORE version_signals.
+        self.calls.append(f"wait_ready:{handle.identifier}")
+        if not self.ready:
+            # Import here to avoid a module import cycle at collection time.
+            from open_notebook.integrations.graphrag.eval.runtimelivepn02d import (
+                PreflightRunError,
+            )
+
+            raise PreflightRunError("fake sidecar never became ready (PF1 test)")
+
     async def version_signals(self, handle: CellProcessHandle) -> Tuple[str, str, str]:
+        self.calls.append(f"version_signals:{handle.identifier}")
         if self.version_attested:
             return "1.5.6", "1.5.6", "v1.5.6"
         return "0.0.0", "0.0.0", "0.0.0"  # fails attest_version → preflight not passed
@@ -198,7 +214,25 @@ class FakeDockerCLI:
         return SimpleNamespace(returncode=self.run_returncode, stdout="", stderr="")
 
     def inspect_state(self, name: str):
-        return SimpleNamespace(container_running=self.container_running)
+        # PN02D-B1-PF1: return a real SidecarObservation so wait_healthy's with_health()
+        # accepts it (the pre-PF1 SimpleNamespace lacked the coarse-observation fields).
+        from open_notebook.integrations.graphrag.eval.sidecar_diag08 import (
+            SidecarObservation,
+        )
+
+        running = self.container_running
+        return SidecarObservation(
+            container_created=None if running is None else True,
+            container_running=running,
+            container_health_state=None,
+            container_exit_code=None,
+            container_restart_count=None,
+            port_open=None,
+            health_http_reachable=None,
+            health_http_status_class=None,
+            healthy=False,
+            timeout_reached=False,
+        )
 
     def health(self, name: str):
         return (self.health_code, self.health_core, "healthy")

@@ -832,13 +832,13 @@ def test_current_repo_cannot_verify_b1_r2_checkpoint():
         git_baseline=C.clean_git_baseline(),
     )
     assert "b1_r2_tag_not_observed_in_git" in reasons
-    # governance (the real path) is now frozen to the expected B1-R2 tag, but that tag does
+    # governance (the real path) is now frozen to the successor PF1 tag, but that tag does
     # not exist in Git yet, so the mint still fails closed.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_B1_R2_CHECKPOINT_TAG,
+        EXPECTED_PF1_CHECKPOINT_TAG,
     )
 
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_B1_R2_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_PF1_CHECKPOINT_TAG
 
 
 def test_current_governance_flags_unchanged():

@@ -226,35 +226,47 @@ _KNOWN_NON_B1_R2_CHECKPOINTS = frozenset(
     }
 )
 
-#: The EXACT operator/governance-approved B1-R2 checkpoint identity, FROZEN at the start of
-#: the PN02D-B1-R2 phase. This is a control-plane declaration of the future checkpoint tag —
-#: it is NOT the tag itself. The annotated Git tag of this name does not exist yet; the
-#: trusted reader observes real Git and, finding no such tag, the live mint FAILS CLOSED
-#: (PN02D-B1-R2 §6/§7/§8). Only after a future operator-approved B1-R2 checkpoint creates
-#: this exact annotated tag (peeling to the approved B1-R2 HEAD) can the mint become
-#: satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity.
+#: HISTORICAL — the PN02D-B1-R2 provider-authorization-preflight checkpoint tag. It is an
+#: IMMUTABLE record of approved commit ``611532c`` (created BACKUP-only). PN02D-B1-PF1 then
+#: found a real-Docker readiness defect in the provider-free preflight; fixing it moves HEAD
+#: off ``611532c``, and the B1-R2 tag no longer peels to the authorized HEAD, so the B1-R2
+#: Git gate is superseded (``b1_r2_tag_not_at_authorized_head``). This constant is retained
+#: for reference/history ONLY — it is NO LONGER the governance-approved identity.
 EXPECTED_B1_R2_CHECKPOINT_TAG = "graphrag-pn02db1r2-provider-authorization-preflight-approved"
 
-#: Governance state for PN02D-B1-R2. The phase is now STARTED, so this is FROZEN to the
-#: exact expected checkpoint identity above (SOLE source of the approved-EXPECTED identity
-#: for the real mint — never a caller string / Git-tag heuristic). It is non-None, but the
-#: live authorization is STILL not mintable until the trusted reader observes that exact tag
-#: in real Git (which does not yet exist): fail-closed shifts from "no approved identity" to
-#: "approved tag not observed in Git" (§8).
-_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_B1_R2_CHECKPOINT_TAG
+#: The EXACT operator/governance-approved provider-authorization checkpoint identity, now
+#: FROZEN to the PN02D-B1-PF1 SUCCESSOR checkpoint (the preflight-readiness fix that moves
+#: HEAD past the historical B1-R2 commit). This is a control-plane declaration of the future
+#: successor tag — it is NOT the tag itself. The annotated Git tag of this name does not
+#: exist yet; the trusted reader observes real Git and, finding no such tag, the live mint
+#: FAILS CLOSED (PN02D-B1-PF1 §5). Only after a future operator-approved PF1 checkpoint
+#: creates this exact annotated tag (peeling to the approved PF1 HEAD) can the mint become
+#: satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity.
+EXPECTED_PF1_CHECKPOINT_TAG = "graphrag-pn02db1pf1-preflight-readiness-approved"
+
+#: Governance state for the provider-authorization checkpoint. FROZEN to the successor
+#: ``EXPECTED_PF1_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the
+#: real mint — never a caller string / Git-tag heuristic). It is non-None, but the live
+#: authorization is STILL not mintable until the trusted reader observes that exact tag in
+#: real Git (which does not yet exist): the mint fails closed with
+#: ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-PF1 §5). The mint remains FAIL CLOSED before
+#: the successor tag exists.
+_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_PF1_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
 
 
 def current_approved_b1_r2_checkpoint() -> Optional[str]:
-    """The operator/governance-approved B1-R2 checkpoint identity.
+    """The operator/governance-approved provider-authorization checkpoint identity.
 
-    Returns the frozen ``EXPECTED_B1_R2_CHECKPOINT_TAG`` now that PN02D-B1-R2 has STARTED
-    (§7). It is non-None, but a live authorization is still not currently mintable: the
-    trusted reader observes real Git and, while no annotated tag of that name exists, the
-    mint fails closed with ``b1_r2_tag_not_observed_in_git`` (§8). The value is NEVER
-    derived from a caller string, a Git-tag naming heuristic, or a prefix match.
+    Returns the frozen ``EXPECTED_PF1_CHECKPOINT_TAG`` — the PN02D-B1-PF1 SUCCESSOR that
+    supersedes the historical B1-R2 checkpoint (the readiness fix moves HEAD past
+    ``611532c``, so the B1-R2 tag no longer peels to the authorized HEAD). It is non-None,
+    but a live authorization is still not currently mintable: the trusted reader observes
+    real Git and, while no annotated tag of that name exists, the mint fails closed with
+    ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-PF1 §5). The value is NEVER derived from a
+    caller string, a Git-tag naming heuristic, or a prefix match.
 
     This is a MODULE-LEVEL governance function the mint (and CLI defense-in-depth) look up
     and call INTERNALLY — no caller/parameter can override its result (B0CB-RR4-H1). Tests
@@ -809,6 +821,7 @@ __all__ = [
     "b1_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
     "EXPECTED_B1_R2_CHECKPOINT_TAG",
+    "EXPECTED_PF1_CHECKPOINT_TAG",
     "OperatorRunGrant",
     "LiveProviderRunAuthorization",
     "mint_live_provider_run_authorization",
