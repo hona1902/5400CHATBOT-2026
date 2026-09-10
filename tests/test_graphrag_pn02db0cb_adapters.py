@@ -821,9 +821,15 @@ def test_trusted_observation_cannot_be_constructed_directly():
         )
 
 
-def test_current_approved_b1_r2_checkpoint_is_none():
-    # Governance: PN02D-B1-R2 is NOT_STARTED → no approved identity exists.
-    assert current_approved_b1_r2_checkpoint() is None
+def test_current_approved_b1_r2_checkpoint_is_expected_tag():
+    # Governance (post PN02D-B1-R2 §7): the approved identity is now FROZEN to the exact
+    # expected B1-R2 tag. It is non-None, but the tag does not exist in Git yet, so the
+    # mint still fails closed (see the direct-mint tests). No caller can override it.
+    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
+        EXPECTED_B1_R2_CHECKPOINT_TAG,
+    )
+
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_B1_R2_CHECKPOINT_TAG
 
 
 # --- §4/§5/§15/§16: NO trust-root injection on the public/live APIs ---------- #
@@ -881,28 +887,35 @@ def test_real_b1_driver_run_rejects_legacy_trust_kwargs_at_runtime(legacy_kwarg)
         )
 
 
-# --- §10/§13: current governance fails closed on the REAL mint signature ------ #
+# --- §10: a grant's B1-R2 identity must equal the governance-approved identity ---- #
+# These are CHECKPOINT-LIFECYCLE robust: the load-bearing property is that a grant whose
+# B1-R2 identity differs from the governance-frozen approved identity is rejected
+# (`b1_r2_grant_identity_mismatch`) — independent of whether the real approved tag exists
+# in Git yet. (The default test grant uses the synthetic C.TEST_B1R2_TAG, which never
+# equals the real EXPECTED governance identity.)
 
-def test_direct_mint_current_governance_fails_closed():
-    # §10/§13: calling the REAL mint with NO patch (governance None) fails closed. There
-    # is no argument available to make it pass.
+def test_direct_mint_default_grant_identity_rejected():
+    # A default grant (synthetic B1-R2 identity) does not match the governance-approved
+    # identity → fail closed. Stays true before and after the real B1-R2 tag is created.
     with pytest.raises(B1R2CheckpointError) as ei:
         _mint_default()
-    assert "b1_r2_not_approved_fail_closed" in str(ei.value)
+    assert "b1_r2_grant_identity_mismatch" in str(ei.value)
 
 
 def test_direct_mint_b0ca_in_grant_fails_closed():
-    # §11: B0C-A named in the grant cannot substitute on the real (governance) path.
+    # §20.2: B0C-A named in the grant cannot substitute — it does not equal the governance
+    # approved B1-R2 identity, so the grant identity is rejected.
     with pytest.raises(B1R2CheckpointError) as ei:
         _mint_default(grant=C.frozen_test_grant(b1_r2_checkpoint=B0CA_TAG))
-    assert "b1_r2_not_approved_fail_closed" in str(ei.value)
+    assert "b1_r2_grant_identity_mismatch" in str(ei.value)
 
 
 def test_direct_mint_arbitrary_real_tag_in_grant_fails_closed():
-    # §9: an arbitrary real tag named in the grant cannot authorize on the real path.
+    # §20.4: an arbitrary real tag named in the grant cannot authorize — it does not equal
+    # the governance approved B1-R2 identity, so the grant identity is rejected.
     with pytest.raises(B1R2CheckpointError) as ei:
         _mint_default(grant=C.frozen_test_grant(b1_r2_checkpoint="graphrag-05-forensic-approved"))
-    assert "b1_r2_not_approved_fail_closed" in str(ei.value)
+    assert "b1_r2_grant_identity_mismatch" in str(ei.value)
 
 
 def test_caller_controlled_reader_attack_has_no_public_seam():

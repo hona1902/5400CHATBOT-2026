@@ -553,6 +553,24 @@ def approved_b1r2_governance(*, tag: str = TEST_B1R2_TAG, head: str = TEST_COMMI
         yield
 
 
+@contextmanager
+def governance_expects_tag(tag: str = TEST_B1R2_TAG):
+    """TEST-ONLY: patch ONLY the governance approved identity, leaving the REAL Git reader.
+
+    Unlike ``approved_b1r2_governance`` (which also fakes the reader to observe the tag as
+    PRESENT), this patches only ``current_approved_b1_r2_checkpoint`` → ``tag`` and keeps
+    the default real-Git ``RealTrustedB1R2Reader``. Used to make "approved tag absent →
+    fail closed" negatives PERMANENT: with a SYNTHETIC ``tag`` (e.g. ``TEST_B1R2_TAG``,
+    which never becomes a real Git tag) the real reader always reports it absent, so the
+    ``b1_r2_tag_not_observed_in_git`` refusal holds BEFORE and AFTER the real B1-R2
+    checkpoint tag is created (checkpoint-lifecycle robustness).
+    """
+    with mock.patch.object(
+        _authmint, "current_approved_b1_r2_checkpoint", return_value=tag
+    ):
+        yield
+
+
 def mint_test_live_auth(
     *, run_id: str = TEST_RUN_ID, commit: str = TEST_COMMIT, tag: str = TEST_TAG
 ) -> LiveProviderRunAuthorization:

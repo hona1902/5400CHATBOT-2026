@@ -765,21 +765,24 @@ async def test_m1m2_all_three_signals_correct_real_logic_passes():
 # =========================================================================== #
 
 def test_cli_b1_r2_default_governance_path_refused(tmp_path):
-    # §14 defense-in-depth: with the DEFAULT CLI wiring (mint-owned real reader + governance
-    # approved identity, which is None while B1-R2 is NOT_STARTED) the CLI refuses at
-    # validation before any binding — the CLI has NO trust-root parameter to inject.
-    grant = C.frozen_test_grant()
+    # §14 defense-in-depth (checkpoint-lifecycle robust): the CLI default wiring (mint-owned
+    # real reader + governance) refuses when the approved B1-R2 tag is absent from real Git.
+    # To keep this PERMANENT before/after the real checkpoint, governance is pinned to the
+    # SYNTHETIC C.TEST_B1R2_TAG (never a real Git tag) — the real reader always reports it
+    # absent → `b1_r2_tag_not_observed_in_git`. The CLI still has NO trust-root parameter.
+    grant = C.frozen_test_grant()  # grant b1_r2 == C.TEST_B1R2_TAG (matches pinned governance)
     path = _write_manifest(tmp_path, grant)
     _, fx_reader = _valid_readers()
-    code, payload = cli.evaluate_execute_b1_live(
-        manifest_path=path,
-        explicit_authorize=True,
-        env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
-        git_baseline_reader=lambda: C.clean_git_baseline(),
-        fixture_hash_reader=fx_reader,  # real trusted reader + governance by default
-    )
+    with C.governance_expects_tag(C.TEST_B1R2_TAG):
+        code, payload = cli.evaluate_execute_b1_live(
+            manifest_path=path,
+            explicit_authorize=True,
+            env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
+            git_baseline_reader=lambda: C.clean_git_baseline(),
+            fixture_hash_reader=fx_reader,  # real trusted reader + pinned synthetic governance
+        )
     assert code == 2
-    assert "b1_r2_not_approved_fail_closed" in payload["reasons"]
+    assert "b1_r2_tag_not_observed_in_git" in payload["reasons"]
 
 
 def test_cli_b1_r2_real_reader_observes_no_tag_refused(tmp_path):
@@ -829,8 +832,13 @@ def test_current_repo_cannot_verify_b1_r2_checkpoint():
         git_baseline=C.clean_git_baseline(),
     )
     assert "b1_r2_tag_not_observed_in_git" in reasons
-    # and via governance (the real path) there is no approved identity at all.
-    assert current_approved_b1_r2_checkpoint() is None
+    # governance (the real path) is now frozen to the expected B1-R2 tag, but that tag does
+    # not exist in Git yet, so the mint still fails closed.
+    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
+        EXPECTED_B1_R2_CHECKPOINT_TAG,
+    )
+
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_B1_R2_CHECKPOINT_TAG
 
 
 def test_current_governance_flags_unchanged():

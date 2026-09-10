@@ -216,32 +216,51 @@ _B1_R2_SENTINELS = frozenset(
 #: Checkpoints that are DEFINITELY NOT the B1-R2 checkpoint. Even if a caller names one as
 #: the approved-expected identity it can never authorize a B1-R2 run. This is an EXACT-
 #: string SAFETY denylist of known-other checkpoints (NOT a naming/prefix/approval
-#: heuristic): the B0C-A design tag really peels to the current HEAD, so without this it
-#: could masquerade as B1-R2 (the concrete B0CB-RR3-H1 exploit). §8/§11.
+#: heuristic): the B0C-A design tag AND the B0C-B implementation tag both really peel to a
+#: real commit, so without this they could masquerade as B1-R2 (B0CB-RR3-H1 exploit class;
+#: PN02D-B1-R2 §20.2/§20.3 — neither B0C-A nor B0C-B may substitute). §8/§11.
 _KNOWN_NON_B1_R2_CHECKPOINTS = frozenset(
-    {"graphrag-pn02db0ca-real-provider-wiring-design-approved"}
+    {
+        "graphrag-pn02db0ca-real-provider-wiring-design-approved",
+        "graphrag-pn02db0cb-real-provider-wiring-approved",
+    }
 )
 
-#: Governance state for PN02D-B1-R2. NOT_STARTED → ``None`` → NO approved B1-R2 checkpoint
-#: identity exists. This is the SOLE source of the approved-EXPECTED identity for the real
-#: mint; while it is ``None`` the live provider-run authorization is not mintable.
-_APPROVED_B1_R2_CHECKPOINT: Optional[str] = None
+#: The EXACT operator/governance-approved B1-R2 checkpoint identity, FROZEN at the start of
+#: the PN02D-B1-R2 phase. This is a control-plane declaration of the future checkpoint tag —
+#: it is NOT the tag itself. The annotated Git tag of this name does not exist yet; the
+#: trusted reader observes real Git and, finding no such tag, the live mint FAILS CLOSED
+#: (PN02D-B1-R2 §6/§7/§8). Only after a future operator-approved B1-R2 checkpoint creates
+#: this exact annotated tag (peeling to the approved B1-R2 HEAD) can the mint become
+#: satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity.
+EXPECTED_B1_R2_CHECKPOINT_TAG = "graphrag-pn02db1r2-provider-authorization-preflight-approved"
+
+#: Governance state for PN02D-B1-R2. The phase is now STARTED, so this is FROZEN to the
+#: exact expected checkpoint identity above (SOLE source of the approved-EXPECTED identity
+#: for the real mint — never a caller string / Git-tag heuristic). It is non-None, but the
+#: live authorization is STILL not mintable until the trusted reader observes that exact tag
+#: in real Git (which does not yet exist): fail-closed shifts from "no approved identity" to
+#: "approved tag not observed in Git" (§8).
+_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_B1_R2_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
 
 
 def current_approved_b1_r2_checkpoint() -> Optional[str]:
-    """The operator/governance-approved B1-R2 checkpoint identity, or ``None``.
+    """The operator/governance-approved B1-R2 checkpoint identity.
 
-    Returns ``None`` while PN02D-B1-R2 is NOT_STARTED (no checkpoint has been approved),
-    so the real mint fails closed. A future B1-R2 authorization phase sets this — it is
-    NEVER derived from a caller string, a Git tag name, or a naming heuristic.
+    Returns the frozen ``EXPECTED_B1_R2_CHECKPOINT_TAG`` now that PN02D-B1-R2 has STARTED
+    (§7). It is non-None, but a live authorization is still not currently mintable: the
+    trusted reader observes real Git and, while no annotated tag of that name exists, the
+    mint fails closed with ``b1_r2_tag_not_observed_in_git`` (§8). The value is NEVER
+    derived from a caller string, a Git-tag naming heuristic, or a prefix match.
 
     This is a MODULE-LEVEL governance function the mint (and CLI defense-in-depth) look up
     and call INTERNALLY — no caller/parameter can override its result (B0CB-RR4-H1). Tests
-    that must simulate a future approval patch THIS function at the module boundary; they
-    never pass an approved identity through a public mint parameter.
+    that must simulate the future post-tag-creation state patch THIS function and the
+    trusted-reader factory at the module boundary; they never pass an approved identity or
+    reader through a public mint parameter, and they never create the real tag.
     """
     return _APPROVED_B1_R2_CHECKPOINT
 
@@ -789,6 +808,7 @@ __all__ = [
     "verify_b1_r2_checkpoint",
     "b1_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
+    "EXPECTED_B1_R2_CHECKPOINT_TAG",
     "OperatorRunGrant",
     "LiveProviderRunAuthorization",
     "mint_live_provider_run_authorization",
