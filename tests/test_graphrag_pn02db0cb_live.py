@@ -453,20 +453,28 @@ def test_cli_execute_b1_live_dirty_git_baseline_refused(tmp_path):
     assert "unstaged_changes_present" in payload["reasons"]
 
 
-def test_cli_never_boots_or_binds_in_b0c_b(tmp_path):
-    # Even with the env token + flag set, this build wires no live seams → refused,
-    # never booting a runtime or binding a provider (task §43).
+def test_cli_missing_provider_secret_fails_closed_before_boot(tmp_path):
+    # PN02D-B1-EW1 §19/§30: with every other gate satisfied (valid grant, approved B1-R2
+    # governance patched, env token + flag) but the PROVIDER credential absent, the CLI
+    # refuses at the provider-secret gate — BEFORE any Docker boot or provider binding.
+    # (Pre-EW1 this returned REASON_NO_LIVE_SEAMS; EW1 wires the real path but still fails
+    # closed here because OPENROUTER_API_KEY is not present in the passed env.)
     grant = C.frozen_test_grant()
     path = _write_manifest(tmp_path, grant)
     git_reader, fx_reader = _valid_readers()
+
+    def _forbidden_runner(**_kwargs):
+        raise AssertionError("live_runner must NOT run when the provider secret is missing")
+
     with C.approved_b1r2_governance():
         code, payload = cli.evaluate_execute_b1_live(
             manifest_path=path, explicit_authorize=True,
-            env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
+            env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},  # no OPENROUTER_API_KEY
             git_baseline_reader=git_reader, fixture_hash_reader=fx_reader,
+            live_runner=_forbidden_runner,
         )
     assert code == 3
-    assert payload["reasons"] == [cli.REASON_NO_LIVE_SEAMS]
+    assert payload["reasons"] == [cli.REASON_PROVIDER_SECRET_MISSING]
     assert payload["provider_bound"] is False
     assert payload["runtime_booted"] is False
 
@@ -832,13 +840,13 @@ def test_current_repo_cannot_verify_b1_r2_checkpoint():
         git_baseline=C.clean_git_baseline(),
     )
     assert "b1_r2_tag_not_observed_in_git" in reasons
-    # governance (the real path) is now frozen to the successor PF1 tag, but that tag does
+    # governance (the real path) is now frozen to the successor EW1 tag, but that tag does
     # not exist in Git yet, so the mint still fails closed.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_PF1_CHECKPOINT_TAG,
+        EXPECTED_EW1_CHECKPOINT_TAG,
     )
 
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_PF1_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW1_CHECKPOINT_TAG
 
 
 def test_current_governance_flags_unchanged():

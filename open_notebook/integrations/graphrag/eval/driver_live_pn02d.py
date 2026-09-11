@@ -223,9 +223,9 @@ class RealB1Driver:
         checkpoint is verified INSIDE the mint by a mint-owned trusted reader
         (B0CB-RR3-H1/RR4-H1) — this driver accepts NO B1-R2 trust-root parameter (no
         reader, no approved identity) and forwards none to the mint. The mint resolves both
-        trust roots internally from governance; while PN02D-B1-R2 is NOT_STARTED that is
-        ``None`` and the mint refuses before any binding/runtime boot. The mint also refuses
-        a dirty tree or a baseline mismatch first.
+        trust roots internally from governance; the approved identity is the EW1 successor
+        tag, and while that annotated tag is ABSENT from real Git the mint refuses before any
+        binding/runtime boot. The mint also refuses a dirty tree or a baseline mismatch first.
         """
         try:
             # -- Boot 1: provider-free preflight → mint the real preflight capability.
@@ -243,7 +243,7 @@ class RealB1Driver:
             # -- mint the LIVE capability (grant + full fixture chain H1 + clean baseline H2
             #    + mint-owned trusted B1-R2 read RR3-H1/RR4-H1). NO trust-root parameter is
             #    passed: the mint resolves the governance identity + real Git reader
-            #    internally and fails closed while B1-R2 is NOT_STARTED.
+            #    internally and fails closed while the EW1 successor tag is ABSENT from Git.
             live_auth = mint_live_provider_run_authorization(
                 operator_grant=operator_grant,
                 real_preflight_auth=preflight_auth,

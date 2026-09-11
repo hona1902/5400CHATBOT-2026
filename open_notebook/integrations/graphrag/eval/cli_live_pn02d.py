@@ -41,6 +41,10 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
 from open_notebook.integrations.graphrag.eval.budgetlivepn02d import b1_caps_dict
 from open_notebook.integrations.graphrag.eval.datasetpn02 import verify_fixture_hash
 from open_notebook.integrations.graphrag.eval.driver_live_pn02d import plan_live_b1
+from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
+from open_notebook.integrations.graphrag.eval.provider_binding08 import (
+    frozen_provider_binding,
+)
 
 #: Governance env token that would (with an explicit flag) open the authorization gate.
 #: NEVER set in B0C-B; the verb refuses without it (PN02_PROVIDER_RUN_AUTHORIZED = NO).
@@ -53,7 +57,43 @@ _SIMULATION_BASELINE_SENTINELS = frozenset({"", "SIMULATION", "OFFLINE", "DRYRUN
 REASON_MANIFEST_MISSING = "manifest_missing"
 REASON_MANIFEST_MALFORMED = "manifest_malformed"
 REASON_NOT_AUTHORIZED = "pn02_provider_run_not_authorized"
+#: LEGACY (pre-EW1): the authorized branch used to refuse with this because no production
+#: real-seams composition existed. PN02D-B1-EW1 wires the real path, so this is NO LONGER
+#: returned; retained only for import compatibility.
 REASON_NO_LIVE_SEAMS = "live_seams_not_provisioned"
+#: The provider credential (``OPENROUTER_API_KEY``) is absent — refuse BEFORE any Docker
+#: boot / provider binding (task §19/§22). Name-only presence; the value is never read here.
+REASON_PROVIDER_SECRET_MISSING = "provider_secret_missing"
+
+#: The authorized real-execution runner: performs the two-boot B1 run and returns the
+#: ``B1RunOutcome``. Real by default; a controlled offline test injects one that exercises the
+#: REAL builder with fake external edges (proving CLI → builder → RealB1Driver.run) with zero
+#: provider traffic. The driver OWNS the preflight→mint→boot2→execute ordering (not bypassed).
+LiveRunner = Callable[..., B1RunOutcome]
+
+
+def _default_live_runner(
+    *,
+    operator_grant: OperatorRunGrant,
+    git_baseline: GitBaselineAttestation,
+    observed_fixture_hash: str,
+    env: Dict[str, str],
+) -> B1RunOutcome:
+    """Run the real in-process two-boot B1 execution (lazy import; asyncio boundary)."""
+    import asyncio
+
+    from open_notebook.integrations.graphrag.eval.realseamspn02d import (
+        run_live_b1_execution,
+    )
+
+    return asyncio.run(
+        run_live_b1_execution(
+            operator_grant=operator_grant,
+            git_baseline_attestation=git_baseline,
+            observed_fixture_hash=observed_fixture_hash,
+            env=env,
+        )
+    )
 
 #: Untracked paths that are execution-affecting (a dirty tree for a live run, B0CB-H2).
 _EXEC_AFFECTING_PREFIXES = ("open_notebook/", "commands/", "api/", "tests/", "prompts/")
@@ -171,8 +211,8 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance ``None`` while NOT_STARTED → fail closed). The CLI can neither
-    override the approved B1-R2 identity nor the trusted reader.
+    INTERNALLY (governance returns the EW1 successor tag; its annotated tag ABSENT → fail
+    closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []
     if not isinstance(grant, OperatorRunGrant):
@@ -226,11 +266,17 @@ def evaluate_execute_b1_live(
     env: Dict[str, str],
     git_baseline_reader: GitBaselineReader = read_git_baseline,
     fixture_hash_reader: Callable[[], Tuple[bool, str]] = verify_fixture_hash,
+    live_runner: LiveRunner = _default_live_runner,
 ) -> Tuple[int, Dict[str, object]]:
-    """Evaluate ``execute-b1-live`` — pure, testable, ZERO provider traffic.
+    """Evaluate ``execute-b1-live`` (PN02D-B1-EW1): validate, gate, then run the real path.
 
-    Returns ``(exit_code, payload)``. It NEVER boots a runtime, binds a provider, or
-    contacts a network; it validates inputs and stops at the governance gate.
+    Returns ``(exit_code, payload)``. Every fail-closed gate runs BEFORE any provider
+    binding or runtime boot: manifest present/well-formed, fixture hash, clean+approved git
+    baseline, the trust-observed B1-R2/EW1 checkpoint, provider fingerprint, caps/allowlist,
+    the governance authorization gate, and — new in EW1 — provider-secret presence (name
+    only). ONLY when all gates pass does it invoke ``live_runner`` (the driver-owned two-boot
+    execution). A missing provider secret refuses with ``provider_secret_missing`` and never
+    boots. This function reads no secret VALUE.
     """
     payload: Dict[str, object] = {
         "command": "execute-b1-live",
@@ -275,19 +321,54 @@ def evaluate_execute_b1_live(
         payload["reasons"] = reasons
         return 2, payload
 
-    # 3) governance authorization gate — closed in B0C-B (task §60/§67).
+    # 3) governance authorization gate (env token + explicit operator flag).
     if not _governance_authorized(env, explicit_flag=explicit_authorize):
         payload["result"] = "REFUSED"
         payload["reasons"] = [REASON_NOT_AUTHORIZED]
         payload["pn02_provider_run_authorized"] = False
         return 3, payload
 
-    # 4) even if governance authorized, this build wires NO live seams (no auto-exec,
-    #    task §43): a real run is only assembled through an operator-provisioned path.
-    payload["result"] = "REFUSED"
-    payload["reasons"] = [REASON_NO_LIVE_SEAMS]
-    payload["pn02_provider_run_authorized"] = False
-    return 3, payload
+    # 3b) provider-secret presence gate (task §19/§22) — NAME-only, BEFORE any Docker boot
+    #     or provider binding. A missing provider credential fails closed here so no runtime
+    #     is ever booted and no provider is contacted; the value itself is never read.
+    required = frozen_provider_binding().required_secret_envs()
+    present = {n for n in required if (env.get(n, "") or "").strip()}
+    missing = sorted(n for n in required if n not in present)
+    if missing:
+        payload["result"] = "REFUSED"
+        payload["reasons"] = [REASON_PROVIDER_SECRET_MISSING]
+        payload["pn02_provider_run_authorized"] = True
+        payload["provider_bound"] = False
+        payload["runtime_booted"] = False
+        return 3, payload
+
+    # 4) AUTHORIZED — run the real two-boot execution. ``RealB1Driver`` OWNS the security
+    #    ordering (provider-free preflight → in-process mint → provider-bound Boot 2 →
+    #    execute → cleanup); this function neither re-mints nor bypasses it. Any failure is
+    #    normalized to a content-safe FAILED payload (type name only, never a secret).
+    payload["pn02_provider_run_authorized"] = True
+    try:
+        outcome = live_runner(
+            operator_grant=grant,
+            git_baseline=git_baseline,
+            observed_fixture_hash=observed_fixture_hash,
+            env=env,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-closed; content-safe type name only
+        payload["result"] = "FAILED"
+        payload["reasons"] = ["live_execution_error"]
+        payload["error_type"] = type(exc).__name__
+        payload["provider_bound"] = False
+        return 4, payload
+
+    payload["result"] = outcome.state  # COMPLETE | FAILED
+    payload["run_id"] = outcome.run_id
+    payload["technical_status"] = outcome.technical_status.value
+    payload["report_kind"] = outcome.report.get("report_kind")
+    payload["failure_reason"] = outcome.failure_reason
+    payload["provider_bound"] = True
+    payload["runtime_booted"] = True
+    return (0 if outcome.state == "COMPLETE" else 4), payload
 
 
 def cmd_execute_b1_live(args: argparse.Namespace) -> int:
@@ -360,6 +441,8 @@ __all__ = [
     "REASON_MANIFEST_MALFORMED",
     "REASON_NOT_AUTHORIZED",
     "REASON_NO_LIVE_SEAMS",
+    "REASON_PROVIDER_SECRET_MISSING",
+    "LiveRunner",
     "GitBaselineReader",
     "read_git_baseline",
     "parse_operator_grant",
