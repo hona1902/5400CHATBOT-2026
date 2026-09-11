@@ -179,6 +179,49 @@ clean); `B1EW1_R1_L1_REMEDIATED = YES`; `CODEX_B1EW1_REREVIEW_1 = NOT_RUN`;
 **STOP:** `GRAPH_RAG_PN02DB1EW1_LOW_REMEDIATION_READY_FOR_CODEX_REREVIEW`. No Codex; no
 checkpoint; no tag; no provider run.
 
+## Codex Re-Review #1 → #2 (baseline artifact) → checkpoint attempt #1 (BLOCKED) → lifecycle remediation #1
+
+- `CODEX_B1EW1_REREVIEW_1 = B_REMEDIATION_REQUIRED` (0 HIGH / 1 MEDIUM / 0 LOW). The MEDIUM
+  `B1EW1-RR1-M1` was a REVIEW-BASELINE artifact: Codex diffed the working tree against HEAD
+  `082dc95`, which predates the entire uncommitted EW1 implementation, so its "74 executable
+  lines" were the prior-turn EW1 code already approved as C — not the docs-only LOW cycle.
+- `CODEX_B1EW1_REREVIEW_2 = D_PASS_CLEAN` (isolated pre-LOW baseline; 12 reverse transforms, 0
+  ambiguous, 0 executable hunks across all four files, all strip-docstring ASTs equal, token
+  streams equal, `_B1_R2_SENTINELS` unchanged). `B1EW1-RR1-M1 = CLOSED_AS_BASELINE_ARTIFACT`,
+  `REPOSITORY_CODE_REMEDIATION_REQUIRED_FOR_RR1_M1 = NO`. Re-run of Re-Review #2 returned D
+  again (determinism). Review history retained: Review #1 = C, Re-Review #1 = B, Re-Review #2 = D.
+
+- **EW1 checkpoint attempt #1 = `BLOCKED_POSTTAG_VERIFICATION` (NOT published).** All
+  pre-commit gates passed; a single commit and a single **LOCAL-ONLY** annotated tag were
+  created:
+  - candidate commit `9aa3219611055b7fc4b3c84ce75b97ed5c1b090b`
+  - candidate tag `graphrag-pn02db1ew1-real-execution-wiring-approved` (LOCAL ONLY — **not
+    approved, not closed, not pushed**; backup branch still `082dc95`, backup EW1 tag ABSENT).
+  The real post-tag Git gate PASSED, but the mandatory post-tag test run turned ONE test red:
+  `tests/test_graphrag_pn02db1ew1.py::test_missing_ew1_tag_fails_closed_in_real_git` was
+  **checkpoint-lifecycle-fragile** — it asserted the real EW1 tag is permanently absent
+  (`b1_r2_tag_not_observed_in_git`), but once the real tag existed at HEAD the trusted reader
+  observed it present and the fail-closed came from baseline binding instead. Per the
+  checkpoint protocol, nothing was pushed; the local commit/tag were left intact for forensic
+  traceability. `PROVIDER_TRAFFIC = 0`.
+
+- **Checkpoint-lifecycle test remediation #1 (this doc's cycle, tests only —
+  `PRODUCTION_AUTHORIZATION_LOGIC_CHANGED = NO`).** The fragile test was split into two
+  intents (the same State-A/State-B pattern B1-R2 used before its checkpoint):
+  - `test_synthetic_absent_checkpoint_fails_closed_in_real_git` — the PERMANENT absent-tag
+    negative, anchored on the SYNTHETIC never-real identity `C.TEST_B1R2_TAG` so it fails
+    closed with `b1_r2_tag_not_observed_in_git` regardless of whether the real EW1/PF1/B1-R2
+    tags exist.
+  - `test_real_ew1_tag_git_gate_is_lifecycle_aware` — observes the REAL EW1 tag and branches:
+    State A (tag absent) asserts the absent-tag reason; State B (tag present at HEAD) asserts
+    the absent-tag reason is NOT produced, the exact tag is at the authorized HEAD, and the
+    fail-closed comes from baseline binding (derived from current `verify_b1_r2_checkpoint`
+    semantics, not an invented reason).
+  No Git ref/history was mutated: HEAD remains `9aa3219`, the local candidate EW1 tag remains
+  at `9aa3219`, PF1/B1-R2 immutable. EW1 tests 21 pass (was 20; 1 split into 2); affected
+  PN02D 198 pass; provider-free Docker 8 pass / 0 residue — all with the real EW1 tag PRESENT.
+  A dedicated Codex review of this test fix is required before any checkpoint retry.
+
 ## Governance retained
 
 `LIVE_PROVIDER_AUTHORIZATION_MINTED = NO`, `PN02_PROVIDER_RUN_AUTHORIZED = NO`,

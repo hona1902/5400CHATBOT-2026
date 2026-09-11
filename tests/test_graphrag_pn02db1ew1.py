@@ -456,17 +456,48 @@ def test_historical_or_arbitrary_tag_cannot_substitute_for_ew1(historical_tag):
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
-def test_missing_ew1_tag_fails_closed_in_real_git():
-    # The real Git repo has no EW1 tag (NOT_STARTED) → the trusted reader observes its
-    # absence and the verifier refuses; a caller cannot supply the missing tag.
+def test_synthetic_absent_checkpoint_fails_closed_in_real_git():
+    # PERMANENT absent-tag negative — checkpoint-lifecycle STABLE (independent of whether the
+    # real EW1/PF1/B1-R2 tags exist). A SYNTHETIC checkpoint identity (C.TEST_B1R2_TAG) never
+    # becomes a real Git tag, so the trusted real-Git reader always observes it absent and
+    # verify_b1_r2_checkpoint fails closed with b1_r2_tag_not_observed_in_git. This proves the
+    # "expected tag genuinely does not exist -> fail closed" path without asserting anything
+    # about the real EW1 checkpoint's lifecycle state.
     reader = RealTrustedB1R2Reader()
+    reasons = verify_b1_r2_checkpoint(
+        reader=reader,
+        operator_grant=C.frozen_test_grant(b1_r2_checkpoint=C.TEST_B1R2_TAG),
+        approved_expected_checkpoint=C.TEST_B1R2_TAG,
+        git_baseline=C.clean_git_baseline(),
+    )
+    assert "b1_r2_tag_not_observed_in_git" in reasons
+
+
+def test_real_ew1_tag_git_gate_is_lifecycle_aware():
+    # CHECKPOINT-LIFECYCLE aware for the REAL EW1 successor tag — valid BEFORE and AFTER the
+    # EW1 checkpoint tag exists (mirrors the B1-R2 State-A/State-B pattern). The absent-tag
+    # refusal is a State-A-only property; it must NOT be asserted unconditionally.
+    reader = RealTrustedB1R2Reader()
+    obs = reader.observe(EXPECTED_EW1_CHECKPOINT_TAG)
     reasons = verify_b1_r2_checkpoint(
         reader=reader,
         operator_grant=C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW1_CHECKPOINT_TAG),
         approved_expected_checkpoint=EXPECTED_EW1_CHECKPOINT_TAG,
         git_baseline=C.clean_git_baseline(),
     )
-    assert "b1_r2_tag_not_observed_in_git" in reasons
+    if not obs.observed_tag_exists:
+        # STATE A — pre-checkpoint: the real EW1 tag does not exist yet, so the trusted reader
+        # observes its absence and the verifier fails closed with the absent-tag reason.
+        assert "b1_r2_tag_not_observed_in_git" in reasons
+    else:
+        # STATE B — post-checkpoint: the real EW1 tag exists at HEAD. The absent-tag reason is
+        # therefore NOT produced; the exact tag is observed at the authorized HEAD, and the
+        # fail-closed now comes from baseline binding (the synthetic clean_git_baseline() head
+        # is not the real HEAD, so a caller cannot bind a non-current baseline). Derived from
+        # current verify_b1_r2_checkpoint semantics — not an invented State-B reason.
+        assert "b1_r2_tag_not_observed_in_git" not in reasons
+        assert obs.observed_tag_peel == obs.observed_head  # tag at authorized HEAD
+        assert "b1_r2_head_not_bound_to_approved_baseline" in reasons
 
 
 def test_exact_ew1_tag_with_peel_is_the_only_accepted_identity():
