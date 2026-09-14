@@ -327,7 +327,7 @@ def _valid_readers():
 
 
 def test_cli_execute_b1_live_without_manifest_refused():
-    code, payload = cli.evaluate_execute_b1_live(
+    code, payload = cli._evaluate_execute_b1_live_composed(
         manifest_path=None, explicit_authorize=False, env={}
     )
     assert code == 2
@@ -346,7 +346,7 @@ def test_cli_execute_b1_live_valid_grant_but_not_authorized(tmp_path):
     path = _write_manifest(tmp_path, grant)
     git_reader, fx_reader = _valid_readers()
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=False, env={},
             git_baseline_reader=git_reader, fixture_hash_reader=fx_reader,
         )
@@ -374,7 +374,7 @@ def test_cli_execute_b1_live_simulation_baseline_refused(tmp_path):
     path = _write_manifest(tmp_path, sim)
     _, fx_reader = _valid_readers()
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
             git_baseline_reader=lambda: C.clean_git_baseline(commit="SIMULATION", tag="SIMULATION"),
@@ -402,7 +402,7 @@ def test_cli_execute_b1_live_wrong_fixture_hash_refused(tmp_path):
     path = _write_manifest(tmp_path, bad)
     git_reader, fx_reader = _valid_readers()
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
             git_baseline_reader=git_reader, fixture_hash_reader=fx_reader,
@@ -429,7 +429,7 @@ def test_cli_execute_b1_live_wrong_provider_fingerprint_refused(tmp_path):
     path = _write_manifest(tmp_path, bad)
     git_reader, fx_reader = _valid_readers()
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
             git_baseline_reader=git_reader, fixture_hash_reader=fx_reader,
@@ -443,7 +443,7 @@ def test_cli_execute_b1_live_dirty_git_baseline_refused(tmp_path):
     path = _write_manifest(tmp_path, grant)
     _, fx_reader = _valid_readers()
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
             git_baseline_reader=lambda: C.dirty_git_baseline(),
@@ -467,7 +467,7 @@ def test_cli_missing_provider_secret_fails_closed_before_boot(tmp_path):
         raise AssertionError("live_runner must NOT run when the provider secret is missing")
 
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path, explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},  # no OPENROUTER_API_KEY
             git_baseline_reader=git_reader, fixture_hash_reader=fx_reader,
@@ -782,7 +782,7 @@ def test_cli_b1_r2_default_governance_path_refused(tmp_path):
     path = _write_manifest(tmp_path, grant)
     _, fx_reader = _valid_readers()
     with C.governance_expects_tag(C.TEST_B1R2_TAG):
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
@@ -803,7 +803,7 @@ def test_cli_b1_r2_real_reader_observes_no_tag_refused(tmp_path):
     with mock.patch.object(
         authmint, "current_approved_b1_r2_checkpoint", return_value=C.TEST_B1R2_TAG
     ):
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},
@@ -817,12 +817,12 @@ def test_cli_b1_r2_real_reader_observes_no_tag_refused(tmp_path):
 def test_cli_has_no_b1_r2_trust_injection_parameters():
     # B0CB-RR4-H1: the CLI entrypoint accepts NO trust-root override — old kwargs rejected.
     with pytest.raises(TypeError):
-        cli.evaluate_execute_b1_live(
+        cli._evaluate_execute_b1_live_composed(
             manifest_path=None, explicit_authorize=False, env={},
             trusted_b1_r2_reader=C.b1r2_reader_ok(),  # type: ignore[call-arg]
         )
     with pytest.raises(TypeError):
-        cli.evaluate_execute_b1_live(
+        cli._evaluate_execute_b1_live_composed(
             manifest_path=None, explicit_authorize=False, env={},
             approved_expected_b1_r2_checkpoint=C.TEST_B1R2_TAG,  # type: ignore[call-arg]
         )
@@ -840,13 +840,13 @@ def test_current_repo_cannot_verify_b1_r2_checkpoint():
         git_baseline=C.clean_git_baseline(),
     )
     assert "b1_r2_tag_not_observed_in_git" in reasons
-    # governance (the real path) is now frozen to the successor EW1 tag, but that tag does
+    # governance (the real path) is now frozen to the successor EW2 tag, but that tag does
     # not exist in Git yet, so the mint still fails closed.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW1_CHECKPOINT_TAG,
+        EXPECTED_EW2_CHECKPOINT_TAG,
     )
 
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW1_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW2_CHECKPOINT_TAG
 
 
 def test_current_governance_flags_unchanged():

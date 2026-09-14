@@ -438,7 +438,7 @@ def test_orchestrator_missing_binding_fails(monkeypatch):
 
     bench = d.load_benchmark08()
     deps = lo.OrchestratorDeps(
-        isolation_runtime_factory=lambda: None, model_seeder=None, model_restorer=None,
+        isolation_runtime_factory=lambda: None, model_seed_cm=None,
         source_preparer=None, provisioner_factory=lambda a, b, c: None,
         client_factory=lambda ep: None, runtime_attestor=object(),
         provider_binding=None,  # missing -> fail closed before isolation/provider
@@ -455,7 +455,7 @@ def test_orchestrator_missing_secret_reports_name(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     bench = d.load_benchmark08()
     deps = lo.OrchestratorDeps(
-        isolation_runtime_factory=lambda: None, model_seeder=None, model_restorer=None,
+        isolation_runtime_factory=lambda: None, model_seed_cm=None,
         source_preparer=None, provisioner_factory=lambda a, b, c: None,
         client_factory=lambda ep: None, runtime_attestor=object(),
         provider_binding=pb.frozen_provider_binding(),
@@ -486,7 +486,7 @@ def test_binding_presence_does_not_authorize_live(monkeypatch):
 
     bench = d.load_benchmark08()
     deps = lo.OrchestratorDeps(
-        isolation_runtime_factory=lambda: _Iso(), model_seeder=None, model_restorer=None,
+        isolation_runtime_factory=lambda: _Iso(), model_seed_cm=None,
         source_preparer=None, provisioner_factory=lambda a, b, c: None,
         client_factory=lambda ep: None, runtime_attestor=object(),
         provider_binding=pb.frozen_provider_binding(),

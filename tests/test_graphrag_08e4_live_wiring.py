@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import types
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -191,13 +192,14 @@ def _mk_deps(order, working_dir, *, attestor=_UNSET, client_script=None,
     factory = FakeClientFactory(client_script)
     iso = FakeIsolation(order)
 
-    async def model_seeder():
+    @asynccontextmanager
+    async def model_seed_cm():
+        # Private seed CM (B1EW2-RR3-H1): owns its own teardown; no caller cleanup authority.
         order.append("model_seed")
-        return ("model:tmp08e4", None)
-
-    async def model_restorer(mid, prior):
-        order.append("model_restore")
-        return True
+        try:
+            yield "model:tmp08e4"
+        finally:
+            order.append("model_restore")
 
     async def source_preparer(bench, keys):
         order.append("sources")
@@ -209,8 +211,7 @@ def _mk_deps(order, working_dir, *, attestor=_UNSET, client_script=None,
 
     deps = lo.OrchestratorDeps(
         isolation_runtime_factory=lambda: iso,
-        model_seeder=model_seeder,
-        model_restorer=model_restorer,
+        model_seed_cm=model_seed_cm,
         source_preparer=source_preparer,
         provisioner_factory=lambda wd, att, binding: prov,
         client_factory=factory,

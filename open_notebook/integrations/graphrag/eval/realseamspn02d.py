@@ -303,7 +303,6 @@ def build_real_b1_live_seams(
     repo_query: Optional[Callable[..., Awaitable[Sequence[Mapping[str, object]]]]] = None,
     member_row_fetcher: Optional[MemberRowFetcher] = None,
     query_embed_fn: Optional[QueryEmbedFn] = None,
-    model_attestor: Optional[EmbeddingModelAttestor] = None,
     notebook_record_ids: Optional[Mapping[str, str]] = None,
     index_transport: Optional[httpx.AsyncBaseTransport] = None,
     gd_transport: Optional[httpx.AsyncBaseTransport] = None,
@@ -379,8 +378,11 @@ def build_real_b1_live_seams(
         member_row_fetcher = build_repo_query_member_row_fetcher(rq)
     if query_embed_fn is None:
         query_embed_fn = build_real_query_embed_fn()
-    if model_attestor is None:
-        model_attestor = build_real_model_attestor()
+    # B1EW2-R1-H2: the model attestor is a TRUST ROOT — it is NEVER caller-overridable. The
+    # builder always constructs the genuine ``build_real_model_attestor`` (which reads the
+    # seeded isolated DefaultModels/Model). Tests that need a controlled attestor patch the
+    # module-level ``build_real_model_attestor`` in test scope (they cannot inject one here).
+    model_attestor = build_real_model_attestor()
 
     # Identity + secrets (NAMES only; the local sidecar value is used only as an auth header).
     if notebook_record_ids is None:
@@ -457,6 +459,11 @@ REAL_SEAM_DEFAULT_PRODUCERS: Dict[str, object] = {
 #: A factory: run_id -> an async context manager that opens/tears down the isolated runtime.
 IsolationFactory = Callable[[str], AbstractAsyncContextManager[object]]
 
+#: A factory: () -> an async context manager that seeds/tears down the frozen embedding
+#: Model inside the ACTIVE isolation (PN02D-B1-EW2). Real by default; a controlled offline
+#: test injects a no-op so the composition can be exercised without a DB.
+ModelSeedFactory = Callable[[], AbstractAsyncContextManager[object]]
+
 
 @asynccontextmanager
 async def _default_isolation(run_id: str) -> AsyncIterator[object]:
@@ -469,7 +476,52 @@ async def _default_isolation(run_id: str) -> AsyncIterator[object]:
         yield ctx
 
 
+@asynccontextmanager
+async def _default_model_seed() -> AsyncIterator[object]:
+    """Seed the frozen embedding Model into the ACTIVE isolated namespace (EW2).
+
+    A fresh isolated namespace has no ``model`` records and
+    ``DefaultModels.default_embedding_model = None``, which makes the normal embedding
+    stack (``embed_source_command`` → ``generate_embeddings`` →
+    ``model_manager.get_embedding_model``) and the real frozen-model attestor fail closed.
+    This enters the shared ``seeded_frozen_embedding_model`` context so both resolve the
+    SAME seeded model; it restores/deletes on exit and makes NO provider call.
+    """
+    from open_notebook.integrations.graphrag.eval.isolated_model_seed import (
+        seeded_frozen_embedding_model,
+    )
+
+    async with seeded_frozen_embedding_model() as model_id:
+        yield model_id
+
+
 async def run_live_b1_execution(
+    *,
+    operator_grant: OperatorRunGrant,
+    git_baseline_attestation: GitBaselineAttestation,
+    observed_fixture_hash: str = EXPECTED_FIXTURE_HASH,
+    env: Optional[Mapping[str, str]] = None,
+) -> B1RunOutcome:
+    """PRODUCTION live B1 entrypoint (PN02D-B1-EW2 §B1EW2-R1-H2 — no composition injection).
+
+    This is the ONLY live-callable execution entrypoint (used by ``execute-b1-live`` via
+    ``cli_live_pn02d._default_live_runner``). Its signature exposes NO composition or trust-root
+    overrides: the isolated-namespace lifecycle, the frozen embedding-model seed, the seams
+    builder, and — critically — the frozen-model attestor are all resolved INTERNALLY from the
+    real production defaults. A live caller therefore cannot substitute a no-op isolation, a
+    no-op/fake model seed, an always-true model attestor, or an alternate seams builder
+    (``PUBLIC_LIVE_TRUST_ROOT_OVERRIDES = 0``). Controlled offline composition (fake external
+    edges) is available ONLY through the private, non-live ``_run_live_b1_execution_composed``.
+    """
+    return await _run_live_b1_execution_composed(
+        operator_grant=operator_grant,
+        git_baseline_attestation=git_baseline_attestation,
+        observed_fixture_hash=observed_fixture_hash,
+        env=env,
+    )
+
+
+async def _run_live_b1_execution_composed(
     *,
     operator_grant: OperatorRunGrant,
     git_baseline_attestation: GitBaselineAttestation,
@@ -477,36 +529,52 @@ async def run_live_b1_execution(
     fx: Optional[FixturePN02] = None,
     seams_builder: Callable[..., LiveB1Seams] = build_real_b1_live_seams,
     isolation: Optional[IsolationFactory] = None,
+    model_seed: Optional[ModelSeedFactory] = None,
     builder_kwargs: Optional[Mapping[str, object]] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> B1RunOutcome:
-    """Run the real two-boot B1 execution IN-PROCESS (task §21/§24/§25).
+    """PRIVATE, NON-LIVE composition helper (PN02D-B1-EW2 §29). NOT a production entrypoint.
 
-    Owns the isolated-namespace lifecycle (real by default; injectable), builds the ONE
-    canonical real ``LiveB1Seams`` inside that isolation (the corpus seams require it), and
-    hands them to ``RealB1Driver.run`` — which OWNS the security ordering (provider-free
-    preflight → mint → provider-bound Boot 2 → execute → cleanup). This runner adds NO
-    orchestration of its own and does NOT re-mint or bypass the driver. The
-    ``LiveProviderRunAuthorization`` remains IN-MEMORY-EPHEMERAL (minted inside the driver in
-    this same process); nothing is persisted (``AUTHORIZATION_PERSISTENCE_ADDED = NO``).
+    Runs the real two-boot B1 execution IN-PROCESS while allowing a controlled offline test to
+    inject fakes for the EXTERNAL edges (Docker/HTTP/DB/provider) via ``builder_kwargs``, a
+    no-op ``isolation``, and a no-op ``model_seed``. The frozen-model attestor is STILL not
+    injectable — it is owned by ``build_real_b1_live_seams`` (tests patch the module-level
+    ``build_real_model_attestor`` in test scope). The production CLI never calls this helper;
+    only ``run_live_b1_execution`` (with all real defaults) does.
 
-    ``seams_builder``/``isolation``/``builder_kwargs`` default to the real production path; a
-    controlled offline test injects fakes for the external edges (via ``builder_kwargs``) and
-    a no-op isolation to prove reachability with ZERO provider traffic.
+    Owns the isolated-namespace lifecycle, seeds the frozen embedding Model into that isolation
+    (PN02D-B1-EW2), builds the canonical real ``LiveB1Seams`` inside it, and hands them to
+    ``RealB1Driver.run`` — which OWNS the security ordering (provider-free preflight → mint →
+    provider-bound Boot 2 → execute → cleanup). It adds NO orchestration and does NOT re-mint
+    or bypass the driver. The ``LiveProviderRunAuthorization`` stays IN-MEMORY-EPHEMERAL
+    (minted inside the driver; nothing persisted).
+
+    EW2 ordering (§9/§23): isolation entered FIRST, the frozen embedding Model seeded SECOND
+    (so the normal embedding stack + the frozen-model attestor resolve the same seeded default
+    inside the temp namespace), and only THEN are the real seams built and the driver run. The
+    seed is provider-free; it is torn down before the isolation.
     """
     fx = fx or load_fixture()
     isolation_factory: IsolationFactory = (
         isolation if isolation is not None else _default_isolation
     )
+    seed_factory: ModelSeedFactory = (
+        model_seed if model_seed is not None else _default_model_seed
+    )
     extra = dict(builder_kwargs or {})
+    # Ordering (EW2 §9/§23): isolation entered < frozen embedding model seeded < real seams
+    # built < RealB1Driver.run. The seed lives INSIDE the isolation (temp namespace only) and
+    # OUTSIDE the seams build, so the corpus embedder, query embedder, and model attestor all
+    # resolve the seeded default embedding model.
     async with isolation_factory(operator_grant.run_id):
-        seams = seams_builder(fx, run_id=operator_grant.run_id, env=env, **extra)
-        driver = RealB1Driver(fx, seams)
-        return await driver.run(
-            operator_grant=operator_grant,
-            git_baseline_attestation=git_baseline_attestation,
-            observed_fixture_hash=observed_fixture_hash,
-        )
+        async with seed_factory():
+            seams = seams_builder(fx, run_id=operator_grant.run_id, env=env, **extra)
+            driver = RealB1Driver(fx, seams)
+            return await driver.run(
+                operator_grant=operator_grant,
+                git_baseline_attestation=git_baseline_attestation,
+                observed_fixture_hash=observed_fixture_hash,
+            )
 
 
 __all__ = [

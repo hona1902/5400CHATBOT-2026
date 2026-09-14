@@ -27,12 +27,17 @@ import asyncio
 import json
 import subprocess
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from loguru import logger
+
+from open_notebook.integrations.graphrag.eval.isolated_model_seed import (
+    seeded_frozen_embedding_model,
+)
 
 _COMPOSE_FILE = "deploy/graphrag-poc/docker-compose.graphrag.yml"
 _EXPECTED_EMBED_DIM = 1536
@@ -44,8 +49,9 @@ class PrecheckState:
     state: str = "PLANNED"
     temp_namespace: str = ""
     temp_database: str = ""
+    #: Resolved seeded model id — retained for the content-free report ONLY (an identifier,
+    #: never cleanup authority; teardown is owned entirely by the private seed CM — RR3-H1).
     temp_model_id: Optional[str] = None
-    prior_default_embedding: Optional[str] = None
     selected_source_keys: tuple = ()
     selected_query_ids: tuple = ()
     created_ids: List[str] = field(default_factory=list)
@@ -223,48 +229,12 @@ async def gather_sidecar_diagnostic(
     )
 
 
-# ---- temp embedding Model seed (normal supported path) ---------------------
-
-async def seed_temp_embedding_model() -> tuple[str, Optional[str]]:
-    """Create a temp OpenRouter embedding Model in the CURRENT (isolated) DB and
-    set it as the default. Returns (temp_model_id, prior_default). Env-key fallback
-    (OPENROUTER_API_KEY); no stored credential. Must be called inside isolation."""
-    from open_notebook.ai.models import DefaultModels, Model
-
-    defaults = await DefaultModels.get_instance()
-    prior = defaults.default_embedding_model
-    model = Model(
-        name="openai/text-embedding-3-small",
-        provider="openrouter",
-        type="embedding",
-        credential=None,
-    )
-    await model.save()
-    model_id = str(model.id)
-    defaults = await DefaultModels.get_instance()
-    defaults.default_embedding_model = model_id
-    await defaults.update()
-    return model_id, prior
-
-
-async def restore_default_and_delete_model(
-    temp_model_id: str, prior_default: Optional[str]
-) -> bool:
-    """Restore the prior default embedding model and delete the temp Model record.
-    Best-effort; the temp namespace drop also removes both. Returns success."""
-    from open_notebook.ai.models import DefaultModels, Model
-
-    try:
-        defaults = await DefaultModels.get_instance()
-        defaults.default_embedding_model = prior_default
-        await defaults.update()
-        model = await Model.get(temp_model_id)
-        if model is not None:
-            await model.delete()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"[gr08-precheck] temp model cleanup failed: {type(exc).__name__}")
-        return False
+# ---- temp embedding Model seed --------------------------------------------
+#
+# There is NO separated seed/restore wrapper and NO caller cleanup authority (B1EW2-RR3-H1 /
+# Cycle #4). The seed lifecycle is the private ``seeded_frozen_embedding_model`` context
+# manager (imported above); the orchestration below enters it via an ``AsyncExitStack`` so
+# create and teardown span the run, with teardown owned entirely by the CM.
 
 
 async def _embedding_dim_probe() -> int:
@@ -355,54 +325,66 @@ async def run_micro_precheck(
             st.temp_namespace = ctx.namespace
             st.temp_database = ctx.database
             st.state = "MODEL_SEED"
-            st.temp_model_id, st.prior_default_embedding = await seed_temp_embedding_model()
-            st.embedding_dimension_observed = await _embedding_dim_probe()
-            if st.embedding_dimension_observed != _EXPECTED_EMBED_DIM:
-                raise RuntimeError(
-                    f"embedding dim {st.embedding_dimension_observed} != {_EXPECTED_EMBED_DIM}"
-                )
-
-            service = GraphRAGService(load_config())
-            gd_client = GDQueryClient(load_config())
-            runner = GraphRAG08EvalRunner(
-                bench,
-                service=service,
-                gd_client=gd_client,
-                selected_source_keys=sk,
-                selected_query_ids=qids,
-                # Bounded, but generous enough for 8 sources' LLM graph extraction
-                # through OpenRouter (still no unbounded polling; §28).
-                config=EvalRunConfig08(
-                    index_ready_timeout_s=600.0, poll_interval_s=5.0
-                ),
-                combined_sha256=st.fixture_hash_before,
-                graphrag_config=load_config(),
+            seed_stack = AsyncExitStack()
+            st.temp_model_id = await seed_stack.enter_async_context(
+                seeded_frozen_embedding_model()
             )
+            # Once the seed CM is entered, its teardown is owned by this try/finally with
+            # NO gap: even if the dim probe / runner construction below raises, seed_stack
+            # is closed exactly once (B1EW2-RR4-L1).
             try:
-                st.state = "FULL_INDEX"
-                await runner.create_and_index()
-                st.created_ids = list(runner.created_ids)
-                st.state = "FULL_QUERY"
-                evaluations = await runner.run()
-                metadata = runner.build_metadata()
-                st.state = "ANALYZE"
-                artifact = r.build_artifact(
-                    metadata, evaluations, corpus_size=runner.corpus_size
+                st.embedding_dimension_observed = await _embedding_dim_probe()
+                if st.embedding_dimension_observed != _EXPECTED_EMBED_DIM:
+                    raise RuntimeError(
+                        f"embedding dim {st.embedding_dimension_observed} != {_EXPECTED_EMBED_DIM}"
+                    )
+
+                service = GraphRAGService(load_config())
+                gd_client = GDQueryClient(load_config())
+                runner = GraphRAG08EvalRunner(
+                    bench,
+                    service=service,
+                    gd_client=gd_client,
+                    selected_source_keys=sk,
+                    selected_query_ids=qids,
+                    # Bounded, but generous enough for 8 sources' LLM graph extraction
+                    # through OpenRouter (still no unbounded polling; §28).
+                    config=EvalRunConfig08(
+                        index_ready_timeout_s=600.0, poll_interval_s=5.0
+                    ),
+                    combined_sha256=st.fixture_hash_before,
+                    graphrag_config=load_config(),
                 )
-                out_dir = artifact_dir or Path(".artifacts") / "graphrag-08" / st.run_id
-                r.write_artifact(out_dir / "precheck.json", artifact)
-                _write_manifest(out_dir / "manifest.json", st, runner)
-            finally:
-                # ---- owned cleanup: LightRAG per-id, then temp Model (§46) ---
-                st.state = "CLEANUP"
                 try:
-                    cr = await runner.cleanup()
-                    st.lightrag_cleanup_ok = cr.clean and not cr.errors
+                    st.state = "FULL_INDEX"
+                    await runner.create_and_index()
+                    st.created_ids = list(runner.created_ids)
+                    st.state = "FULL_QUERY"
+                    evaluations = await runner.run()
+                    metadata = runner.build_metadata()
+                    st.state = "ANALYZE"
+                    artifact = r.build_artifact(
+                        metadata, evaluations, corpus_size=runner.corpus_size
+                    )
+                    out_dir = artifact_dir or Path(".artifacts") / "graphrag-08" / st.run_id
+                    r.write_artifact(out_dir / "precheck.json", artifact)
+                    _write_manifest(out_dir / "manifest.json", st, runner)
+                finally:
+                    # ---- owned cleanup: LightRAG per-id (runner is defined here) (§46) --
+                    st.state = "CLEANUP"
+                    try:
+                        cr = await runner.cleanup()
+                        st.lightrag_cleanup_ok = cr.clean and not cr.errors
+                    except Exception as exc:  # noqa: BLE001
+                        st.failures.append(f"runner cleanup: {type(exc).__name__}")
+            finally:
+                # temp Model cleanup ALWAYS runs once the seed CM was entered (the private
+                # CM owns the destructive teardown); no enter->cleanup gap.
+                try:
+                    await seed_stack.aclose()
+                    st.temp_model_cleanup_ok = True
                 except Exception as exc:  # noqa: BLE001
-                    st.failures.append(f"runner cleanup: {type(exc).__name__}")
-                st.temp_model_cleanup_ok = await restore_default_and_delete_model(
-                    st.temp_model_id or "", st.prior_default_embedding
-                )
+                    st.failures.append(f"model cleanup: {type(exc).__name__}")
             # exiting the context drops the temp namespace (removes sources+model)
     except Exception as exc:  # noqa: BLE001
         # Type name only — never str(exc), which could carry provider/LightRAG text
@@ -603,77 +585,89 @@ async def run_full_benchmark(
             st.temp_namespace = ctx.namespace
             st.temp_database = ctx.database
             st.state = "MODEL_SEED"
-            st.temp_model_id, st.prior_default_embedding = await seed_temp_embedding_model()
-            st.embedding_dimension_observed = await _embedding_dim_probe()
-            if st.embedding_dimension_observed != _EXPECTED_EMBED_DIM:
-                raise RuntimeError(
-                    f"embedding dim {st.embedding_dimension_observed} != {_EXPECTED_EMBED_DIM}"
-                )
-
-            service = GraphRAGService(load_config())
-            gd_client = GDQueryClient(load_config())
-            runner = GraphRAG08EvalRunner(
-                bench,
-                service=service,
-                gd_client=gd_client,
-                selected_source_keys=sk,
-                selected_query_ids=qids,
-                allow_holdout=True,  # AUTHORIZED full run executes HOLDOUT
-                config=EvalRunConfig08(
-                    run_type="FULL_BENCHMARK",
-                    index_ready_timeout_s=1800.0,
-                    poll_interval_s=5.0,
-                ),
-                combined_sha256=st.fixture_hash_before,
-                graphrag_config=load_config(),
+            seed_stack = AsyncExitStack()
+            st.temp_model_id = await seed_stack.enter_async_context(
+                seeded_frozen_embedding_model()
             )
-            value_out_dir = (
-                artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
-            )
+            # Once the seed CM is entered, its teardown is owned by this try/finally with
+            # NO gap: even if the dim probe / runner construction below raises, seed_stack
+            # is closed exactly once (B1EW2-RR4-L1).
             try:
-                st.state = "FULL_INDEX"
-                await runner.create_and_index()
-                st.created_ids = list(runner.created_ids)
-                _capture_index_telemetry(st, runner)
-                st.state = "FULL_QUERY"
-                evaluations = await runner.run()
-                metadata = {
-                    **runner.build_metadata(),
-                    "run_type": "FULL_BENCHMARK",
-                    # Provenance METADATA only (task §13/§14) — never affects execution.
-                    "full_run_authorization": st.authorization_label,
-                    "value_run": True,
-                    "holdout_used": True,
-                    "full_benchmark_executed": True,
-                    "benchmark_corpus_size": len(bench.sources),
-                }
-                st.state = "ANALYZE"
-                artifact = r.build_artifact(
-                    metadata, evaluations, corpus_size=runner.corpus_size
+                st.embedding_dimension_observed = await _embedding_dim_probe()
+                if st.embedding_dimension_observed != _EXPECTED_EMBED_DIM:
+                    raise RuntimeError(
+                        f"embedding dim {st.embedding_dimension_observed} != {_EXPECTED_EMBED_DIM}"
+                    )
+
+                service = GraphRAGService(load_config())
+                gd_client = GDQueryClient(load_config())
+                runner = GraphRAG08EvalRunner(
+                    bench,
+                    service=service,
+                    gd_client=gd_client,
+                    selected_source_keys=sk,
+                    selected_query_ids=qids,
+                    allow_holdout=True,  # AUTHORIZED full run executes HOLDOUT
+                    config=EvalRunConfig08(
+                        run_type="FULL_BENCHMARK",
+                        index_ready_timeout_s=1800.0,
+                        poll_interval_s=5.0,
+                    ),
+                    combined_sha256=st.fixture_hash_before,
+                    graphrag_config=load_config(),
                 )
-                r.write_artifact(value_out_dir / "benchmark.json", artifact)
-                _write_manifest(value_out_dir / "manifest.json", st, runner)
-            except Exception:
-                # GraphRAG-08B: preserve content-free failure telemetry BEFORE
-                # destructive cleanup, so a failed-before-query run is diagnosable.
-                st.created_ids = list(runner.created_ids)
-                _capture_index_telemetry(st, runner)
-                st.run_validity = "FAILED"
+                value_out_dir = (
+                    artifact_dir or Path(".artifacts") / "graphrag-08-full" / st.run_id
+                )
                 try:
-                    _write_failure_telemetry(value_out_dir, st, runner)
-                except Exception as exc:  # noqa: BLE001 - never block cleanup
-                    st.failures.append(f"failure telemetry write: {type(exc).__name__}")
-                raise
+                    st.state = "FULL_INDEX"
+                    await runner.create_and_index()
+                    st.created_ids = list(runner.created_ids)
+                    _capture_index_telemetry(st, runner)
+                    st.state = "FULL_QUERY"
+                    evaluations = await runner.run()
+                    metadata = {
+                        **runner.build_metadata(),
+                        "run_type": "FULL_BENCHMARK",
+                        # Provenance METADATA only (task §13/§14) — never affects execution.
+                        "full_run_authorization": st.authorization_label,
+                        "value_run": True,
+                        "holdout_used": True,
+                        "full_benchmark_executed": True,
+                        "benchmark_corpus_size": len(bench.sources),
+                    }
+                    st.state = "ANALYZE"
+                    artifact = r.build_artifact(
+                        metadata, evaluations, corpus_size=runner.corpus_size
+                    )
+                    r.write_artifact(value_out_dir / "benchmark.json", artifact)
+                    _write_manifest(value_out_dir / "manifest.json", st, runner)
+                except Exception:
+                    # GraphRAG-08B: preserve content-free failure telemetry BEFORE
+                    # destructive cleanup, so a failed-before-query run is diagnosable.
+                    st.created_ids = list(runner.created_ids)
+                    _capture_index_telemetry(st, runner)
+                    st.run_validity = "FAILED"
+                    try:
+                        _write_failure_telemetry(value_out_dir, st, runner)
+                    except Exception as exc:  # noqa: BLE001 - never block cleanup
+                        st.failures.append(f"failure telemetry write: {type(exc).__name__}")
+                    raise
+                finally:
+                    st.state = "CLEANUP"
+                    try:
+                        cr = await runner.cleanup()
+                        st.lightrag_cleanup_ok = cr.clean and not cr.errors
+                    except Exception as exc:  # noqa: BLE001
+                        st.failures.append(f"runner cleanup: {type(exc).__name__}")
             finally:
-                st.state = "CLEANUP"
+                # temp Model cleanup ALWAYS runs once the seed CM was entered (the private
+                # CM owns the destructive teardown); no enter->cleanup gap.
                 try:
-                    cr = await runner.cleanup()
-                    st.lightrag_cleanup_ok = cr.clean and not cr.errors
+                    await seed_stack.aclose()
+                    st.temp_model_cleanup_ok = True
                 except Exception as exc:  # noqa: BLE001
-                    st.failures.append(f"runner cleanup: {type(exc).__name__}")
-                st.temp_model_cleanup_ok = await restore_default_and_delete_model(
-                    st.temp_model_id or "", st.prior_default_embedding
-                )
+                    st.failures.append(f"model cleanup: {type(exc).__name__}")
     except Exception as exc:  # noqa: BLE001
         # Type name only — never str(exc), which could carry provider/LightRAG text
         # into the failure record (GraphRAG-08B raw-containment; review LOW-1).

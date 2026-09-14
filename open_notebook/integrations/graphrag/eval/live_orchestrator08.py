@@ -25,6 +25,7 @@ plan/budget, or hypothesis interpretation — those stay in the frozen 08E layer
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass, field
 from typing import (
     Awaitable,
@@ -98,12 +99,11 @@ class OrchestratorDeps:
 
     #: () -> async CM yielding the Option-A isolated runtime (08A).
     isolation_runtime_factory: Callable[[], IsolationRuntime]
-    #: () -> (temp_model_id, prior_default) — creates the temp embedding Model INSIDE
-    #: isolation (no provider call). Frozen: OpenRouter openai/text-embedding-3-small.
-    model_seeder: Callable[[], Awaitable[Tuple[str, Optional[str]]]]
-    #: (temp_model_id, prior_default) -> ok — best-effort restore (namespace drop also
-    #: removes it).
-    model_restorer: Callable[[str, Optional[str]], Awaitable[bool]]
+    #: () -> async CM that seeds the frozen temp embedding Model INSIDE isolation (no provider
+    #: call; OpenRouter openai/text-embedding-3-small) and OWNS its own teardown on exit. There
+    #: is NO caller cleanup authority (B1EW2-RR3-H1 / Cycle #4): the orchestrator enters this CM
+    #: for the seed and relies on its __aexit__ for cleanup — it never receives a handle/id.
+    model_seed_cm: Callable[[], AbstractAsyncContextManager[object]]
     #: (benchmark, keys) -> {key: DiagnosticSource} — creates the canonical Sources +
     #: canonical embedding INSIDE isolation (the ONLY provider embedding call path).
     source_preparer: Callable[[object, Tuple[str, ...]], Awaitable[Dict[str, DiagnosticSource]]]
@@ -205,11 +205,11 @@ class LiveDiagnosticOrchestrator08:
         # -- 3) Option-A isolation MUST wrap all provider/DB work (task §14) --
         async with self._deps.isolation_runtime_factory() as ctx:
             rid = run_id or getattr(ctx, "run_id", None) or rid
-            model_id: Optional[str] = None
-            prior_default: Optional[str] = None
+            # -- 4) temp embedding Model seeded INSIDE isolation via the private CM, which
+            #    OWNS its own teardown on exit (no caller cleanup authority — B1EW2-RR3-H1). --
+            seed_stack = AsyncExitStack()
+            await seed_stack.enter_async_context(self._deps.model_seed_cm())
             try:
-                # -- 4) temp embedding Model (inside isolation only, task §15) --
-                model_id, prior_default = await self._deps.model_seeder()
                 # -- 5) frozen diagnostic Sources + canonical embedding (task §16/§17) --
                 keys = self._union_source_keys(plan)
                 sources = await self._deps.source_preparer(self._benchmark, keys)
@@ -274,15 +274,14 @@ class LiveDiagnosticOrchestrator08:
                     failure_stage="SWEEP", failure_type=type(exc).__name__,
                 )
             finally:
-                # Temp Model restore/removal (the namespace drop also removes it). Normal
-                # DB is NEVER touched (task §39/§52).
-                if model_id is not None:
-                    try:
-                        await self._deps.model_restorer(model_id, prior_default)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            f"[gr08e4] temp model restore error: {type(exc).__name__}"
-                        )
+                # The private seed CM owns teardown (restore prior default + delete owned
+                # model); the namespace drop also removes it. Normal DB is NEVER touched.
+                try:
+                    await seed_stack.aclose()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"[gr08e4] temp model cleanup error: {type(exc).__name__}"
+                    )
             # exiting the isolation CM drops the temp namespace (Sources + Model gone)
 
     # -- content-free artifact (task §40) ------------------------------------
@@ -352,7 +351,6 @@ def default_live_deps(
     # index submit against a key-protected sidecar (review M1).
     api_key = api_key or os.environ.get("GRAPHRAG_POC_API_KEY") or None
 
-    from open_notebook.integrations.graphrag.eval import precheck08 as pc
     from open_notebook.integrations.graphrag.eval.cell_provisioner08 import (
         DockerCellProcessController,
         DockerRuntimeAttestor,
@@ -411,10 +409,13 @@ def default_live_deps(
             runtime_attestor=attestor,
         )
 
+    from open_notebook.integrations.graphrag.eval.isolated_model_seed import (
+        seeded_frozen_embedding_model,
+    )
+
     return OrchestratorDeps(
         isolation_runtime_factory=isolated_surreal_eval_runtime,
-        model_seeder=pc.seed_temp_embedding_model,
-        model_restorer=pc.restore_default_and_delete_model,
+        model_seed_cm=seeded_frozen_embedding_model,
         source_preparer=_prepare_sources,
         provisioner_factory=_provisioner_factory,
         client_factory=real_cell_index_client_factory(api_key=api_key),

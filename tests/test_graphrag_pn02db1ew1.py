@@ -35,6 +35,7 @@ from open_notebook.integrations.graphrag.eval import realseamspn02d as R
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_B1_R2_CHECKPOINT_TAG,
     EXPECTED_EW1_CHECKPOINT_TAG,
+    EXPECTED_EW2_CHECKPOINT_TAG,
     EXPECTED_PF1_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     current_approved_b1_r2_checkpoint,
@@ -45,7 +46,6 @@ from open_notebook.integrations.graphrag.eval.driver_live_pn02d import LiveB1Sea
 from open_notebook.integrations.graphrag.eval.realseamspn02d import (
     build_real_b1_live_seams,
     build_real_model_attestor,
-    run_live_b1_execution,
 )
 
 FUTURE_COMMIT = "e1e1e1e1" + "0" * 32
@@ -112,7 +112,8 @@ def _fake_edge_kwargs(fx, *, port_base: int = C.PORT_BASE):
         },
         member_row_fetcher=corpus_db.member_row_fetcher(),
         query_embed_fn=C.make_query_embed_fn(fx),
-        model_attestor=C.make_model_attestor(),
+        # B1EW2-R1-H2: model_attestor is NO LONGER an injectable builder kwarg (trust root).
+        # Driver-running composition tests patch the module-level build_real_model_attestor.
         index_transport=transport,
         gd_transport=transport,
         delete_transport=transport,
@@ -125,6 +126,13 @@ def _fake_edge_kwargs(fx, *, port_base: int = C.PORT_BASE):
 
 @asynccontextmanager
 async def _noop_isolation(_run_id):
+    yield None
+
+
+@asynccontextmanager
+async def _noop_model_seed():
+    # EW2: the real path seeds the frozen embedding Model into the active isolation; the
+    # offline composition injects a no-op so the flow is exercised without a DB.
     yield None
 
 
@@ -265,14 +273,20 @@ async def test_production_composition_orchestration_reaches_driver():
     fx = C.fixture()
     kwargs, http_calls, corpus_db, controller, preflight_runner = _fake_edge_kwargs(fx)
 
-    with C.approved_b1r2_governance():
-        outcome = await run_live_b1_execution(
+    # B1EW2-R1-H2: use the PRIVATE composition helper (production run_live_b1_execution exposes
+    # no injection). The frozen-model attestor is not injectable — patch the module-level
+    # factory in test scope so the driver's vector phase uses a controlled attestor.
+    with C.approved_b1r2_governance(), mock.patch.object(
+        R, "build_real_model_attestor", lambda: C.make_model_attestor()
+    ):
+        outcome = await R._run_live_b1_execution_composed(
             operator_grant=C.frozen_test_grant(),
             git_baseline_attestation=C.clean_git_baseline(),
             observed_fixture_hash=_fixture_hash(),
             fx=fx,
             seams_builder=build_real_b1_live_seams,  # the REAL builder (not C.build_live_seams)
             isolation=_noop_isolation,
+            model_seed=_noop_model_seed,
             builder_kwargs=kwargs,
         )
 
@@ -301,13 +315,14 @@ def _reachable_runner(fx, kwargs):
 
     def _runner(*, operator_grant, git_baseline, observed_fixture_hash, env):
         return asyncio.run(
-            run_live_b1_execution(
+            R._run_live_b1_execution_composed(
                 operator_grant=operator_grant,
                 git_baseline_attestation=git_baseline,
                 observed_fixture_hash=observed_fixture_hash,
                 fx=fx,
                 seams_builder=build_real_b1_live_seams,
                 isolation=_noop_isolation,
+                model_seed=_noop_model_seed,
                 builder_kwargs=kwargs,
             )
         )
@@ -341,8 +356,10 @@ def test_real_execution_cli_reachable(tmp_path):
     grant = C.frozen_test_grant()
     path = _write_manifest(tmp_path, grant)
 
-    with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+    with C.approved_b1r2_governance(), mock.patch.object(
+        R, "build_real_model_attestor", lambda: C.make_model_attestor()
+    ):
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES", "OPENROUTER_API_KEY": "dummy"},
@@ -376,7 +393,7 @@ def test_cli_missing_provider_secret_fails_closed(tmp_path):
         raise AssertionError("live_runner must not run when the secret is missing")
 
     with C.approved_b1r2_governance():
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES"},  # no OPENROUTER_API_KEY
@@ -409,7 +426,7 @@ def test_cli_wrong_checkpoint_historical_pf1_refused(tmp_path):
     # governance approves EW1 (real), but the reader is patched to observe the PF1 tag so we
     # isolate the identity-mismatch refusal (not merely tag-absence).
     with C.governance_expects_tag(EXPECTED_EW1_CHECKPOINT_TAG):
-        code, payload = cli.evaluate_execute_b1_live(
+        code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES", "OPENROUTER_API_KEY": "dummy"},
@@ -426,15 +443,18 @@ def test_cli_wrong_checkpoint_historical_pf1_refused(tmp_path):
 # §41 — successor governance regression (exact identity + trusted reader binding)
 # --------------------------------------------------------------------------- #
 
-def test_governance_current_is_ew1_pf1_and_b1r2_historical():
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW1_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW1_CHECKPOINT_TAG
-    # All three identities are distinct; PF1 and B1-R2 are retained as HISTORICAL only.
+def test_governance_current_is_ew2_with_ew1_pf1_b1r2_historical():
+    # PN02D-B1-EW2 supersedes EW1: governance now approves the EW2 successor, and EW1 joins
+    # PF1/B1-R2 as a retained HISTORICAL identity only.
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW2_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW2_CHECKPOINT_TAG
+    # All four identities are distinct; EW1, PF1 and B1-R2 are retained as HISTORICAL only.
     assert len({
+        EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 3
+    }) == 4
 
 
 @pytest.mark.parametrize(
@@ -473,46 +493,30 @@ def test_synthetic_absent_checkpoint_fails_closed_in_real_git():
     assert "b1_r2_tag_not_observed_in_git" in reasons
 
 
-def test_real_ew1_tag_git_gate_is_lifecycle_aware():
-    # CHECKPOINT-LIFECYCLE aware for the REAL EW1 successor tag — valid BEFORE and AFTER the
-    # EW1 checkpoint tag exists (mirrors the B1-R2 State-A/State-B pattern). The absent-tag
-    # refusal is a State-A-only property; it must NOT be asserted unconditionally.
-    reader = RealTrustedB1R2Reader()
-    obs = reader.observe(EXPECTED_EW1_CHECKPOINT_TAG)
-    reasons = verify_b1_r2_checkpoint(
-        reader=reader,
-        operator_grant=C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW1_CHECKPOINT_TAG),
-        approved_expected_checkpoint=EXPECTED_EW1_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(),
-    )
-    if not obs.observed_tag_exists:
-        # STATE A — pre-checkpoint: the real EW1 tag does not exist yet, so the trusted reader
-        # observes its absence and the verifier fails closed with the absent-tag reason.
-        assert "b1_r2_tag_not_observed_in_git" in reasons
-    else:
-        # STATE B — post-checkpoint: the real EW1 tag exists at HEAD. The absent-tag reason is
-        # therefore NOT produced; the exact tag is observed at the authorized HEAD, and the
-        # fail-closed now comes from baseline binding (the synthetic clean_git_baseline() head
-        # is not the real HEAD, so a caller cannot bind a non-current baseline). Derived from
-        # current verify_b1_r2_checkpoint semantics — not an invented State-B reason.
-        assert "b1_r2_tag_not_observed_in_git" not in reasons
-        assert obs.observed_tag_peel == obs.observed_head  # tag at authorized HEAD
-        assert "b1_r2_head_not_bound_to_approved_baseline" in reasons
+def test_historical_ew1_tag_is_immutable_and_not_current_approved():
+    # PN02D-B1-EW2: EW1 is now a HISTORICAL identity (the EW2 isolated-model-seed fix moved
+    # HEAD past it), so it is NO LONGER the governance-approved identity. Its annotated tag,
+    # when present in Git, permanently peels to the EW1 commit 1b8ca5b regardless of the
+    # current HEAD (immutable, mirrors the B1-R2/PF1 immutability guarantee).
+    assert EXPECTED_EW1_CHECKPOINT_TAG != current_approved_b1_r2_checkpoint()
+    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW1_CHECKPOINT_TAG)
+    if obs.observed_tag_exists:
+        assert obs.observed_tag_peel == "1b8ca5b6420e2fa6240cfa97aba2fcbfb222c29e"
 
 
-def test_exact_ew1_tag_with_peel_is_the_only_accepted_identity():
-    # The exact EW1 identity, trust-observed at the authorized HEAD, with a matching
+def test_exact_ew2_tag_with_peel_is_the_only_accepted_identity():
+    # The exact EW2 successor identity, trust-observed at the authorized HEAD, with a matching
     # baseline, is accepted (no real tag created — the reader is scripted).
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_EW1_CHECKPOINT_TAG, peel=FUTURE_COMMIT, head=FUTURE_COMMIT
+        tag=EXPECTED_EW2_CHECKPOINT_TAG, peel=FUTURE_COMMIT, head=FUTURE_COMMIT
     )
     grant = B.build_b1_r2_operator_grant(approved_git_commit=FUTURE_COMMIT)
     reasons = verify_b1_r2_checkpoint(
         reader=reader,
         operator_grant=grant,
-        approved_expected_checkpoint=EXPECTED_EW1_CHECKPOINT_TAG,
+        approved_expected_checkpoint=EXPECTED_EW2_CHECKPOINT_TAG,
         git_baseline=C.clean_git_baseline(
-            commit=FUTURE_COMMIT, tag=EXPECTED_EW1_CHECKPOINT_TAG
+            commit=FUTURE_COMMIT, tag=EXPECTED_EW2_CHECKPOINT_TAG
         ),
     )
     assert reasons == []
@@ -539,7 +543,7 @@ def test_secret_safe_no_secret_value_in_cli_payload(tmp_path):
     path = _write_manifest(tmp_path, grant)
 
     with C.approved_b1r2_governance():
-        _code, payload = cli.evaluate_execute_b1_live(
+        _code, payload = cli._evaluate_execute_b1_live_composed(
             manifest_path=path,
             explicit_authorize=True,
             env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES", "OPENROUTER_API_KEY": "sk-secret-value"},
@@ -556,14 +560,17 @@ def test_secret_safe_no_secret_value_in_cli_payload(tmp_path):
 async def test_secret_safe_no_secret_value_in_outcome_report():
     fx = C.fixture()
     kwargs, *_ = _fake_edge_kwargs(fx)
-    with C.approved_b1r2_governance():
-        outcome = await run_live_b1_execution(
+    with C.approved_b1r2_governance(), mock.patch.object(
+        R, "build_real_model_attestor", lambda: C.make_model_attestor()
+    ):
+        outcome = await R._run_live_b1_execution_composed(
             operator_grant=C.frozen_test_grant(),
             git_baseline_attestation=C.clean_git_baseline(),
             observed_fixture_hash=_fixture_hash(),
             fx=fx,
             seams_builder=build_real_b1_live_seams,
             isolation=_noop_isolation,
+            model_seed=_noop_model_seed,
             builder_kwargs=kwargs,
         )
     blob = json.dumps(outcome.report)

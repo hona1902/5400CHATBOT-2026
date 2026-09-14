@@ -223,14 +223,15 @@ def test_launcher_failure_blocks_before_db_sidecar_and_source(tmp_path, monkeypa
     def spy_sidecar():
         calls["sidecar"] += 1
 
-    async def spy_seed():
+    @contextlib.asynccontextmanager
+    async def spy_seed_cm():  # private seed CM (B1EW2-RR3-H1); never reached (preflight fails)
         calls["seed"] += 1
-        return "m", None
+        yield "m"
 
     monkeypatch.setattr(lp, "run_launcher_preflight", bad_preflight)
     monkeypatch.setattr(pf, "read_normal_db_baseline", spy_baseline)
     monkeypatch.setattr(pc, "start_sidecar", spy_sidecar)
-    monkeypatch.setattr(pc, "seed_temp_embedding_model", spy_seed)
+    monkeypatch.setattr(pc, "seeded_frozen_embedding_model", spy_seed_cm)
 
     st = asyncio.run(
         pc.run_full_benchmark(authorization_label="REAUTHORIZATION_5", artifact_dir=tmp_path)

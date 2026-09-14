@@ -9,6 +9,7 @@ classifier-signature / strict-S001 / novel classification.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -641,8 +642,7 @@ def _mk_deps(**over):
     """OrchestratorDeps whose seams are fakes; provider binding + attestor present."""
     base = dict(
         isolation_runtime_factory=None,
-        model_seeder=None,
-        model_restorer=None,
+        model_seed_cm=None,
         source_preparer=None,
         provisioner_factory=None,
         client_factory=lambda ep: _FakeClient({}),
@@ -694,13 +694,14 @@ async def test_orchestrator_full_offline_flow_option_a_order(monkeypatch):
             order.append("isolation_exit")
             return False
 
-    async def _seed():
+    @asynccontextmanager
+    async def _seed_cm():
+        # Private seed CM (B1EW2-RR3-H1): owns its own teardown; no caller cleanup authority.
         order.append("model_seed")
-        return ("model:tmp", None)
-
-    async def _restore(mid, prior):
-        order.append("model_restore")
-        return True
+        try:
+            yield "model:tmp"
+        finally:
+            order.append("model_restore")
 
     async def _prepare(benchmark, keys):
         order.append(("sources", len(keys)))
@@ -714,8 +715,7 @@ async def test_orchestrator_full_offline_flow_option_a_order(monkeypatch):
 
     deps = _mk_deps(
         isolation_runtime_factory=lambda: _Iso(),
-        model_seeder=_seed,
-        model_restorer=_restore,
+        model_seed_cm=_seed_cm,
         source_preparer=_prepare,
         provisioner_factory=_prov_factory,
         client_factory=lambda ep: _FakeClient({}),

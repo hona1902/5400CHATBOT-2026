@@ -211,7 +211,7 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance returns the EW1 successor tag; its annotated tag ABSENT → fail
+    INTERNALLY (governance returns the EW2 successor tag; its annotated tag ABSENT → fail
     closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []
@@ -264,19 +264,47 @@ def evaluate_execute_b1_live(
     manifest_path: Optional[str],
     explicit_authorize: bool,
     env: Dict[str, str],
+) -> Tuple[int, Dict[str, object]]:
+    """PUBLIC production evaluator for ``execute-b1-live`` (PN02D-B1-EW2 §B1EW2-RR1-H2).
+
+    The ONLY production-callable evaluator (used by ``cmd_execute_b1_live``). Its signature
+    exposes NO trust-root / execution-authority overrides: the trusted Git baseline reader,
+    the fixture-hash reader, and the live runner are all resolved INTERNALLY from the canonical
+    production implementations. A public in-process caller therefore cannot substitute the
+    trusted Git observation, the fixture observation, or the live execution runner
+    (``PUBLIC_CLI_EVALUATOR_TRUST_ROOT_OVERRIDES = 0``). Controlled test composition (fake
+    readers/runner) is available ONLY through the private, non-live
+    ``_evaluate_execute_b1_live_composed``.
+    """
+    return _evaluate_execute_b1_live_composed(
+        manifest_path=manifest_path,
+        explicit_authorize=explicit_authorize,
+        env=env,
+    )
+
+
+def _evaluate_execute_b1_live_composed(
+    *,
+    manifest_path: Optional[str],
+    explicit_authorize: bool,
+    env: Dict[str, str],
     git_baseline_reader: GitBaselineReader = read_git_baseline,
     fixture_hash_reader: Callable[[], Tuple[bool, str]] = verify_fixture_hash,
     live_runner: LiveRunner = _default_live_runner,
 ) -> Tuple[int, Dict[str, object]]:
-    """Evaluate ``execute-b1-live`` (PN02D-B1-EW1): validate, gate, then run the real path.
+    """PRIVATE, NON-LIVE composition evaluator (PN02D-B1-EW2 §17). NOT a production entrypoint.
 
-    Returns ``(exit_code, payload)``. Every fail-closed gate runs BEFORE any provider
-    binding or runtime boot: manifest present/well-formed, fixture hash, clean+approved git
-    baseline, the trust-observed B1-R2/EW1 checkpoint, provider fingerprint, caps/allowlist,
-    the governance authorization gate, and — new in EW1 — provider-secret presence (name
-    only). ONLY when all gates pass does it invoke ``live_runner`` (the driver-owned two-boot
-    execution). A missing provider secret refuses with ``provider_secret_missing`` and never
-    boots. This function reads no secret VALUE.
+    Carries the trusted Git baseline reader, fixture-hash reader, and live runner as injectable
+    dependencies so a controlled offline test can substitute fakes. The production CLI never
+    calls this helper; only the public ``evaluate_execute_b1_live`` (with all real defaults)
+    does. It performs the same fail-closed gating and, ONLY when all gates pass, invokes the
+    (canonical, by default) ``live_runner`` — the driver-owned two-boot execution.
+
+    Every fail-closed gate runs BEFORE any provider binding or runtime boot: manifest
+    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW2
+    checkpoint, provider fingerprint, caps/allowlist, the governance authorization gate, and
+    provider-secret presence (name only). A missing provider secret refuses with
+    ``provider_secret_missing`` and never boots. This function reads no secret VALUE.
     """
     payload: Dict[str, object] = {
         "command": "execute-b1-live",

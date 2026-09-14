@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -529,11 +530,11 @@ class BurstReproductionOrchestrator08:
         # -- 3) Option-A isolation MUST wrap all provider/DB work --
         async with self._deps.isolation_runtime_factory() as ctx:
             rid = run_id or getattr(ctx, "run_id", None) or rid
-            model_id: Optional[str] = None
-            prior_default: Optional[str] = None
+            # -- 4) temp embedding Model seeded INSIDE isolation via the private CM, which OWNS
+            #    its own teardown on exit (no caller cleanup authority — B1EW2-RR3-H1). --
+            seed_stack = AsyncExitStack()
+            await seed_stack.enter_async_context(self._deps.model_seed_cm())
             try:
-                # -- 4) temp embedding Model (inside isolation only) --
-                model_id, prior_default = await self._deps.model_seeder()
                 # -- 5) frozen diagnostic Sources (the full 75-prefix union) + canonical embedding --
                 keys = select_burst_prefix(self._benchmark, TOP_RUNG)
                 sources = await self._deps.source_preparer(self._benchmark, keys)
@@ -563,13 +564,14 @@ class BurstReproductionOrchestrator08:
                 )
                 return result
             finally:
-                if model_id is not None:
-                    try:
-                        await self._deps.model_restorer(model_id, prior_default)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            f"[gr08e7] temp model restore error: {type(exc).__name__}"
-                        )
+                # The private seed CM owns teardown (restore prior default + delete owned
+                # model); the namespace drop also removes it. Normal DB is NEVER touched.
+                try:
+                    await seed_stack.aclose()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"[gr08e7] temp model cleanup error: {type(exc).__name__}"
+                    )
             # exiting the isolation CM drops the temp namespace (Sources + Model gone)
 
     def _write_artifact(self, result: BurstExperimentResult) -> None:
