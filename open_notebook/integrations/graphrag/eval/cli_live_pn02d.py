@@ -211,7 +211,7 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance returns the EW3 successor tag; its annotated tag ABSENT → fail
+    INTERNALLY (governance returns the EW4 successor tag; its annotated tag ABSENT → fail
     closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []

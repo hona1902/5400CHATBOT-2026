@@ -30,6 +30,7 @@ lifecycle with a mock controller + mock prober and launch NO real container
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import (
@@ -87,6 +88,19 @@ _LOOPBACK_HOST = "127.0.0.1"
 #: against a container that would have become healthy. Bounded + fail-closed on timeout.
 PREFLIGHT_READINESS_TIMEOUT_S = 120.0
 PREFLIGHT_READINESS_POLL_S = 2.0
+
+#: PN02D-B1-EW4: the Boot-2 (provider-bound EXECUTION) readiness wait REUSES the exact
+#: PF1-approved readiness policy — the same bounded timeout / poll interval Boot 1 uses
+#: (``BOOT2_READINESS_POLICY_MATCHES_BOOT1``). These are NOT new, retuned constants: they
+#: alias the Boot-1 values so a single approved policy governs both boots. The EF1-measured
+#: cold start (~7s) fits comfortably inside the shared 120s bound.
+EXECUTION_READINESS_TIMEOUT_S = PREFLIGHT_READINESS_TIMEOUT_S
+EXECUTION_READINESS_POLL_S = PREFLIGHT_READINESS_POLL_S
+
+
+async def _default_readiness_sleep(delay: float) -> None:
+    """Default async poll delay for the Boot-2 readiness wait (injectable for tests)."""
+    await asyncio.sleep(delay)
 
 
 class RuntimeLifecycleError(RuntimeError):
@@ -405,6 +419,13 @@ class RealPN02RuntimeManager:
     host: str = _LOOPBACK_HOST
     image: str = REAL_LIGHTRAG_IMAGE
     graceful_timeout_s: float = 10.0
+    #: PN02D-B1-EW4: Boot-2 execution readiness policy (defaults REUSE the PF1 Boot-1 policy;
+    #: ``readiness_now``/``readiness_sleep`` are injectable so the readiness race is
+    #: unit-testable deterministically without a real 7-second cold start).
+    execution_readiness_timeout_s: float = EXECUTION_READINESS_TIMEOUT_S
+    execution_readiness_poll_s: float = EXECUTION_READINESS_POLL_S
+    readiness_now: Callable[[], float] = time.monotonic
+    readiness_sleep: Optional[Callable[[float], Awaitable[None]]] = None
 
     _preflight_handles: Dict[str, CellProcessHandle] = field(default_factory=dict)
     _preflight_identities: set = field(default_factory=set)
@@ -415,6 +436,12 @@ class RealPN02RuntimeManager:
     _preflight_torn_down: bool = False
     _preflight_passed: bool = False
     _execution_attested: bool = False
+
+    def __post_init__(self) -> None:
+        # Resolve the Boot-2 readiness poll delay to the real async sleep unless a test
+        # injected one (kept out of the field default to avoid a function-descriptor bind).
+        if self.readiness_sleep is None:
+            self.readiness_sleep = _default_readiness_sleep
 
     # -- identity ----------------------------------------------------------- #
 
@@ -586,6 +613,16 @@ class RealPN02RuntimeManager:
                 provider_bound=True,
             )
             self._execution_endpoints[nb.notebook_id] = endpoint
+            # PN02D-B1-EW4: WAIT for the provider-bound cell to become healthy BEFORE the
+            # canonical attestation probe — parity with boot_preflight's PF1 wait_ready. A
+            # cold LightRAG container is RUNNING (docker run -d returns) seconds before it
+            # serves /health (EF1: ~0.34s running, ~7s healthy); probing immediately (the
+            # pre-EW4 behaviour) failed attestation for a cell that would have become healthy.
+            # The handle is already recorded in _execution_handles above, so a readiness
+            # timeout here fails closed and the outer cleanup still tears this cell down.
+            await self._wait_execution_runtime_ready(
+                base_url=base_url, host=spec.host, port=port
+            )
             obs = await self.health_prober.probe(
                 base_url=base_url, host=spec.host, port=port
             )
@@ -595,6 +632,40 @@ class RealPN02RuntimeManager:
             )
         self._execution_attested = all(a.attested for a in attestations.values())
         return attestations
+
+    async def _wait_execution_runtime_ready(
+        self, *, base_url: str, host: str, port: int
+    ) -> None:
+        """Bounded, fail-closed readiness wait for one provider-bound execution cell (EW4).
+
+        Polls the SAME injected ``health_prober`` seam Boot 2 already uses (no new provider
+        contact, no DockerCLI dependency), reusing the PF1 readiness POLICY
+        (``execution_readiness_timeout_s`` / ``execution_readiness_poll_s`` default to the
+        Boot-1 values), until the cell is reachable AND healthy or the bounded deadline
+        elapses — then it FAILS CLOSED. It does NOT itself attest the cell: the canonical
+        health/version/workspace/endpoint/storage attestation still runs afterwards and stays
+        load-bearing. Reads only a content-safe health status; makes NO provider call. The
+        injectable ``readiness_now``/``readiness_sleep`` make the readiness race deterministic
+        in tests (no real cold-start delay)."""
+        deadline = self.readiness_now() + self.execution_readiness_timeout_s
+        assert self.readiness_sleep is not None  # resolved in __post_init__
+        while True:
+            # B1EW4-R1-M1: the hard monotonic deadline is checked BEFORE the probe, so it is
+            # load-bearing on the success path too — a health observation is accepted only
+            # while the readiness clock is STRICTLY before the deadline. A cell that would
+            # only report healthy AT or AFTER the deadline (now >= deadline) fails closed
+            # rather than unlocking the wait (strict bounded-readiness contract).
+            if self.readiness_now() >= deadline:
+                raise RuntimeLifecycleError(
+                    "provider-bound execution runtime did not become healthy within "
+                    f"{self.execution_readiness_timeout_s:g}s (fail-closed, EW4)"
+                )
+            obs = await self.health_prober.probe(
+                base_url=base_url, host=host, port=port
+            )
+            if obs.reachable and obs.healthy:
+                return
+            await self.readiness_sleep(self.execution_readiness_poll_s)
 
     def _preflight_container_identities(self) -> frozenset:
         # Captured at boot (persists past teardown, which clears the handle map), so the
@@ -697,6 +768,10 @@ class RealPN02RuntimeManager:
 
 
 __all__ = [
+    "PREFLIGHT_READINESS_TIMEOUT_S",
+    "PREFLIGHT_READINESS_POLL_S",
+    "EXECUTION_READINESS_TIMEOUT_S",
+    "EXECUTION_READINESS_POLL_S",
     "RuntimeLifecycleError",
     "TwoBootOrderError",
     "PreflightRunError",

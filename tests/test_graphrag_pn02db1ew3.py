@@ -226,28 +226,33 @@ def test_original_isolation_entry_blocker_removed_provider_free():
 # EW3 governance: EW3 is the current successor; historical tags cannot substitute (§26/§27)
 # --------------------------------------------------------------------------- #
 
-def test_governance_current_is_ew3_successor():
+def test_governance_ew3_now_historical_current_is_ew4():
+    # PN02D-B1-EW4 supersedes EW3: governance now approves the EW4 successor, and EW3 joins
+    # EW2/EW1/PF1/B1-R2 as a retained HISTORICAL identity (its constant/tag string unchanged).
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_B1_R2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
+        EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         current_approved_b1_r2_checkpoint,
     )
 
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW3_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW3_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW4_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW4_CHECKPOINT_TAG
     assert EXPECTED_EW3_CHECKPOINT_TAG == "graphrag-pn02db1ew3-isolation-id-compat-approved"
-    # EW2/EW1/PF1/B1-R2 are retained HISTORICAL identities, all distinct from EW3.
+    assert current_approved_b1_r2_checkpoint() != EXPECTED_EW3_CHECKPOINT_TAG
+    # EW3/EW2/EW1/PF1/B1-R2 are retained HISTORICAL identities, all distinct from EW4.
     assert len({
+        EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 5
+    }) == 6
 
 
 def test_ew1_pf1_b1r2_ew2_cannot_substitute_for_ew3():
@@ -288,13 +293,13 @@ def test_ew3_successor_tag_git_state_is_lifecycle_valid():
     # tag-absence assertion. STATE A (pre-checkpoint): EW3 tag absent → empty peel. STATE B
     # (post-checkpoint): EXACT tag present, valid 40-hex peel == authorized HEAD.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW3_CHECKPOINT_TAG,
+        EXPECTED_EW4_CHECKPOINT_TAG,
         RealTrustedB1R2Reader,
         current_approved_b1_r2_checkpoint,
     )
 
     approved = current_approved_b1_r2_checkpoint()
-    assert approved == EXPECTED_EW3_CHECKPOINT_TAG
+    assert approved == EXPECTED_EW4_CHECKPOINT_TAG
     obs = RealTrustedB1R2Reader().observe(approved)
     if not obs.observed_tag_exists:
         assert obs.observed_tag_peel == ""
@@ -341,16 +346,16 @@ def test_ew3_synthetic_state_b_git_gate_satisfiable_but_no_provider_auth():
         PN02_PROVIDER_RUN_AUTHORIZED,
     )
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW3_CHECKPOINT_TAG,
+        EXPECTED_EW4_CHECKPOINT_TAG,
         verify_b1_r2_checkpoint,
     )
 
     future = "e3e3e3e3" + "0" * 32
     reasons = verify_b1_r2_checkpoint(
-        reader=C.b1r2_reader_ok(tag=EXPECTED_EW3_CHECKPOINT_TAG, peel=future, head=future),
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW4_CHECKPOINT_TAG, peel=future, head=future),
         operator_grant=_ew3_future_grant(approved_git_commit=future),
-        approved_expected_checkpoint=EXPECTED_EW3_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW3_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_EW4_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW4_CHECKPOINT_TAG),
     )
     assert reasons == []  # Git gate satisfiable
     assert PN02_PROVIDER_RUN_AUTHORIZED is False  # but provider run NOT authorized

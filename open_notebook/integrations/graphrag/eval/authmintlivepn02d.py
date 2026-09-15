@@ -196,7 +196,7 @@ def attest_approved_clean_baseline(
 # the ONLY producer of a ``TrustedB1R2Observation`` (module-private ``__slots__`` key
 # mint), so a self-constructed public look-alike cannot cross the security boundary
 # (``SELF_CONSTRUCTED_PUBLIC_DATACLASS_CAN_AUTHORIZE = NO``). The approved-EXPECTED B1-R2
-# identity comes from GOVERNANCE (``current_approved_b1_r2_checkpoint``), now the PN02D-B1-EW3
+# identity comes from GOVERNANCE (``current_approved_b1_r2_checkpoint``), now the PN02D-B1-EW4
 # successor tag; the trusted reader observes real Git and, while that annotated tag is ABSENT,
 # a live authorization is not currently mintable, regardless of what a caller supplies
 # (fail-closed).
@@ -206,7 +206,7 @@ class B1R2CheckpointError(ValueError):
 
 
 #: Placeholder/sentinel values that can NEVER be an approved B1-R2 checkpoint identity.
-#: The configured approved identity is the EW3 successor tag; these sentinels are never it, so
+#: The configured approved identity is the EW4 successor tag; these sentinels are never it, so
 #: any of them (or an unset identity) fails closed.
 _B1_R2_SENTINELS = frozenset(
     {
@@ -263,26 +263,36 @@ EXPECTED_EW1_CHECKPOINT_TAG = "graphrag-pn02db1ew1-real-execution-wiring-approve
 #: ``EXPECTED_EW3_CHECKPOINT_TAG``).
 EXPECTED_EW2_CHECKPOINT_TAG = "graphrag-pn02db1ew2-isolated-model-seed-approved"
 
-#: The EXACT operator/governance-approved provider-authorization checkpoint identity, now
-#: FROZEN to the PN02D-B1-EW3 SUCCESSOR checkpoint (the isolation-runtime-id compatibility fix
-#: that moves HEAD past the historical EW2 commit ``707c8782``). This is a control-plane
-#: declaration of the future successor tag — it is NOT the tag itself. The annotated Git tag of
-#: this name does not exist yet; the trusted reader observes real Git and, finding no such tag,
-#: the live mint FAILS CLOSED (PN02D-B1-EW3 §26). Only after a future operator-approved EW3
-#: checkpoint creates this exact annotated tag (peeling to the approved EW3 HEAD) can the mint
-#: become satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity
-#: (the same pattern used for B1-R2 → PF1 → EW1 → EW2).
+#: HISTORICAL as of PN02D-B1-EW4 — the PN02D-B1-EW3 isolation-runtime-id-compatibility
+#: checkpoint tag. Its annotated tag EXISTS in real Git peeling to the approved EW3 commit
+#: ``9f4172815c91cbcebd7ea3ffbb38333e4db37bf0`` and it WAS the governance-approved identity
+#: THROUGH the EW3 phase. PN02D-B1-EW4 then adds the missing Boot-2 (provider-bound execution)
+#: readiness wait (the real B1 execution defect exposed by EXEC #4 / diagnosed by EF1); that
+#: NEW production change moves HEAD past ``9f41728``, so the EW3 tag no longer peels to the
+#: authorized HEAD and the EW3 Git gate is superseded. Retained for reference/history ONLY —
+#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW4_CHECKPOINT_TAG``).
 EXPECTED_EW3_CHECKPOINT_TAG = "graphrag-pn02db1ew3-isolation-id-compat-approved"
 
+#: The EXACT operator/governance-approved provider-authorization checkpoint identity, now
+#: FROZEN to the PN02D-B1-EW4 SUCCESSOR checkpoint (the Boot-2 execution readiness-parity fix
+#: that moves HEAD past the historical EW3 commit ``9f41728``). This is a control-plane
+#: declaration of the future successor tag — it is NOT the tag itself. The annotated Git tag of
+#: this name does not exist yet; the trusted reader observes real Git and, finding no such tag,
+#: the live mint FAILS CLOSED (PN02D-B1-EW4 §31). Only after a future operator-approved EW4
+#: checkpoint creates this exact annotated tag (peeling to the approved EW4 HEAD) can the mint
+#: become satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity
+#: (the same pattern used for B1-R2 → PF1 → EW1 → EW2 → EW3).
+EXPECTED_EW4_CHECKPOINT_TAG = "graphrag-pn02db1ew4-boot2-readiness-approved"
+
 #: Governance state for the provider-authorization checkpoint. FROZEN to the successor
-#: ``EXPECTED_EW3_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the
+#: ``EXPECTED_EW4_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the
 #: real mint — never a caller string / Git-tag heuristic). It is non-None, but the live
 #: authorization is STILL not mintable until the trusted reader observes that exact tag in
 #: real Git (which does not yet exist): the mint fails closed with
-#: ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW3 §26). The mint remains FAIL CLOSED before
-#: the successor tag exists. EW1, PF1, B1-R2 and EW2 are retained as HISTORICAL identities only
-#: and can never substitute (exact-identity + trusted-reader binding, not a denylist — §42).
-_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW3_CHECKPOINT_TAG
+#: ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW4 §31). The mint remains FAIL CLOSED before
+#: the successor tag exists. EW1, PF1, B1-R2, EW2 and EW3 are retained as HISTORICAL identities
+#: only and can never substitute (exact-identity + trusted-reader binding, not a denylist — §42).
+_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW4_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
@@ -291,14 +301,14 @@ _B1_R2_TRUSTED_KEY = object()
 def current_approved_b1_r2_checkpoint() -> Optional[str]:
     """The operator/governance-approved provider-authorization checkpoint identity.
 
-    Returns the frozen ``EXPECTED_EW3_CHECKPOINT_TAG`` — the PN02D-B1-EW3 SUCCESSOR that
-    supersedes the historical EW2 checkpoint (the isolation-runtime-id fix moves HEAD past
-    ``707c8782``, so the EW2 tag no longer peels to the authorized HEAD). It is non-None,
-    but a live authorization is still not currently mintable: the trusted reader observes
-    real Git and, while no annotated tag of that name exists, the mint fails closed with
-    ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW3 §26). The value is NEVER derived from a
-    caller string, a Git-tag naming heuristic, or a prefix match. EW1, PF1, B1-R2 and EW2
-    remain HISTORICAL identities that can never substitute for the current EW3 successor.
+    Returns the frozen ``EXPECTED_EW4_CHECKPOINT_TAG`` — the PN02D-B1-EW4 SUCCESSOR that
+    supersedes the historical EW3 checkpoint (the Boot-2 execution readiness-parity fix moves
+    HEAD past ``9f41728``, so the EW3 tag no longer peels to the authorized HEAD). It is
+    non-None, but a live authorization is still not currently mintable: the trusted reader
+    observes real Git and, while no annotated tag of that name exists, the mint fails closed
+    with ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW4 §31). The value is NEVER derived from
+    a caller string, a Git-tag naming heuristic, or a prefix match. EW1, PF1, B1-R2, EW2 and
+    EW3 remain HISTORICAL identities that can never substitute for the current EW4 successor.
 
     This is a MODULE-LEVEL governance function the mint (and CLI defense-in-depth) look up
     and call INTERNALLY — no caller/parameter can override its result (B0CB-RR4-H1). Tests
@@ -376,7 +386,7 @@ class RealTrustedB1R2Reader:
     ``refs/tags/<name>`` tag object — a branch name or raw SHA does not qualify) and mints
     an unforgeable observation with the module-private key. ``git_runner`` is the git
     boundary (real subprocess by default; injectable so the REAL reader logic is
-    unit-testable without creating a real tag). The current approved EW3 successor tag does
+    unit-testable without creating a real tag). The current approved EW4 successor tag does
     not yet exist in real Git, so a real observation reports ``observed_tag_exists=False``.
     """
 
@@ -491,7 +501,7 @@ def b1_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[
     from module-level functions (``current_approved_b1_r2_checkpoint`` +
     ``_build_trusted_b1_r2_reader``) with NO caller input (B0CB-RR4-H1): this function
     takes NO reader/identity parameter. ``current_approved_b1_r2_checkpoint()`` returns the
-    EW3 successor tag; while that annotated tag is ABSENT from real Git it fails closed. It
+    EW4 successor tag; while that annotated tag is ABSENT from real Git it fails closed. It
     returns refusal reasons only; it CANNOT mint a capability. Tests simulate a future
     approval by patching the two
     module-level functions above — never by passing trust roots here.
@@ -650,7 +660,7 @@ def mint_live_provider_run_authorization(
     approved identity or the Git reader. The mint resolves BOTH internally via
     ``_resolve_b1_r2_verification`` (governance identity from
     ``current_approved_b1_r2_checkpoint`` + the default real-Git ``RealTrustedB1R2Reader``).
-    Governance returns the EW3 successor tag; while that annotated tag is ABSENT from real Git
+    Governance returns the EW4 successor tag; while that annotated tag is ABSENT from real Git
     the trusted reader observes its absence and this fails closed regardless of any caller
     input. Tests simulate a future approval by patching those
     two module-level functions — never through this signature.
@@ -723,7 +733,7 @@ def mint_live_provider_run_authorization(
     #     `_resolve_b1_r2_verification` resolves BOTH trust roots INTERNALLY — the
     #     governance-approved identity (`current_approved_b1_r2_checkpoint`) and the default
     #     real-Git reader (`_build_trusted_b1_r2_reader`) — with NO caller input. There is
-    #     no parameter to substitute either. Governance returns the EW3 successor tag; while
+    #     no parameter to substitute either. Governance returns the EW4 successor tag; while
     #     that annotated tag is ABSENT from real Git this fails closed BEFORE mint regardless
     #     of any caller.
     b1_r2_reasons = b1_r2_refusal_reasons(operator_grant, git_baseline_attestation)
@@ -855,6 +865,7 @@ __all__ = [
     "verify_b1_r2_checkpoint",
     "b1_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
+    "EXPECTED_EW4_CHECKPOINT_TAG",
     "EXPECTED_EW3_CHECKPOINT_TAG",
     "EXPECTED_EW2_CHECKPOINT_TAG",
     "EXPECTED_B1_R2_CHECKPOINT_TAG",

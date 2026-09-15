@@ -799,24 +799,26 @@ def test_governance_ew2_is_now_historical_current_is_ew3():
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
+        EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         current_approved_b1_r2_checkpoint,
     )
 
-    # EW3 supersedes EW2 as the frozen approved provider-authorization identity; EW2 joins
-    # EW1/PF1/B1-R2 as a retained HISTORICAL identity (its constant/tag string are unchanged).
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW3_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW3_CHECKPOINT_TAG
+    # EW4 is now the frozen approved provider-authorization identity (EW3 superseded it); EW2
+    # remains a retained HISTORICAL identity (its constant/tag string are unchanged).
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW4_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW4_CHECKPOINT_TAG
     assert EXPECTED_EW2_CHECKPOINT_TAG == "graphrag-pn02db1ew2-isolated-model-seed-approved"
     assert current_approved_b1_r2_checkpoint() != EXPECTED_EW2_CHECKPOINT_TAG
-    # EW3/EW2/EW1/PF1/B1-R2 are all distinct identities.
+    # EW4/EW3/EW2/EW1/PF1/B1-R2 are all distinct identities.
     assert len({
+        EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 5
+    }) == 6
 
 
 def test_ew2_historical_tag_immutable_and_cannot_substitute_for_ew3():
