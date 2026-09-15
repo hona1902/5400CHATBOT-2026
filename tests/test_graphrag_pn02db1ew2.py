@@ -786,207 +786,67 @@ def test_default_model_seed_is_the_real_shared_seed():
 
 
 # --------------------------------------------------------------------------- #
-# Governance: EW2 is the current successor; checkpoint-lifecycle aware (State A tag
-# absent → fail-closed; State B exact tag at HEAD → Git gate satisfiable, still no
-# provider auth). Follows the r2/ew1 precedent; test-only, zero provider traffic.
+# Governance: EW2 is now a HISTORICAL checkpoint (its annotated tag exists at 707c8782);
+# the PN02D-B1-EW3 isolation-runtime-id fix supersedes it as the current approved identity.
+# The CURRENT (EW3) successor governance + checkpoint-lifecycle (State-A/State-B) coverage
+# lives in tests/test_graphrag_pn02db1ew3.py. Test-only, zero provider traffic.
 # --------------------------------------------------------------------------- #
 
-def test_governance_current_is_ew2_successor():
+def test_governance_ew2_is_now_historical_current_is_ew3():
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_B1_R2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
+        EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         current_approved_b1_r2_checkpoint,
     )
 
-    # EW2 supersedes EW1 as the frozen approved provider-authorization identity.
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW2_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW2_CHECKPOINT_TAG
+    # EW3 supersedes EW2 as the frozen approved provider-authorization identity; EW2 joins
+    # EW1/PF1/B1-R2 as a retained HISTORICAL identity (its constant/tag string are unchanged).
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW3_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW3_CHECKPOINT_TAG
     assert EXPECTED_EW2_CHECKPOINT_TAG == "graphrag-pn02db1ew2-isolated-model-seed-approved"
-    # EW1/PF1/B1-R2 are retained historical identities, all distinct from the EW2 successor.
+    assert current_approved_b1_r2_checkpoint() != EXPECTED_EW2_CHECKPOINT_TAG
+    # EW3/EW2/EW1/PF1/B1-R2 are all distinct identities.
     assert len({
+        EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW2_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 4
+    }) == 5
 
 
-# A SYNTHETIC future EW2 checkpoint commit (does NOT exist in real Git; never tagged here).
-_FUTURE_EW2_COMMIT = "e2e2e2e2" + "0" * 32
-
-
-def _ew2_fixture_hash():
-    ok, detail = C.verify_fixture_hash()
-    return detail if ok else "UNVERIFIED"
-
-
-def _ew2_future_grant(**overrides):
-    # A prepared B1-R2 operator grant whose identity is the CURRENT approved (EW2) checkpoint.
+def test_ew2_historical_tag_immutable_and_cannot_substitute_for_ew3():
+    # The EW2 annotated tag is HISTORICAL: when present in real Git it ALWAYS peels to the EW2
+    # checkpoint commit 707c8782 (never moved). It is NO LONGER the approved identity, and
+    # naming it as the approved-expected identity for a future EW3 checkpoint is refused.
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
-
-    kwargs = dict(approved_git_commit=_FUTURE_EW2_COMMIT)
-    kwargs.update(overrides)
-    return B.build_b1_r2_operator_grant(**kwargs)
-
-
-def test_ew2_successor_tag_git_state_is_lifecycle_valid():
-    # §5/§6 CHECKPOINT-LIFECYCLE AWARE (replaces the former permanent tag-absence assertion,
-    # which flipped to failing once the real successor tag was created). The real-Git reader
-    # is evaluated against BOTH legitimate states and never hardcodes tag-absent-forever:
-    #   STATE A (pre-checkpoint): the EW2 successor tag is absent → observed absent, empty peel;
-    #   STATE B (post-checkpoint): the EXACT annotated tag exists, peels to a valid 40-hex
-    #     commit, and that peel equals the authorized HEAD.
-    # Stays green BEFORE and AFTER the real EW2 checkpoint. Checkpoint existence != provider
-    # authorization (that stays separately gated — see the synthetic State-B test below).
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_EW2_CHECKPOINT_TAG,
         RealTrustedB1R2Reader,
         current_approved_b1_r2_checkpoint,
-    )
-
-    approved = current_approved_b1_r2_checkpoint()
-    assert approved == EXPECTED_EW2_CHECKPOINT_TAG
-    obs = RealTrustedB1R2Reader().observe(approved)
-    if not obs.observed_tag_exists:
-        # STATE A — successor tag absent → Git prerequisite NOT satisfied.
-        assert obs.observed_tag_peel == ""
-    else:
-        # STATE B — EXACT tag present, valid peeled commit, at the authorized HEAD.
-        assert obs.checkpoint_tag == approved
-        assert len(obs.observed_tag_peel) == 40 and all(
-            c in "0123456789abcdef" for c in obs.observed_tag_peel
-        )
-        assert obs.observed_tag_peel == obs.observed_head
-
-
-def test_ew2_synthetic_state_a_mint_fails_closed_when_tag_absent():
-    # §8 SYNTHETIC State A (PERMANENT — not dependent on the developer's real Git currently
-    # lacking the tag): with a SYNTHETIC approved identity whose tag is absent from Git, the
-    # live mint fails closed with `b1_r2_tag_not_observed_in_git`. The REAL trusted reader is
-    # retained; only the internal governance expectation is patched to the synthetic tag.
-    from open_notebook.integrations.graphrag.eval.attestpn02d import (
-        mint_real_preflight_authorization,
-    )
-    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        B1R2CheckpointError,
-        mint_live_provider_run_authorization,
-    )
-
-    grant = C.frozen_test_grant(b1_r2_checkpoint=C.TEST_B1R2_TAG)
-    baseline = C.clean_git_baseline()
-    preflight = mint_real_preflight_authorization(
-        gate0_passed=True, gate1_passed=True, fixture_hash=_ew2_fixture_hash(),
-        run_id=C.TEST_RUN_ID, runtime_count=3,
-    )
-    with C.governance_expects_tag(C.TEST_B1R2_TAG):
-        with pytest.raises(B1R2CheckpointError) as ei:
-            mint_live_provider_run_authorization(
-                operator_grant=grant, real_preflight_auth=preflight,
-                git_baseline_attestation=baseline, observed_fixture_hash=_ew2_fixture_hash(),
-            )
-    assert "b1_r2_tag_not_observed_in_git" in str(ei.value)
-
-
-def test_ew2_synthetic_state_b_git_gate_satisfiable_but_no_provider_auth():
-    # §9/§14: with a synthetic trusted reader observing the EXACT EW2 tag peeling to the
-    # authorized HEAD (State B), the Git checkpoint prerequisite is satisfiable — yet that is
-    # ONLY the control-plane Git gate; the provider-run governance flag stays NO. NO real tag
-    # is created (synthetic future commit + module-boundary reader).
-    from open_notebook.integrations.graphrag.eval.authlivepn02d import (
-        PN02_PROVIDER_RUN_AUTHORIZED,
-    )
-    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW2_CHECKPOINT_TAG,
         verify_b1_r2_checkpoint,
     )
 
-    reader = C.b1r2_reader_ok(
-        tag=EXPECTED_EW2_CHECKPOINT_TAG, peel=_FUTURE_EW2_COMMIT, head=_FUTURE_EW2_COMMIT
-    )
+    assert EXPECTED_EW2_CHECKPOINT_TAG != current_approved_b1_r2_checkpoint()
+    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW2_CHECKPOINT_TAG)
+    if obs.observed_tag_exists:
+        assert obs.observed_tag_peel == "707c8782a2ea34e59700ae4cd4d6d1ea403dd2c0"
+
+    # EW2 cannot substitute for the EW3 successor: a grant whose identity is the current (EW3)
+    # approved checkpoint, verified against approved_expected=EW2, is refused (identity mismatch).
+    future = "e3e3e3e3" + "0" * 32
+    grant = B.build_b1_r2_operator_grant(approved_git_commit=future)  # grant identity == EW3
     reasons = verify_b1_r2_checkpoint(
-        reader=reader,
-        operator_grant=_ew2_future_grant(approved_git_commit=_FUTURE_EW2_COMMIT),
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW2_CHECKPOINT_TAG, peel=future, head=future),
+        operator_grant=grant,
         approved_expected_checkpoint=EXPECTED_EW2_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(
-            commit=_FUTURE_EW2_COMMIT, tag=EXPECTED_EW2_CHECKPOINT_TAG
-        ),
+        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW2_CHECKPOINT_TAG),
     )
-    assert reasons == []  # §9 Git gate satisfiable
-    assert PN02_PROVIDER_RUN_AUTHORIZED is False  # but provider run NOT authorized
-
-
-def test_ew2_tag_existence_alone_insufficient_wrong_peel_and_substitution_fail_closed():
-    # §10/§11/§12/§14: tag existence is NOT sufficient — peel identity is load-bearing, and no
-    # arbitrary or historical tag can substitute for the exact EW2 successor.
-    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_B1_R2_CHECKPOINT_TAG,
-        EXPECTED_EW1_CHECKPOINT_TAG,
-        EXPECTED_EW2_CHECKPOINT_TAG,
-        EXPECTED_PF1_CHECKPOINT_TAG,
-        RealTrustedB1R2Reader,
-        verify_b1_r2_checkpoint,
-    )
-
-    # (§10/§14) the EXACT EW2 tag observed but peeling to a NON-HEAD commit → fail closed.
-    wrong_peel = verify_b1_r2_checkpoint(
-        reader=C.b1r2_reader_ok(
-            tag=EXPECTED_EW2_CHECKPOINT_TAG, peel="d" * 40, head=_FUTURE_EW2_COMMIT
-        ),
-        operator_grant=_ew2_future_grant(approved_git_commit=_FUTURE_EW2_COMMIT),
-        approved_expected_checkpoint=EXPECTED_EW2_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(
-            commit=_FUTURE_EW2_COMMIT, tag=EXPECTED_EW2_CHECKPOINT_TAG
-        ),
-    )
-    assert "b1_r2_tag_not_at_authorized_head" in wrong_peel
-
-    # (§11/§12) an arbitrary tag, or a historical EW1/PF1/B1-R2 identity, can NEVER substitute
-    # for the EW2 successor: naming any as the approved-expected identity is refused (the
-    # verifier returns a non-empty refusal set — identity mismatch and/or not-at-HEAD).
-    for substitute in (
-        "graphrag-arbitrary-unrelated-tag",
-        EXPECTED_EW1_CHECKPOINT_TAG,
-        EXPECTED_PF1_CHECKPOINT_TAG,
-        EXPECTED_B1_R2_CHECKPOINT_TAG,
-    ):
-        reasons = verify_b1_r2_checkpoint(
-            reader=RealTrustedB1R2Reader(),
-            operator_grant=_ew2_future_grant(approved_git_commit=_FUTURE_EW2_COMMIT),
-            approved_expected_checkpoint=substitute,
-            git_baseline=C.clean_git_baseline(
-                commit=_FUTURE_EW2_COMMIT, tag=EXPECTED_EW2_CHECKPOINT_TAG
-            ),
-        )
-        assert reasons, f"{substitute} must not satisfy the EW2 checkpoint"
-
-
-def test_ew2_dirty_tree_cannot_authorize():
-    # §13: even with the correct EW2 identity, a DIRTY working tree is refused by the
-    # git-baseline gate before the B1-R2 checkpoint gate — no authorization.
-    from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
-    from open_notebook.integrations.graphrag.eval.attestpn02d import (
-        mint_real_preflight_authorization,
-    )
-    from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW2_CHECKPOINT_TAG,
-        GitBaselineError,
-        mint_live_provider_run_authorization,
-    )
-
-    grant = _ew2_future_grant(approved_git_commit=C.TEST_COMMIT)
-    dirty = C.dirty_git_baseline(commit=C.TEST_COMMIT, tag=EXPECTED_EW2_CHECKPOINT_TAG)
-    preflight = mint_real_preflight_authorization(
-        gate0_passed=True, gate1_passed=True, fixture_hash=_ew2_fixture_hash(),
-        run_id=B.B1_RUN_ID, runtime_count=3,
-    )
-    with pytest.raises(GitBaselineError):
-        mint_live_provider_run_authorization(
-            operator_grant=grant, real_preflight_auth=preflight,
-            git_baseline_attestation=dirty, observed_fixture_hash=_ew2_fixture_hash(),
-        )
+    assert reasons, "EW2 must not satisfy the EW3 checkpoint"
 
 
 # --------------------------------------------------------------------------- #

@@ -203,8 +203,10 @@ test suite must stay green in BOTH:
 until a separate operator authorization + a genuine real-preflight capability + operator
 grant + clean baseline. In `b1_r2_preflight`, `live_provider_authorization_mintable`
 reflects ONLY whether the control-plane B1-R2 Git gate would pass — it is NOT a statement
-that a provider run has been authorized. (The manifest's `b1_r2_tag_exists_in_git_now` is a
-prep-time snapshot value, not a live observation.)
+that a provider run has been authorized. (As of PN02D-B1-EW3 remediation #1 / B1EW3-R1-M1,
+the manifest's `b1_r2_tag_exists_in_git_now` is a LIVE lifecycle observation derived from the
+canonical trusted Git reader — State A absent → `False`, State B present → `True` — not a
+hardcoded prep-time snapshot; it remains an observation only and never authorizes a run.)
 
 ### Blocker found at the first checkpoint attempt (and its remediation)
 

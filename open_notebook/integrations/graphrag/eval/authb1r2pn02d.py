@@ -4,7 +4,7 @@ EVALUATION-ONLY. Nothing in production imports this (``PRODUCTION_IMPORTS_EVAL =
 This module is a CONTROL-PLANE authorization gate — it is NOT the provider-backed B1
 execution. It freezes the B1 authorization envelope against the approved B0C-B
 implementation baseline and proves, from real Git, that a live provider-run authorization
-is NOT currently mintable (the current governance-approved checkpoint tag — the PN02D-B1-EW2
+is NOT currently mintable (the current governance-approved checkpoint tag — the PN02D-B1-EW3
 successor — does not yet exist).
 
 It contacts NO provider and mints NO usable capability (design/task §1/§2/§22):
@@ -29,17 +29,17 @@ Temporal correctness (task §6/§7/§8; PN02D-B1-EW1 §38/§39). THREE DISTINCT 
     that peels to ``082dc95…`` and WAS the governance-approved identity through PF1. The EW1
     real-execution-wiring change moves HEAD past ``082dc95``, so it no longer peels to the
     authorized HEAD and is NO LONGER the governance-approved identity.
-  * HISTORICAL — ``authmintlivepn02d.EXPECTED_EW1_CHECKPOINT_TAG``
-    (``graphrag-pn02db1ew1-real-execution-wiring-approved``): peels to ``1b8ca5b`` and WAS the
-    governance-approved identity through EW1. The EW2 isolated-model-seed fix moves HEAD past
-    ``1b8ca5b``, so it no longer peels to the authorized HEAD and is NO LONGER approved.
-  * CURRENT — ``authmintlivepn02d.EXPECTED_EW2_CHECKPOINT_TAG``
-    (``graphrag-pn02db1ew2-isolated-model-seed-approved``): the SUCCESSOR that governance now
+  * HISTORICAL — ``authmintlivepn02d.EXPECTED_EW2_CHECKPOINT_TAG``
+    (``graphrag-pn02db1ew2-isolated-model-seed-approved``): peels to ``707c8782`` and WAS the
+    governance-approved identity through EW2. The EW3 isolation-runtime-id fix moves HEAD past
+    ``707c8782``, so it no longer peels to the authorized HEAD and is NO LONGER approved.
+  * CURRENT — ``authmintlivepn02d.EXPECTED_EW3_CHECKPOINT_TAG``
+    (``graphrag-pn02db1ew3-isolation-id-compat-approved``): the SUCCESSOR that governance now
     freezes as the approved identity. Its annotated Git tag does NOT exist yet.
 
 Because the current approved tag is absent, the trusted reader observes real Git, finds no
-such tag, and the live mint FAILS CLOSED. Only a FUTURE operator-approved EW2 checkpoint
-that creates the exact annotated tag (peeling to the approved EW2 HEAD) can make the Git
+such tag, and the live mint FAILS CLOSED. Only a FUTURE operator-approved EW3 checkpoint
+that creates the exact annotated tag (peeling to the approved EW3 HEAD) can make the Git
 checkpoint prerequisite satisfiable — and a satisfiable prerequisite is NOT operator run
 authorization and NOT provider execution.
 """
@@ -55,7 +55,7 @@ from open_notebook.integrations.graphrag.eval.authlivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     B1_ALLOWED_OPERATION_VALUES,
-    EXPECTED_EW2_CHECKPOINT_TAG,
+    EXPECTED_EW3_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
     EXPECTED_PROVIDER_CONFIG_ID,
     GitBaselineAttestation,
@@ -89,11 +89,11 @@ APPROVED_IMPLEMENTATION_CHECKPOINT_TAG = "graphrag-pn02db0cb-real-provider-wirin
 APPROVED_IMPLEMENTATION_CHECKPOINT_COMMIT = "5abeaaa09b7157232b1ac5a234c9d8c50b542585"
 
 #: The EXPECTED (governance-frozen) provider-authorization checkpoint tag. Single source of
-#: truth is ``authmintlivepn02d.EXPECTED_EW2_CHECKPOINT_TAG`` (the PN02D-B1-EW2 successor
-#: that supersedes the historical EW1 checkpoint — the isolated-embedding-model-seed fix
-#: moves HEAD past ``1b8ca5b``); re-exported here for the grant/manifest. The annotated tag
+#: truth is ``authmintlivepn02d.EXPECTED_EW3_CHECKPOINT_TAG`` (the PN02D-B1-EW3 successor
+#: that supersedes the historical EW2 checkpoint — the isolation-runtime-id compatibility fix
+#: moves HEAD past ``707c8782``); re-exported here for the grant/manifest. The annotated tag
 #: does not exist yet, so the live mint stays FAIL CLOSED.
-B1_R2_EXPECTED_CHECKPOINT_TAG = EXPECTED_EW2_CHECKPOINT_TAG
+B1_R2_EXPECTED_CHECKPOINT_TAG = EXPECTED_EW3_CHECKPOINT_TAG
 
 #: A NEW, locally-generated run identity for the FUTURE B1 attempt (task §10). The prior
 #: B1 run_id ``pn02db1-daf6b760-7d68-4674-9222-ac9f962ef6c4`` is RETIRED and NOT reused.
@@ -210,15 +210,39 @@ def validate_b1_r2_grant(grant: object) -> List[str]:
     return reasons
 
 
-def b1_r2_authorization_manifest() -> Dict[str, object]:
+def b1_r2_authorization_manifest(
+    *,
+    git_runner: Optional[Callable[[Sequence[str]], str]] = None,
+) -> Dict[str, object]:
     """A content-safe manifest of the frozen B1-R2 authorization envelope (task §23).
 
     Contains NO secret value — only ids, hashes, env NAMES, counts, and flags. The
     approved Git baseline commit is intentionally PENDING (filled at B1-R2 checkpoint
     creation); everything else is frozen now.
+
+    ``b1_r2_tag_exists_in_git_now`` is a LIVE lifecycle observation of the current EXPECTED
+    checkpoint tag (B1EW3-R1-M1): it is derived from the canonical trusted Git reader — the
+    SAME authority ``b1_r2_preflight`` uses — never a hardcoded constant. It reports the real
+    current Git state (State A: successor tag absent → ``False``; State B: the exact tag
+    present → ``True``), so it stays truthful across the EW3 checkpoint lifecycle instead of
+    flipping to a lie once the annotated tag is created. It is content-safe METADATA only:
+    existence is an observation, NOT authorization — a ``True`` here does NOT authorize a
+    provider run (the manifest's ``live_provider_authorization_minted`` /
+    ``pn02_provider_run_authorized`` stay ``False``; minting requires the full mint gate).
+    ``git_runner`` is the git boundary (real by default; injectable so State-A/State-B
+    behavior is unit-testable without creating a real tag) and is used ONLY for this
+    manifest's own observation — it never crosses a mint/trust-root parameter.
     """
     ok, detail = verify_fixture_hash()
     binding = frozen_provider_binding().as_public_dict()
+    reader = (
+        RealTrustedB1R2Reader()
+        if git_runner is None
+        else RealTrustedB1R2Reader(git_runner=git_runner)
+    )
+    real_tag_exists_now = bool(
+        reader.observe(B1_R2_EXPECTED_CHECKPOINT_TAG).observed_tag_exists
+    )
     return {
         "phase": "PN02D-B1-R2",
         "kind": "provider_authorization_preflight_manifest",
@@ -227,7 +251,7 @@ def b1_r2_authorization_manifest() -> Dict[str, object]:
             "commit": APPROVED_IMPLEMENTATION_CHECKPOINT_COMMIT,
         },
         "expected_b1_r2_checkpoint_tag": B1_R2_EXPECTED_CHECKPOINT_TAG,
-        "b1_r2_tag_exists_in_git_now": False,
+        "b1_r2_tag_exists_in_git_now": real_tag_exists_now,
         "approved_git_baseline_commit": "PENDING_B1_R2_CHECKPOINT_COMMIT",
         "approved_git_baseline_tag": B1_R2_EXPECTED_CHECKPOINT_TAG,
         "run_id": B1_RUN_ID,
@@ -296,7 +320,7 @@ def b1_r2_preflight(
 ) -> B1R2PreflightReport:
     """Provider-free control-plane preflight (task §8/§19). Contacts NO provider.
 
-    Observes real Git for the current EXPECTED checkpoint tag (the PN02D-B1-EW2 successor
+    Observes real Git for the current EXPECTED checkpoint tag (the PN02D-B1-EW3 successor
     ``B1_R2_EXPECTED_CHECKPOINT_TAG``) via the trusted reader and proves the live
     authorization is NOT currently mintable (that tag does not exist). It does NOT
     mint a capability. ``git_runner`` is the git boundary (real by default; injectable so

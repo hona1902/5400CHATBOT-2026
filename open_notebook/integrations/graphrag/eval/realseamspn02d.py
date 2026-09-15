@@ -38,6 +38,7 @@ AUTHORIZED`` stays NO).
 
 from __future__ import annotations
 
+import hashlib
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -464,6 +465,30 @@ IsolationFactory = Callable[[str], AbstractAsyncContextManager[object]]
 #: test injects a no-op so the composition can be exercised without a DB.
 ModelSeedFactory = Callable[[], AbstractAsyncContextManager[object]]
 
+#: Domain separator for the isolation-runtime-id digest (PN02D-B1-EW3). Versioned so the
+#: mapping is auditable and can never silently collide with another hashing use.
+_ISOLATION_ID_DOMAIN = "pn02d-isolation-v1"
+
+
+def _derive_isolation_runtime_id(run_id: str) -> str:
+    """Derive the Surreal-safe ISOLATION-RUNTIME id from the FROZEN scientific run id (EW3).
+
+    ``isolation08.temp_names`` requires a run id matching ``^[A-Za-z0-9]{4,32}$``, but the
+    frozen scientific B1 run id (``pn02db1-fe3efb27-…``) contains hyphens and is 44 chars, so
+    it cannot name a temp namespace directly. This maps the scientific id to a distinct
+    infrastructure identifier used ONLY for the isolated Surreal namespace/database — the
+    scientific/operator-visible run id is NEVER changed and continues to identify the grant,
+    the live authorization, and every scientific result.
+
+    Deterministic, domain-separated SHA-256 (NOT a truncation-only transform, so distinct
+    scientific ids can never share an isolation id via a shared prefix). Uses only the
+    non-secret run id: no secret, no randomness, no timestamp, no machine id. The result is
+    ``"pn02d"`` + the first 27 lowercase hex digest chars = exactly 32 chars, which satisfies
+    the canonical ``temp_names`` contract without weakening it.
+    """
+    digest = hashlib.sha256(f"{_ISOLATION_ID_DOMAIN}:{run_id}".encode("utf-8")).hexdigest()
+    return f"pn02d{digest[:27]}"
+
 
 @asynccontextmanager
 async def _default_isolation(run_id: str) -> AsyncIterator[object]:
@@ -566,7 +591,12 @@ async def _run_live_b1_execution_composed(
     # built < RealB1Driver.run. The seed lives INSIDE the isolation (temp namespace only) and
     # OUTSIDE the seams build, so the corpus embedder, query embedder, and model attestor all
     # resolve the seeded default embedding model.
-    async with isolation_factory(operator_grant.run_id):
+    #
+    # EW3: the ISOLATION boundary (temp namespace/database naming) gets a Surreal-safe DERIVED
+    # id; everything scientific (seams builder run_id, the operator grant, the live authorization
+    # the driver mints, and all results) keeps the FROZEN operator_grant.run_id unchanged.
+    isolation_runtime_id = _derive_isolation_runtime_id(operator_grant.run_id)
+    async with isolation_factory(isolation_runtime_id):
         async with seed_factory():
             seams = seams_builder(fx, run_id=operator_grant.run_id, env=env, **extra)
             driver = RealB1Driver(fx, seams)
