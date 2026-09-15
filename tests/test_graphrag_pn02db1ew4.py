@@ -511,16 +511,31 @@ def test_ew3_ew2_ew1_pf1_b1r2_cannot_substitute_for_ew4():
 # EW4 checkpoint-lifecycle — lifecycle-aware from day one (§32/§33)
 # --------------------------------------------------------------------------- #
 
-def test_ew4_tag_does_not_exist_in_real_git_yet():
-    # §33 State A (real): the EW4 successor tag is genuinely absent from real Git this turn.
+def test_ew4_successor_tag_git_state_is_lifecycle_valid():
+    # §33/§4: the CURRENT approved EW4 identity's real-Git state is LIFECYCLE-AWARE — never a
+    # permanent real-tag-absence assumption (that anti-pattern flips the instant the checkpoint
+    # tag is created; see checkpoint attempt #1). STATE A (pre-checkpoint): the successor tag is
+    # absent → empty peel. STATE B (post-checkpoint): the EXACT tag is present, peels to a valid
+    # 40-hex commit == the authorized HEAD. Mirrors the lifecycle-aware EW3 successor-tag test.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_EW4_CHECKPOINT_TAG,
         RealTrustedB1R2Reader,
+        current_approved_b1_r2_checkpoint,
     )
 
-    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW4_CHECKPOINT_TAG)
-    assert obs.observed_tag_exists is False
-    assert obs.observed_tag_peel == ""
+    approved = current_approved_b1_r2_checkpoint()
+    assert approved == EXPECTED_EW4_CHECKPOINT_TAG
+    obs = RealTrustedB1R2Reader().observe(approved)
+    if not obs.observed_tag_exists:
+        # STATE A — pre-checkpoint: successor tag absent → Git prerequisite not satisfied.
+        assert obs.observed_tag_peel == ""
+    else:
+        # STATE B — post-checkpoint: EXACT tag present, valid peeled commit, at HEAD.
+        assert obs.checkpoint_tag == approved
+        assert len(obs.observed_tag_peel) == 40 and all(
+            c in "0123456789abcdef" for c in obs.observed_tag_peel
+        )
+        assert obs.observed_tag_peel == obs.observed_head  # tag at authorized HEAD
 
 
 def test_ew4_state_a_mint_fails_closed_when_tag_absent():

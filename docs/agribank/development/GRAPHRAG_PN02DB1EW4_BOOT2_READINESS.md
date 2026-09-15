@@ -1,7 +1,33 @@
 # GraphRAG-PN02D-B1-EW4 — Boot-2 Execution Readiness Parity
 
-**Status:** `EW4_REMEDIATION_1_COMPLETE_READY_FOR_CODEX_REREVIEW_2` — offline / provider-free.
-**Not checkpointed. No commit / tag / push. No provider secret read. EXEC #5 NOT authorized.**
+**Status:** `EW4_REMEDIATION_2_COMPLETE_READY_FOR_CODEX_REREVIEW_3` — offline / provider-free.
+**Checkpoint attempt #1 was BLOCKED at post-tag State B (lifecycle-fragile test); tag deleted
+per §37, commit `75fa5e0` retained (unapproved ancestor). No push. No provider secret read.
+EXEC #5 NOT authorized.**
+
+## 0b. Checkpoint attempt #1 (BLOCKED) + Remediation #2
+
+The operator-authorized EW4 successor-checkpoint attempt reached post-tag State-B validation and
+was **correctly BLOCKED**: `tests/test_graphrag_pn02db1ew4.py::test_ew4_tag_does_not_exist_in_real_git_yet`
+hard-asserted `observed_tag_exists is False`, a **permanent real-Git tag-absence assumption** that is
+legitimately true in State A (pre-checkpoint) but flips to failing the instant the exact checkpoint
+tag is created. Classification: **checkpoint-lifecycle fragility** — not a production/runtime/trust
+defect. The commit `75fa5e06d1c91e8bf5482a037c77e6bf6762265d` was created; the annotated tag was
+created (object `d2755b9…`, peel `75fa5e0`) then, per checkpoint §37, **deleted locally
+(unpublished)**; nothing was pushed; the commit was retained as an unapproved checkpoint-attempt
+ancestor. Historical tags stayed immutable; zero provider activity.
+
+**Remediation #2 (this turn, tests + docs only — no production change):** the fragile test was
+rewritten to be lifecycle-aware and renamed `test_ew4_successor_tag_git_state_is_lifecycle_valid`
+(State A: tag absent → empty peel; State B: exact tag present, 40-hex peel == authorized HEAD),
+mirroring the EW3 successor-tag lifecycle test. A full EW4-test-file sweep + a cross-test sweep
+(r2/ew1/ew2/ew3/ew4) confirmed **no remaining permanent real-Git EW4-tag-absence assumption**
+(synthetic State-A absence negatives, e.g. `test_ew4_state_a_mint_fails_closed_when_tag_absent`
+using `TEST_B1R2_TAG`, are allowed and retained). A **temporary local real-Git tag** was created at
+HEAD, the lifecycle tests passed in State B (86 passed), and the temp tag was deleted — directly
+proving the fix against the exact scenario that blocked attempt #1. The already-reviewed Boot-2
+readiness production code (M1/M2 fixes) is **unchanged**. The final EW4 checkpoint tag must peel to
+a **future** remediation-successor HEAD, not `75fa5e0`.
 
 ## 0. Codex Review #1 + Remediation #1
 
@@ -137,7 +163,11 @@ NOT approved.
 
 ## 7. Next
 
-Codex EW4 review #1 returned `B_REMEDIATION_REQUIRED`; remediation #1 (above) closed both MEDIUMs.
-Next: mandatory **independent Codex EW4 re-review #2** (target `D_PASS_CLEAN`) → operator-approved EW4
-checkpoint (creating `graphrag-pn02db1ew4-boot2-readiness-approved` at the successor HEAD,
+Codex EW4 review chain: review #1 `B_REMEDIATION_REQUIRED` → remediation #1 (closed M1/M2) →
+re-review #2 `D_PASS_CLEAN`. The checkpoint attempt then BLOCKED on the lifecycle-fragile test
+(§0b); remediation #2 (§0b) fixed it (tests/docs only). Next: mandatory **independent Codex EW4
+re-review #3** (target `D_PASS_CLEAN`; focus: lifecycle-aware real-Git State A/B, no permanent
+real-tag-absence assumption, retained `75fa5e0` history, future tag targets the successor
+remediation HEAD, production readiness code untouched) → operator-approved EW4 checkpoint (a NEW
+remediation-successor commit + `graphrag-pn02db1ew4-boot2-readiness-approved` at that successor HEAD,
 backup-only) → fresh operator authorization for **EXEC #5**.
