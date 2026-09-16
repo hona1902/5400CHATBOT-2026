@@ -18,6 +18,7 @@ import numpy as np
 from loguru import logger
 
 from .chunking import CHUNK_SIZE, ContentType, chunk_text
+from .provider_errors import attach_provider_diagnostic, classify_provider_error
 from .token_utils import token_count
 
 
@@ -191,11 +192,22 @@ async def generate_embeddings(
                         f"failed after {EMBEDDING_MAX_RETRIES} attempts "
                         f"using model '{model_name}'{cmd_context}: {e}"
                     )
-                    raise RuntimeError(
+                    wrapped = RuntimeError(
                         f"Failed to generate embeddings using model '{model_name}' "
                         f"(batch {batch_idx + 1}/{total_batches}, "
                         f"{len(batch)} texts): {e}"
-                    ) from e
+                    )
+                    # PN02D-B1-EW5: attach a sanitized, safe-by-construction provider-error
+                    # diagnostic (fixed vocabulary; no secret, no message/body) so a
+                    # content-safe caller can surface the provider failure family. This does
+                    # not change the message, the retry count, or control flow.
+                    attach_provider_diagnostic(
+                        wrapped,
+                        classify_provider_error(
+                            e, operation="embedding", provider_name=None
+                        ),
+                    )
+                    raise wrapped from e
 
     logger.debug(f"Generated {len(all_embeddings)} embeddings in {total_batches} batch(es)")
     return all_embeddings

@@ -264,6 +264,18 @@ class ModelManager:
                 config=config,
             )
         elif model.type == "embedding":
+            # PN02D-B1-EW5 remediation #1: for OpenRouter embeddings, resolve through the
+            # repository-owned safe boundary so an HTTP >=400 preserves a STRUCTURED status
+            # (auth vs endpoint/capability) instead of esperanto's bare RuntimeError. Behaviour
+            # is otherwise identical; all other providers/modalities are unchanged.
+            if provider == "openrouter":
+                from open_notebook.ai.safe_openrouter_embedding import (
+                    build_safe_openrouter_embedding_model,
+                )
+
+                return build_safe_openrouter_embedding_model(
+                    model_name=model.name, config=config
+                )
             return AIFactory.create_embedding(
                 model_name=model.name,
                 provider=provider,

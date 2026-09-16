@@ -37,6 +37,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_EW1_CHECKPOINT_TAG,
     EXPECTED_EW3_CHECKPOINT_TAG,
     EXPECTED_EW4_CHECKPOINT_TAG,
+    EXPECTED_EW5_CHECKPOINT_TAG,
     EXPECTED_PF1_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     current_approved_b1_r2_checkpoint,
@@ -444,29 +445,31 @@ def test_cli_wrong_checkpoint_historical_pf1_refused(tmp_path):
 # §41 — successor governance regression (exact identity + trusted reader binding)
 # --------------------------------------------------------------------------- #
 
-def test_governance_current_is_ew4_with_ew3_ew2_ew1_pf1_b1r2_historical():
-    # PN02D-B1-EW4 supersedes EW3: governance now approves the EW4 successor, and EW1/EW3 join
-    # PF1/B1-R2/EW2 as retained HISTORICAL identities only.
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW4_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW4_CHECKPOINT_TAG
-    # All identities are distinct; EW3/EW1/PF1/B1-R2 are retained as HISTORICAL only.
+def test_governance_current_is_ew5_with_ew4_ew3_ew1_pf1_b1r2_historical():
+    # PN02D-B1-EW5 supersedes EW4: governance now approves the EW5 successor, and EW4/EW1/EW3
+    # join PF1/B1-R2 as retained HISTORICAL identities only.
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW5_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW5_CHECKPOINT_TAG
+    # All identities are distinct; EW4/EW3/EW1/PF1/B1-R2 are retained as HISTORICAL only.
     assert len({
+        EXPECTED_EW5_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 5
+    }) == 6
 
 
 @pytest.mark.parametrize(
     "historical_tag",
     [EXPECTED_PF1_CHECKPOINT_TAG, EXPECTED_B1_R2_CHECKPOINT_TAG, B0CB_TAG],
 )
-def test_historical_or_arbitrary_tag_cannot_substitute_for_ew1(historical_tag):
-    # Even if the reader observes SOME tag present at HEAD, a grant naming a non-EW1
-    # identity is rejected because governance-approved == EW1 and the grant's B1-R2 identity
-    # must EXACTLY equal it (exact-identity primary authority, not a denylist — §42).
+def test_historical_or_arbitrary_tag_cannot_substitute_in_historical_ew1_scenario(historical_tag):
+    # Historical EW1-vantage scenario: even if the reader observes SOME tag present at HEAD, a
+    # grant naming a non-EW1 identity is rejected because the scenario's approved-expected == EW1
+    # and the grant's B1-R2 identity must EXACTLY equal it (exact-identity primary authority, not
+    # a denylist — §42). Current-successor (EW5) coverage lives in the EW5 test module.
     reader = C.b1r2_reader_ok(tag=historical_tag, peel="a" * 40, head="a" * 40)
     grant = C.frozen_test_grant(b1_r2_checkpoint=historical_tag)
     reasons = verify_b1_r2_checkpoint(
@@ -506,19 +509,19 @@ def test_historical_ew1_tag_is_immutable_and_not_current_approved():
         assert obs.observed_tag_peel == "1b8ca5b6420e2fa6240cfa97aba2fcbfb222c29e"
 
 
-def test_exact_ew4_tag_with_peel_is_the_only_accepted_identity():
-    # The exact EW4 successor identity, trust-observed at the authorized HEAD, with a matching
+def test_exact_ew5_tag_with_peel_is_the_only_accepted_identity():
+    # The exact EW5 successor identity, trust-observed at the authorized HEAD, with a matching
     # baseline, is accepted (no real tag created — the reader is scripted).
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_EW4_CHECKPOINT_TAG, peel=FUTURE_COMMIT, head=FUTURE_COMMIT
+        tag=EXPECTED_EW5_CHECKPOINT_TAG, peel=FUTURE_COMMIT, head=FUTURE_COMMIT
     )
     grant = B.build_b1_r2_operator_grant(approved_git_commit=FUTURE_COMMIT)
     reasons = verify_b1_r2_checkpoint(
         reader=reader,
         operator_grant=grant,
-        approved_expected_checkpoint=EXPECTED_EW4_CHECKPOINT_TAG,
+        approved_expected_checkpoint=EXPECTED_EW5_CHECKPOINT_TAG,
         git_baseline=C.clean_git_baseline(
-            commit=FUTURE_COMMIT, tag=EXPECTED_EW4_CHECKPOINT_TAG
+            commit=FUTURE_COMMIT, tag=EXPECTED_EW5_CHECKPOINT_TAG
         ),
     )
     assert reasons == []

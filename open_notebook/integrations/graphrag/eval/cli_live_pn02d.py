@@ -45,6 +45,7 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
 from open_notebook.integrations.graphrag.eval.provider_binding08 import (
     frozen_provider_binding,
 )
+from open_notebook.utils.provider_errors import safe_provider_error_fields
 
 #: Governance env token that would (with an explicit flag) open the authorization gate.
 #: NEVER set in B0C-B; the verb refuses without it (PN02_PROVIDER_RUN_AUTHORIZED = NO).
@@ -211,7 +212,7 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance returns the EW4 successor tag; its annotated tag ABSENT → fail
+    INTERNALLY (governance returns the EW5 successor tag; its annotated tag ABSENT → fail
     closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []
@@ -301,7 +302,7 @@ def _evaluate_execute_b1_live_composed(
     (canonical, by default) ``live_runner`` — the driver-owned two-boot execution.
 
     Every fail-closed gate runs BEFORE any provider binding or runtime boot: manifest
-    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW3
+    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW5
     checkpoint, provider fingerprint, caps/allowlist, the governance authorization gate, and
     provider-secret presence (name only). A missing provider secret refuses with
     ``provider_secret_missing`` and never boots. This function reads no secret VALUE.
@@ -387,6 +388,14 @@ def _evaluate_execute_b1_live_composed(
         payload["reasons"] = ["live_execution_error"]
         payload["error_type"] = type(exc).__name__
         payload["provider_bound"] = False
+        # PN02D-B1-EW5: attach the sanitized, safe-by-construction provider-error diagnostic
+        # (fixed vocabulary; no raw message/body/headers/secret) so an operator can tell a
+        # provider failure family apart (e.g. auth vs endpoint) without leaking credentials.
+        # Prefers a diagnostic attached at the failure source (operation-accurate); otherwise
+        # classifies the caught exception generically.
+        payload["provider_error"] = safe_provider_error_fields(
+            exc, operation="live_provider_execution"
+        )
         return 4, payload
 
     payload["result"] = outcome.state  # COMPLETE | FAILED
