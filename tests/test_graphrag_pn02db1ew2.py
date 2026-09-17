@@ -787,13 +787,13 @@ def test_default_model_seed_is_the_real_shared_seed():
 
 # --------------------------------------------------------------------------- #
 # Governance: EW2 is now a HISTORICAL checkpoint (its annotated tag exists at 707c8782);
-# the PN02D-B1-EW3 isolation-runtime-id fix superseded it, and after the EW3 -> EW4 -> EW5
-# supersession chain the CURRENT approved identity is EW5. The current-successor governance +
-# checkpoint-lifecycle (State-A/State-B) coverage lives in tests/test_graphrag_pn02db1ew5.py.
+# the PN02D-B1-EW3 isolation-runtime-id fix superseded it, and after the EW3 -> EW4 -> EW5 -> EW6
+# supersession chain the CURRENT approved identity is EW6. The current-successor governance +
+# checkpoint-lifecycle (State-A/State-B) coverage lives in tests/test_graphrag_pn02db1ew6.py.
 # Test-only, zero provider traffic.
 # --------------------------------------------------------------------------- #
 
-def test_governance_ew2_is_historical_current_is_ew5():
+def test_governance_ew2_is_historical_current_is_ew6():
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_B1_R2_CHECKPOINT_TAG,
@@ -802,18 +802,20 @@ def test_governance_ew2_is_historical_current_is_ew5():
         EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
+        EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         current_approved_b1_r2_checkpoint,
     )
 
-    # EW5 is now the frozen approved provider-authorization identity (EW4 superseded); EW2
+    # EW6 is now the frozen approved provider-authorization identity (EW5 superseded); EW2
     # remains a retained HISTORICAL identity (its constant/tag string are unchanged).
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW5_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW5_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW6_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW6_CHECKPOINT_TAG
     assert EXPECTED_EW2_CHECKPOINT_TAG == "graphrag-pn02db1ew2-isolated-model-seed-approved"
     assert current_approved_b1_r2_checkpoint() != EXPECTED_EW2_CHECKPOINT_TAG
-    # EW5/EW4/EW3/EW2/EW1/PF1/B1-R2 are all distinct identities.
+    # EW6/EW5/EW4/EW3/EW2/EW1/PF1/B1-R2 are all distinct identities.
     assert len({
+        EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
@@ -821,13 +823,13 @@ def test_governance_ew2_is_historical_current_is_ew5():
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 7
+    }) == 8
 
 
-def test_ew2_historical_tag_immutable_and_cannot_substitute_for_ew5():
+def test_ew2_historical_tag_immutable_and_cannot_substitute_for_ew6():
     # The EW2 annotated tag is HISTORICAL: when present in real Git it ALWAYS peels to the EW2
     # checkpoint commit 707c8782 (never moved). It is NO LONGER the current approved identity
-    # (that is EW5), and naming it as the approved-expected identity for a later/successor
+    # (that is EW6), and naming it as the approved-expected identity for a later/successor
     # checkpoint is refused.
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (

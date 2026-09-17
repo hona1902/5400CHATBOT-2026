@@ -55,6 +55,7 @@ from open_notebook.integrations.graphrag.eval.workloadpn02 import (
     MAX_INDEX_ATTEMPTS_PER_OPERATION,
     PLANNED_GRAPH_INDEX_OPERATIONS,
 )
+from open_notebook.integrations.graphrag.models import GraphRAGConflictError
 
 STATE_PROCESSED = "PROCESSED"
 STATE_FAILED = "FAILED"
@@ -66,6 +67,10 @@ ERR_TRANSIENT = "TRANSIENT"
 ERR_NON_RETRYABLE = "NON_RETRYABLE"
 ERR_CAP = "CAP_EXHAUSTED"
 ERR_ROUTING = "ROUTING"
+#: PN02D-B1-EW6 (index-conflict recovery): a LightRAG HTTP 409 ("document for this
+#: file_source already exists") observed on a FRESH submit that this operation holds no
+#: prior accepted track for. Fail-closed, non-retryable — never delete/guess/blind-success.
+ERR_CONFLICT = "CONFLICT"
 
 #: () -> per-route index client. In B1 this wraps ``live_indexer08.RealCellIndexClient``
 #: bound to the route's endpoint; in B0B a fake is injected.
@@ -206,6 +211,20 @@ class MembershipIndexExecutor:
         attempts = 0
         last_error_category: Optional[str] = None
         terminal = DriverTechnicalOutcome.FAILED_INDEX_SUBMIT
+        # PN02D-B1-EW6 (index-conflict recovery, Option A — non-destructive): once LightRAG
+        # ACCEPTS a submit and issues a track_id, a retry must RESUME/observe that exact
+        # accepted track — never re-POST the same ``file_source`` (the re-POST is what
+        # produced the EXEC #8 HTTP 409 → GraphRAGConflictError). ``resume_track_id`` holds
+        # that accepted track for the NEXT bounded attempt. It lives ONLY in this operation's
+        # scope, bound to THIS route's own client, so a resume can never cross a cell/workspace
+        # or a source (§9/§23/§24). No delete, no extra attempt budget: the frozen envelope
+        # (MAX_INDEX_ATTEMPTS_PER_OPERATION=2 / MAX_GRAPH_INDEX_ATTEMPTS=48 / GRAPH_DELETE) is
+        # unchanged. Option A changes only what a retry attempt DOES — observe the accepted
+        # track's status instead of re-POSTing — not how many attempts an operation may spend:
+        # a resume iteration still reserves its OWN GRAPH_INDEX_ATTEMPT below and is bounded by
+        # the same per-operation (2) and total (48) caps. POST and status polling are distinct;
+        # no second POST occurs merely because the first bounded poll window exhausted.
+        resume_track_id: Optional[str] = None
 
         while attempts < self._max_attempts:
             # Budget: reserve one ATTEMPT before dispatch; cap exhaustion refuses it.
@@ -217,8 +236,13 @@ class MembershipIndexExecutor:
                 break
             attempts += 1
 
-            outcome, category, retryable = await self._one_attempt(
-                client, canonical_source_id=canonical_source_id, text=text
+            outcome, category, retryable, accepted_track_id, resumable = (
+                await self._one_attempt(
+                    client,
+                    canonical_source_id=canonical_source_id,
+                    text=text,
+                    resume_track_id=resume_track_id,
+                )
             )
             last_error_category = category
             if outcome is DriverTechnicalOutcome.COMPLETED:
@@ -226,9 +250,14 @@ class MembershipIndexExecutor:
                 last_error_category = None
                 break
             terminal = outcome
+            # EW6: carry the accepted track forward ONLY while it is still resumable
+            # (accepted + not yet terminal — poll window exhausted / still processing). A
+            # terminal completion failure clears it, so the pre-existing transient retry
+            # semantics are preserved (a genuinely non-accepted/terminal op re-submits as
+            # before). A non-resumable attempt therefore starts the next attempt fresh.
+            resume_track_id = accepted_track_id if (resumable and accepted_track_id) else None
             if not (retryable and attempts < self._max_attempts):
                 break
-            # else: loop and retry (delete-then-insert semantics in a real run, §17)
 
         elapsed_ms = int((time.monotonic() - started) * 1000)
         mapping.index_status = (
@@ -249,12 +278,52 @@ class MembershipIndexExecutor:
         )
 
     async def _one_attempt(
-        self, client: CellIndexClient, *, canonical_source_id: str, text: str
-    ) -> Tuple[DriverTechnicalOutcome, Optional[str], bool]:
-        """One submit+poll attempt. Returns (outcome, error_category, retryable)."""
-        submit: IndexSubmitResult = await client.submit(
-            source_id=canonical_source_id, canonical_text=text
-        )
+        self,
+        client: CellIndexClient,
+        *,
+        canonical_source_id: str,
+        text: str,
+        resume_track_id: Optional[str] = None,
+    ) -> Tuple[DriverTechnicalOutcome, Optional[str], bool, Optional[str], bool]:
+        """One index attempt. Returns
+        ``(outcome, error_category, retryable, accepted_track_id, resumable)``.
+
+        PN02D-B1-EW6 index-conflict recovery (Option A — non-destructive, envelope-preserving):
+
+        * ``resume_track_id`` set  -> RESUME: bounded-poll THAT already-accepted track. No
+          submit, no re-POST — this is the recovery for the EXEC #8 defect (a prior accepted
+          submit is observed to completion instead of blindly re-POSTing the same
+          ``file_source``, which is what produced the LightRAG HTTP 409). Identity is proven
+          by construction: this operation's own route-bound ``client`` + its own issued
+          ``track_id`` (§9/§23/§24 — never another cell/workspace or source).
+        * ``resume_track_id`` None -> fresh submit, then bounded-poll the issued track. A
+          ``GraphRAGConflictError`` (HTTP 409) here means the document exists but this
+          operation holds NO prior accepted track for it — fail closed (§7/§8/§22): never
+          delete, guess, adopt an unrelated document, or mark indexing complete.
+
+        ``accepted_track_id`` is the track LightRAG issued (or the resumed track) so the
+        caller can continue observing THAT exact operation; ``resumable`` is True only when
+        the attempt ended accepted-but-not-yet-terminal (poll window exhausted / still
+        processing), so a terminal completion failure keeps the pre-existing retry semantics.
+        """
+        if resume_track_id is not None:
+            # RESUME the exact prior accepted track (NO submit / NO re-POST).
+            return await self._poll_track(client, resume_track_id)
+
+        try:
+            submit: IndexSubmitResult = await client.submit(
+                source_id=canonical_source_id, canonical_text=text
+            )
+        except GraphRAGConflictError:
+            # EW6 §8/§22: 409 on a FRESH submit with no prior accepted track for this
+            # operation -> fail closed (non-retryable). Never delete / guess / blind-success.
+            return (
+                DriverTechnicalOutcome.FAILED_INDEX_SUBMIT,
+                ERR_CONFLICT,
+                False,
+                None,
+                False,
+            )
         if not submit.accepted or not submit.track_id:
             # detail is EPHEMERAL — consumed only to classify, never stored (§32).
             retryable = is_transient_reason(submit.detail)
@@ -262,29 +331,56 @@ class MembershipIndexExecutor:
                 DriverTechnicalOutcome.FAILED_INDEX_SUBMIT,
                 ERR_TRANSIENT if retryable else ERR_NON_RETRYABLE,
                 retryable,
+                None,
+                False,
             )
+        return await self._poll_track(client, submit.track_id)
 
+    async def _poll_track(
+        self, client: CellIndexClient, track_id: str
+    ) -> Tuple[DriverTechnicalOutcome, Optional[str], bool, Optional[str], bool]:
+        """Bounded observation of ONE accepted track (acceptance != completion, §17/§26).
+
+        Returns the same 5-tuple as ``_one_attempt``. Poll-window exhaustion or an explicit
+        TIMEOUT (still processing, never reached a terminal state) returns ``resumable=True``
+        carrying the SAME ``track_id`` so the next bounded attempt RESUMES it (no re-POST);
+        a terminal FAILED returns ``resumable=False`` (pre-existing retry semantics — the op
+        may re-submit as before, §13). Bounded by ``self._max_polls`` per attempt AND by
+        ``self._max_attempts`` overall, so a preserved track can never be polled unbounded
+        (§5/§26).
+        """
         for _ in range(self._max_polls):
-            status: IndexStatusResult = await client.status(track_id=submit.track_id)
+            status: IndexStatusResult = await client.status(track_id=track_id)
             if status.state == STATE_PROCESSED:
-                return (DriverTechnicalOutcome.COMPLETED, None, False)
+                return (DriverTechnicalOutcome.COMPLETED, None, False, track_id, False)
             if status.state == STATE_FAILED:
                 retryable = is_transient_reason(status.detail)
                 return (
                     DriverTechnicalOutcome.FAILED_INDEX_COMPLETION,
                     ERR_TRANSIENT if retryable else ERR_NON_RETRYABLE,
                     retryable,
+                    track_id,
+                    False,  # terminal completion failure — not resumable (§13)
                 )
             if status.state == STATE_TIMEOUT:
-                # A timeout is a transient completion failure (retry if budget allows).
+                # A timeout is a transient completion failure; the accepted track stays
+                # resumable (resume the SAME track next attempt — never re-POST).
                 return (
                     DriverTechnicalOutcome.FAILED_INDEX_COMPLETION,
                     ERR_TRANSIENT,
                     True,
+                    track_id,
+                    True,
                 )
             # IN_PROGRESS -> keep polling.
-        # Ran out of polls without a terminal state -> completion failure (transient).
-        return (DriverTechnicalOutcome.FAILED_INDEX_COMPLETION, ERR_TRANSIENT, True)
+        # Ran out of polls without a terminal state -> still processing; resumable.
+        return (
+            DriverTechnicalOutcome.FAILED_INDEX_COMPLETION,
+            ERR_TRANSIENT,
+            True,
+            track_id,
+            True,
+        )
 
     async def index_all(
         self, plan: List[Tuple[str, str, str]]
@@ -321,6 +417,7 @@ __all__ = [
     "ERR_NON_RETRYABLE",
     "ERR_CAP",
     "ERR_ROUTING",
+    "ERR_CONFLICT",
     "IndexClientFactory",
     "IndexOperationRecord",
     "IndexCompletionReport",

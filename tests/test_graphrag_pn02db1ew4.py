@@ -15,7 +15,7 @@ must still attest before ``route_table()`` is available.
 
 These unit tests (no Docker / no provider) drive the readiness race deterministically with a
 scripted health prober + injected clock/sleep, and cover the EW4 governance successor lifecycle
-(EW4 now historical, EW5 is current; EW4/EW3/EW2/EW1/PF1/B1-R2 cannot substitute; State A tag absent → fail closed;
+(EW4 now historical, EW6 is current; EW4/EW3/EW2/EW1/PF1/B1-R2 cannot substitute; State A tag absent → fail closed;
 State B exact tag at HEAD → Git gate satisfiable but still no provider authorization). ZERO
 provider traffic throughout.
 """
@@ -436,10 +436,10 @@ async def test_boot2_healthy_immediately_still_attests():
 
 
 # --------------------------------------------------------------------------- #
-# EW4 governance: EW4 now historical, EW5 is the current successor; historical tags cannot substitute (§30/§31)
+# EW4 governance: EW4 now historical, EW6 is the current successor; historical tags cannot substitute (§30/§31)
 # --------------------------------------------------------------------------- #
 
-def test_governance_current_is_ew5_successor():
+def test_governance_current_is_ew6_successor():
     from open_notebook.integrations.graphrag.eval import authb1r2pn02d as B
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_B1_R2_CHECKPOINT_TAG,
@@ -448,18 +448,21 @@ def test_governance_current_is_ew5_successor():
         EXPECTED_EW3_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
+        EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         current_approved_b1_r2_checkpoint,
     )
 
-    # PN02D-B1-EW5 supersedes EW4: governance now approves the EW5 successor; EW4 joins
-    # EW3/EW2/EW1/PF1/B1-R2 as a retained HISTORICAL identity (its constant/tag are unchanged).
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW5_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW5_CHECKPOINT_TAG
+    # PN02D-B1-EW6 supersedes EW5: governance now approves the EW6 successor; EW5/EW4 join
+    # EW3/EW2/EW1/PF1/B1-R2 as retained HISTORICAL identities (their constant/tag are unchanged).
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW6_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW6_CHECKPOINT_TAG
     assert current_approved_b1_r2_checkpoint() != EXPECTED_EW4_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() != EXPECTED_EW5_CHECKPOINT_TAG
     assert EXPECTED_EW4_CHECKPOINT_TAG == "graphrag-pn02db1ew4-boot2-readiness-approved"
-    # EW4/EW3/EW2/EW1/PF1/B1-R2 are retained HISTORICAL identities, all distinct from EW5.
+    # EW5/EW4/EW3/EW2/EW1/PF1/B1-R2 are retained HISTORICAL identities, all distinct from EW6.
     assert len({
+        EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
         EXPECTED_EW3_CHECKPOINT_TAG,
@@ -467,7 +470,7 @@ def test_governance_current_is_ew5_successor():
         EXPECTED_EW1_CHECKPOINT_TAG,
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
-    }) == 7
+    }) == 8
 
 
 def _ew4_future_grant(**overrides):
@@ -518,7 +521,7 @@ def test_ew3_ew2_ew1_pf1_b1r2_cannot_substitute_in_historical_ew4_scenario():
 # --------------------------------------------------------------------------- #
 
 def test_ew4_historical_tag_git_state_is_lifecycle_valid():
-    # PN02D-B1-EW5: EW4 is now HISTORICAL (current approved == EW5). This stays LIFECYCLE-AWARE
+    # PN02D-B1-EW5: EW4 is now HISTORICAL (current approved == EW6). This stays LIFECYCLE-AWARE
     # (never a permanent real-tag-absence assumption). STATE A (fresh clone): the EW4 tag is
     # absent → empty peel. STATE B (EW4 tag present): it peels to a valid 40-hex commit — its
     # OWN historical commit; we do NOT assert peel == HEAD, because once EW5 is committed HEAD
@@ -568,8 +571,8 @@ def test_ew4_state_a_mint_fails_closed_when_tag_absent():
     assert "b1_r2_tag_not_observed_in_git" in str(ei.value)
 
 
-def test_ew5_state_b_git_gate_satisfiable_but_no_provider_auth():
-    # §32 State B (post-EW5 repoint): a synthetic reader observing the EXACT EW5 successor tag
+def test_ew6_state_b_git_gate_satisfiable_but_no_provider_auth():
+    # §32 State B (post-EW6 repoint): a synthetic reader observing the EXACT EW6 successor tag
     # peeling to the authorized HEAD makes the Git checkpoint prerequisite satisfiable — but
     # that is ONLY the control-plane Git gate; the provider-run governance flag stays NO. NO
     # real tag created.
@@ -577,30 +580,30 @@ def test_ew5_state_b_git_gate_satisfiable_but_no_provider_auth():
         PN02_PROVIDER_RUN_AUTHORIZED,
     )
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW5_CHECKPOINT_TAG,
+        EXPECTED_EW6_CHECKPOINT_TAG,
         verify_b1_r2_checkpoint,
     )
 
-    future = "e5e5e5e5" + "0" * 32
+    future = "e6e6e6e6" + "0" * 32
     reasons = verify_b1_r2_checkpoint(
-        reader=C.b1r2_reader_ok(tag=EXPECTED_EW5_CHECKPOINT_TAG, peel=future, head=future),
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW6_CHECKPOINT_TAG, peel=future, head=future),
         operator_grant=_ew4_future_grant(approved_git_commit=future),
-        approved_expected_checkpoint=EXPECTED_EW5_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW5_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_EW6_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW6_CHECKPOINT_TAG),
     )
     assert reasons == []  # Git gate satisfiable (§32 State B)
     assert PN02_PROVIDER_RUN_AUTHORIZED is False  # but provider run NOT authorized
 
 
-def test_ew5_checkpoint_identity_separate_from_operator_grant():
-    # §32: the EW5 checkpoint identity is governance-owned; a grant carrying the right B1-R2
+def test_ew6_checkpoint_identity_separate_from_operator_grant():
+    # §32: the EW6 checkpoint identity is governance-owned; a grant carrying the right B1-R2
     # identity is NOT itself provider authorization (that needs the full mint + governance).
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW5_CHECKPOINT_TAG,
+        EXPECTED_EW6_CHECKPOINT_TAG,
     )
 
     grant = _ew4_future_grant()
-    assert grant.b1_r2_checkpoint == EXPECTED_EW5_CHECKPOINT_TAG
+    assert grant.b1_r2_checkpoint == EXPECTED_EW6_CHECKPOINT_TAG
     # The grant is ordinary operator INPUT — it mints nothing on its own.
     from open_notebook.integrations.graphrag.eval.authlivepn02d import (
         PN02_PROVIDER_RUN_AUTHORIZED,

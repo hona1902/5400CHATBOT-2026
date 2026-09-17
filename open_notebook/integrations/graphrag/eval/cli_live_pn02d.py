@@ -212,7 +212,7 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance returns the EW5 successor tag; its annotated tag ABSENT → fail
+    INTERNALLY (governance returns the EW6 checkpoint tag; its annotated tag ABSENT → fail
     closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []
@@ -302,7 +302,7 @@ def _evaluate_execute_b1_live_composed(
     (canonical, by default) ``live_runner`` — the driver-owned two-boot execution.
 
     Every fail-closed gate runs BEFORE any provider binding or runtime boot: manifest
-    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW5
+    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW6
     checkpoint, provider fingerprint, caps/allowlist, the governance authorization gate, and
     provider-secret presence (name only). A missing provider secret refuses with
     ``provider_secret_missing`` and never boots. This function reads no secret VALUE.

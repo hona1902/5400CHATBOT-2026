@@ -28,7 +28,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_EW1_CHECKPOINT_TAG,
     EXPECTED_EW3_CHECKPOINT_TAG,
     EXPECTED_EW4_CHECKPOINT_TAG,
-    EXPECTED_EW5_CHECKPOINT_TAG,
+    EXPECTED_EW6_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
     B1R2CheckpointError,
     GitBaselineError,
@@ -62,24 +62,24 @@ def _future_grant(**overrides):
 # --------------------------------------------------------------------------- #
 
 def test_expected_b1_r2_tag_frozen_in_governance():
-    # Governance now approves the SUCCESSOR EW5 checkpoint (the sanitized provider-error-
-    # observability change moves HEAD past the historical EW4 commit 1949b92, superseding the
-    # EW4 Git gate). EW4/EW3/EW1/PF1/B1-R2/EW2 remain DISTINCT, retained historical constants.
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW5_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW5_CHECKPOINT_TAG
-    assert EXPECTED_EW5_CHECKPOINT_TAG != EXPECTED_EW4_CHECKPOINT_TAG
+    # Governance now approves the SUCCESSOR EW6 checkpoint (the non-destructive index-conflict-
+    # recovery change moves HEAD past the historical EW5 commit 8b0325a, superseding the EW5
+    # Git gate). EW5/EW4/EW3/EW1/PF1/B1-R2/EW2 remain DISTINCT, retained historical constants.
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW6_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW6_CHECKPOINT_TAG
+    assert EXPECTED_EW6_CHECKPOINT_TAG != EXPECTED_EW4_CHECKPOINT_TAG
     assert EXPECTED_EW4_CHECKPOINT_TAG != EXPECTED_EW3_CHECKPOINT_TAG
     assert EXPECTED_EW3_CHECKPOINT_TAG != EXPECTED_EW1_CHECKPOINT_TAG
     assert EXPECTED_EW1_CHECKPOINT_TAG != EXPECTED_B1_R2_CHECKPOINT_TAG
 
 
 def test_current_approved_checkpoint_git_state_is_valid():
-    # CHECKPOINT-LIFECYCLE aware for the CURRENT approved identity (EW5). State A = the
-    # successor tag is absent (pre-checkpoint) → gate unsatisfied; State B = the exact EW5
-    # tag exists at the authorized HEAD. Stays green before AND after the EW5 checkpoint,
+    # CHECKPOINT-LIFECYCLE aware for the CURRENT approved identity (EW6). State A = the
+    # successor tag is absent (pre-checkpoint) → gate unsatisfied; State B = the exact EW6
+    # tag exists at the authorized HEAD. Stays green before AND after the EW6 checkpoint,
     # and is UNAFFECTED by the historical EW4/EW3/EW1/PF1/B1-R2/EW2 tags (see the immutability test below).
     approved = current_approved_b1_r2_checkpoint()
-    assert approved == EXPECTED_EW5_CHECKPOINT_TAG
+    assert approved == EXPECTED_EW6_CHECKPOINT_TAG
     obs = RealTrustedB1R2Reader().observe(approved)
     if not obs.observed_tag_exists:
         # STATE A — pre-checkpoint: successor tag absent → Git prerequisite NOT satisfied.
@@ -128,13 +128,13 @@ def test_fixture_hash_frozen():
 
 def test_manifest_frozen_and_content_safe():
     m = B.b1_r2_authorization_manifest()
-    assert m["expected_b1_r2_checkpoint_tag"] == EXPECTED_EW5_CHECKPOINT_TAG
+    assert m["expected_b1_r2_checkpoint_tag"] == EXPECTED_EW6_CHECKPOINT_TAG
     # B1EW3-R1-M1: `b1_r2_tag_exists_in_git_now` is a LIVE lifecycle observation of real Git
     # (derived from the canonical trusted reader), NOT a hardcoded False. It must equal the
     # real current Git state: State A (successor tag absent) → False; State B (exact tag
-    # present) → True. This stays truthful across the EW5 checkpoint lifecycle instead of
+    # present) → True. This stays truthful across the EW6 checkpoint lifecycle instead of
     # turning the committed suite red once the annotated tag is minted.
-    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW5_CHECKPOINT_TAG)
+    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW6_CHECKPOINT_TAG)
     assert m["b1_r2_tag_exists_in_git_now"] == bool(obs.observed_tag_exists)
     assert m["approved_implementation_checkpoint"]["tag"] == B0CB_TAG
     assert m["run_id"] == B.B1_RUN_ID
@@ -279,12 +279,12 @@ def test_git_gate_satisfiable_does_not_authorize_provider_run():
     # (trusted reader observes the EXACT tag at HEAD), that is only the control-plane Git
     # prerequisite — the provider-run governance flag stays NO.
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_EW5_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
+        tag=EXPECTED_EW6_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
     )
     assert verify_b1_r2_checkpoint(
         reader=reader, operator_grant=_future_grant(approved_git_commit=FUTURE_B1_R2_COMMIT),
-        approved_expected_checkpoint=EXPECTED_EW5_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW5_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_EW6_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW6_CHECKPOINT_TAG),
     ) == []  # Git gate satisfiable
     assert PN02_PROVIDER_RUN_AUTHORIZED is False  # but provider run NOT authorized
 
@@ -518,12 +518,12 @@ def test_future_positive_verify_becomes_satisfiable_via_trusted_reader():
     # With a trusted reader observing the EXACT expected tag at the future commit, and a
     # baseline at that commit, the B1-R2 verifier passes. No real tag is created.
     reader = C.b1r2_reader_ok(
-        tag=EXPECTED_EW5_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
+        tag=EXPECTED_EW6_CHECKPOINT_TAG, peel=FUTURE_B1_R2_COMMIT, head=FUTURE_B1_R2_COMMIT
     )
     reasons = verify_b1_r2_checkpoint(
         reader=reader, operator_grant=_future_grant(),
-        approved_expected_checkpoint=EXPECTED_EW5_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW5_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_EW6_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW6_CHECKPOINT_TAG),
     )
     assert reasons == []
 
@@ -534,19 +534,19 @@ def test_future_positive_full_mint_via_production_signature_under_patch():
     # tag/commit. It uses the PRODUCTION mint signature (no trust-root params) and creates
     # NO real tag. The unpatched/real path stays fail-closed (see the pre-tag test).
     grant = _future_grant(approved_git_commit=FUTURE_B1_R2_COMMIT)
-    baseline = C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW5_CHECKPOINT_TAG)
+    baseline = C.clean_git_baseline(commit=FUTURE_B1_R2_COMMIT, tag=EXPECTED_EW6_CHECKPOINT_TAG)
     preflight = mint_real_preflight_authorization(
         gate0_passed=True, gate1_passed=True, fixture_hash=_fixture_hash(),
         run_id=B.B1_RUN_ID, runtime_count=3,
     )
-    with C.approved_b1r2_governance(tag=EXPECTED_EW5_CHECKPOINT_TAG, head=FUTURE_B1_R2_COMMIT):
+    with C.approved_b1r2_governance(tag=EXPECTED_EW6_CHECKPOINT_TAG, head=FUTURE_B1_R2_COMMIT):
         auth = mint_live_provider_run_authorization(
             operator_grant=grant, real_preflight_auth=preflight,
             git_baseline_attestation=baseline, observed_fixture_hash=_fixture_hash(),
         )
     assert isinstance(auth, LiveProviderRunAuthorization)
     assert auth.run_id == B.B1_RUN_ID
-    assert auth.b1_r2_checkpoint == EXPECTED_EW5_CHECKPOINT_TAG
+    assert auth.b1_r2_checkpoint == EXPECTED_EW6_CHECKPOINT_TAG
     assert auth.as_public_dict()["b1_r2_checkpoint_attested"] is True
 
 
