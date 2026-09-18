@@ -212,7 +212,7 @@ def validate_live_run_inputs(
     B1-R2 is DEFENSE-IN-DEPTH here (the mint is the trust root, task §14/B0CB-RR4-H1):
     this function exposes NO trust-root parameter. It calls the shared
     ``b1_r2_refusal_reasons`` which resolves the approved identity + trusted Git reader
-    INTERNALLY (governance returns the EW7 checkpoint tag; its annotated tag ABSENT → fail
+    INTERNALLY (governance returns the EW8 checkpoint tag; its annotated tag ABSENT → fail
     closed). The CLI can neither override the approved B1-R2 identity nor the trusted reader.
     """
     reasons: List[str] = []
@@ -260,6 +260,58 @@ def _governance_authorized(env: Dict[str, str], *, explicit_flag: bool) -> bool:
     return explicit_flag and token in {"YES", "TRUE", "1"}
 
 
+def _project_scientific_result(report: Dict[str, object]) -> Dict[str, object]:
+    """PN02D-B1-EW8 (§1/§5/§7/§9): a pure, content-safe PROJECTION of the scientific result the
+    frozen evaluator already computed into ``outcome.report`` (via ``reportpn02.build_report``).
+
+    It ONLY reads existing report fields (already the content-safe layer — ids/labels/counts/
+    verdicts, never source text/secret) and the workload-ledger spent counts; it NEVER recomputes
+    leakage/retrieval/multihop/isolation truth and invents NO synthetic overall PASS boolean
+    (EF5: the scientific result is dimensional). Missing keys (e.g. a technical block before the
+    query stage) stay ``None`` so a technical BLOCKED never fabricates completed verdicts.
+    """
+    def _as_dict(x: object) -> Dict[str, object]:
+        return x if isinstance(x, dict) else {}
+
+    def _get(x: object, key: str) -> object:
+        return x.get(key) if isinstance(x, dict) else None
+
+    r = report or {}
+    stage1 = _as_dict(r.get("stage1"))
+    metrics = _as_dict(stage1.get("metrics"))
+    sci_out = r.get("scientific_outputs")
+    retrieval = r.get("retrieval")
+    multihop = r.get("multihop")
+    removal = r.get("membership_removal")
+    snap = _as_dict(_as_dict(r.get("driver")).get("workload_ledger_snapshot"))
+
+    def _spent(cls: str) -> Optional[int]:
+        entry = snap.get(cls)
+        return entry.get("spent") if isinstance(entry, dict) else None
+
+    return {
+        # Isolation / leakage HARD GATE (evaluator-owned; technical!=scientific, §4/§18).
+        "stage1_status": stage1.get("stage1_status"),
+        "stage2_authorized": stage1.get("stage2_authorized_by_result"),
+        "isolation_evidenced": _get(sci_out, "PER_NOTEBOOK_ISOLATION_EVIDENCED"),
+        "leakage_count": metrics.get("cross_notebook_leak_query_count"),
+        "leakage_rate": metrics.get("cross_notebook_leakage_rate"),
+        "violations": stage1.get("violations"),
+        # Dimensional value verdicts (evaluator-owned; NOT reinterpreted, §5/§7).
+        "retrieval_verdict": _get(retrieval, "verdict"),
+        "multihop_verdict": _get(multihop, "verdict"),
+        "scientific_outputs": sci_out if isinstance(sci_out, dict) else None,
+        "retrieval": retrieval if isinstance(retrieval, dict) else None,
+        "multihop": multihop if isinstance(multihop, dict) else None,
+        "membership_removal": removal if isinstance(removal, dict) else None,
+        # Query/GD/vector counts from the authoritative workload ledger (calls only; no success
+        # inflation — §10/§11/§12; ``spent`` is the reserved-attempt count).
+        "query_embedding_attempts": _spent("QUERY_EMBEDDING"),
+        "gd_calls": _spent("GD_QUERY"),
+        "vector_queries": _spent("VECTOR_QUERY"),
+    }
+
+
 def evaluate_execute_b1_live(
     *,
     manifest_path: Optional[str],
@@ -302,7 +354,7 @@ def _evaluate_execute_b1_live_composed(
     (canonical, by default) ``live_runner`` — the driver-owned two-boot execution.
 
     Every fail-closed gate runs BEFORE any provider binding or runtime boot: manifest
-    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW7
+    present/well-formed, fixture hash, clean+approved git baseline, the trust-observed EW8
     checkpoint, provider fingerprint, caps/allowlist, the governance authorization gate, and
     provider-secret presence (name only). A missing provider secret refuses with
     ``provider_secret_missing`` and never boots. This function reads no secret VALUE.
@@ -413,6 +465,12 @@ def _evaluate_execute_b1_live_composed(
         outcome.index_completion.as_dict() if outcome.index_completion is not None else None
     )
     payload["index_membership_records"] = [r.as_dict() for r in outcome.index_records]
+    # PN02D-B1-EW8 (§1/§9): surface the scientific result the frozen evaluator ALREADY computed
+    # into ``outcome.report`` (EF5: it was dropped here). This is a pure PROJECTION of existing
+    # content-safe report fields + the workload-ledger spent counts — the CLI never recomputes
+    # the leakage/retrieval/multihop/isolation verdicts (the evaluator stays authoritative), and
+    # ``state="COMPLETE"``/``technical_status`` stay TECHNICAL-only (never a scientific PASS).
+    payload["scientific_result"] = _project_scientific_result(outcome.report)
     return (0 if outcome.state == "COMPLETE" else 4), payload
 
 

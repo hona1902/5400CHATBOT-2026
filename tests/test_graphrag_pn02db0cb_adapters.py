@@ -822,15 +822,16 @@ def test_trusted_observation_cannot_be_constructed_directly():
 
 
 def test_current_approved_b1_r2_checkpoint_is_expected_tag():
-    # Governance: the approved identity is now FROZEN to the exact SUCCESSOR EW7 tag (which
-    # supersedes the historical EW6 checkpoint — the bounded index-observation-timing change
-    # moves HEAD past 0baacef). It is non-None, but that tag does not exist in Git yet,
-    # so the mint still fails closed (see the direct-mint tests). No caller override.
+    # Governance: the approved identity is now FROZEN to the exact SUCCESSOR EW8 tag (which
+    # supersedes the historical EW7 checkpoint — the scientific-result-observability change
+    # layered on the EW7 index-observation-timing fix at ab90202). It is non-None, but that
+    # tag does not exist in Git yet, so the mint still fails closed (see the direct-mint
+    # tests). No caller override.
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
-        EXPECTED_EW7_CHECKPOINT_TAG,
+        EXPECTED_EW8_CHECKPOINT_TAG,
     )
 
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW7_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW8_CHECKPOINT_TAG
 
 
 # --- §4/§5/§15/§16: NO trust-root injection on the public/live APIs ---------- #

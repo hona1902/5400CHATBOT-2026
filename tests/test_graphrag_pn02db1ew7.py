@@ -9,8 +9,8 @@ change only. It also surfaces content-safe index observability so a future real 
 own metrics without a forensic reconstruction.
 
 These tests use a FAKE recording sleeper (TESTS_USE_REAL_MULTISECOND_WAIT=NO): they record the
-deliberate waits without blocking. They also cover the EW6->EW7 governance repoint (current
-approved checkpoint == EW7, EW6/EW5/... historical), lifecycle State A/B, and substitution
+deliberate waits without blocking. They also cover the EW7->EW8 governance repoint (current
+approved checkpoint == EW8, EW7/EW6/EW5/... historical), lifecycle State A/B, and substitution
 rejection. No provider/model/dimension change, no OpenRouter calls, no envelope change.
 """
 from __future__ import annotations
@@ -34,6 +34,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_EW5_CHECKPOINT_TAG,
     EXPECTED_EW6_CHECKPOINT_TAG,
     EXPECTED_EW7_CHECKPOINT_TAG,
+    EXPECTED_EW8_CHECKPOINT_TAG,
     EXPECTED_PF1_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     current_approved_b1_r2_checkpoint,
@@ -456,26 +457,29 @@ def test_per_membership_record_is_content_safe():
 
 
 # --------------------------------------------------------------------------- #
-# §32/§33/§34/§35/§36 — EW6→EW7 governance repoint + successor lifecycle
+# EW7 now HISTORICAL + EW8 successor governance (repointed by PN02D-B1-EW8)
 # --------------------------------------------------------------------------- #
 
 
-def test_ew7_governance_repoint_complete():
-    # §32: the current approved provider-authorization identity is the exact EW7 successor tag;
-    # the re-exported grant/manifest identity follows it. EW6 is now HISTORICAL (not current).
+def test_ew7_now_historical_current_is_ew8():
+    # PN02D-B1-EW8 repoint: the current approved provider-authorization identity is the exact
+    # EW8 successor tag; the re-exported grant/manifest identity follows it. EW7 is now
+    # HISTORICAL (its constant/tag preserved, no longer current), as EW6 already was.
     assert (
         EXPECTED_EW7_CHECKPOINT_TAG == "graphrag-pn02db1ew7-index-observation-timing-approved"
     )
     assert EXPECTED_EW7_CHECKPOINT_TAG != EXPECTED_EW6_CHECKPOINT_TAG
-    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW7_CHECKPOINT_TAG
-    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW7_CHECKPOINT_TAG
-    assert current_approved_b1_r2_checkpoint() != EXPECTED_EW6_CHECKPOINT_TAG
+    assert EXPECTED_EW8_CHECKPOINT_TAG != EXPECTED_EW7_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() == EXPECTED_EW8_CHECKPOINT_TAG
+    assert B.B1_R2_EXPECTED_CHECKPOINT_TAG == EXPECTED_EW8_CHECKPOINT_TAG
+    assert current_approved_b1_r2_checkpoint() != EXPECTED_EW7_CHECKPOINT_TAG
 
 
-def test_ew7_successor_tag_git_state_is_lifecycle_valid():
-    # §35: lifecycle-aware — never a permanent real-tag-absence assumption. STATE A
-    # (pre-checkpoint): the EW7 tag is absent → empty peel. STATE B (post-checkpoint): the EXACT
-    # tag is present, peels to a 40-hex commit == the authorized HEAD.
+def test_ew7_historical_tag_git_state_is_lifecycle_valid():
+    # PN02D-B1-EW8: EW7 is now HISTORICAL. Lifecycle-aware (never a permanent real-tag-absence
+    # assumption). STATE A (fresh clone): the EW7 tag is absent → empty peel. STATE B (EW7 tag
+    # present): it peels to a valid 40-hex commit — but as a HISTORICAL tag it need NOT equal the
+    # current authorized HEAD (a future EW8 checkpoint moves HEAD past it).
     obs = RealTrustedB1R2Reader().observe(EXPECTED_EW7_CHECKPOINT_TAG)
     if not obs.observed_tag_exists:
         assert obs.observed_tag_peel == ""  # STATE A
@@ -483,35 +487,49 @@ def test_ew7_successor_tag_git_state_is_lifecycle_valid():
         assert obs.checkpoint_tag == EXPECTED_EW7_CHECKPOINT_TAG
         assert len(obs.observed_tag_peel) == 40 and all(
             c in "0123456789abcdef" for c in obs.observed_tag_peel
-        )
-        assert obs.observed_tag_peel == obs.observed_head  # STATE B
+        )  # STATE B — historical peel, NOT required to equal HEAD
 
 
-def test_ew7_exact_tag_with_peel_is_accepted_by_git_gate():
-    # §32: the EXACT EW7 successor identity, trust-observed at the authorized HEAD with a matching
-    # baseline, satisfies the control-plane Git gate (no real tag created).
-    future = "e7e7e7e7" + "0" * 32
+def test_ew7_cannot_substitute_at_a_future_head():
+    # PN02D-B1-EW8: once EW8 source moves HEAD, the (now historical) EW7 tag peeling to its OWN
+    # commit ab90202 no longer peels to the authorized HEAD → cannot authorize (fail-closed).
+    future = "e8e8e8e8" + "0" * 32
+    ew7_commit = "ab902020" + "0" * 32
     grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW7_CHECKPOINT_TAG)
     reasons = verify_b1_r2_checkpoint(
-        reader=C.b1r2_reader_ok(tag=EXPECTED_EW7_CHECKPOINT_TAG, peel=future, head=future),
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW7_CHECKPOINT_TAG, peel=ew7_commit, head=future),
         operator_grant=grant,
         approved_expected_checkpoint=EXPECTED_EW7_CHECKPOINT_TAG,
         git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW7_CHECKPOINT_TAG),
     )
+    assert "b1_r2_tag_not_at_authorized_head" in reasons
+
+
+def test_ew8_exact_tag_with_peel_is_accepted_by_git_gate():
+    # PN02D-B1-EW8: the EXACT EW8 successor identity, trust-observed at the authorized HEAD with a
+    # matching baseline, satisfies the control-plane Git gate (no real tag created).
+    future = "e8e8e8e8" + "0" * 32
+    grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG)
+    reasons = verify_b1_r2_checkpoint(
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW8_CHECKPOINT_TAG, peel=future, head=future),
+        operator_grant=grant,
+        approved_expected_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=future, tag=EXPECTED_EW8_CHECKPOINT_TAG),
+    )
     assert reasons == []
 
 
-def test_wrong_ew7_peel_fails_closed():
-    # §34: the exact EW7 tag observed with a peel that does NOT match the authorized HEAD fails
+def test_wrong_ew8_peel_fails_closed():
+    # §39: the exact EW8 tag observed with a peel that does NOT match the authorized HEAD fails
     # closed.
     head = "aaaa1111" + "0" * 32
     wrong = "bbbb2222" + "0" * 32
-    grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW7_CHECKPOINT_TAG)
+    grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG)
     reasons = verify_b1_r2_checkpoint(
-        reader=C.b1r2_reader_ok(tag=EXPECTED_EW7_CHECKPOINT_TAG, peel=wrong, head=head),
+        reader=C.b1r2_reader_ok(tag=EXPECTED_EW8_CHECKPOINT_TAG, peel=wrong, head=head),
         operator_grant=grant,
-        approved_expected_checkpoint=EXPECTED_EW7_CHECKPOINT_TAG,
-        git_baseline=C.clean_git_baseline(commit=head, tag=EXPECTED_EW7_CHECKPOINT_TAG),
+        approved_expected_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG,
+        git_baseline=C.clean_git_baseline(commit=head, tag=EXPECTED_EW8_CHECKPOINT_TAG),
     )
     assert "b1_r2_tag_not_at_authorized_head" in reasons
 
@@ -520,6 +538,7 @@ def test_wrong_ew7_peel_fails_closed():
     "substitute",
     [
         "graphrag-arbitrary-unrelated-tag",
+        EXPECTED_EW7_CHECKPOINT_TAG,
         EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
         EXPECTED_EW4_CHECKPOINT_TAG,
@@ -530,23 +549,24 @@ def test_wrong_ew7_peel_fails_closed():
         EXPECTED_B1_R2_CHECKPOINT_TAG,
     ],
 )
-def test_historical_or_arbitrary_tag_cannot_substitute_for_ew7(substitute):
-    # §33: naming ANY historical (EW6/EW5/EW4/EW3/EW2/EW1/PF1/B1-R2) or arbitrary tag as the
-    # approved-expected identity cannot satisfy the EW7 checkpoint.
-    future = "e7e7e7e7" + "0" * 32
-    grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW7_CHECKPOINT_TAG)
+def test_historical_or_arbitrary_tag_cannot_substitute_for_ew8(substitute):
+    # §38: naming ANY historical (EW7/EW6/EW5/EW4/EW3/EW2/EW1/PF1/B1-R2) or arbitrary tag as the
+    # approved-expected identity cannot satisfy the EW8 checkpoint.
+    future = "e8e8e8e8" + "0" * 32
+    grant = C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG)
     reasons = verify_b1_r2_checkpoint(
         reader=C.b1r2_reader_ok(tag=substitute, peel=future, head=future),
         operator_grant=grant,
         approved_expected_checkpoint=substitute,
         git_baseline=C.clean_git_baseline(commit=future, tag=substitute),
     )
-    assert reasons, f"{substitute} must not satisfy the EW7 checkpoint"
+    assert reasons, f"{substitute} must not satisfy the EW8 checkpoint"
 
 
-def test_ew6_and_ew5_are_distinct_historical_identities():
-    # §33/§36: EW6 and EW5 remain DISTINCT retained-historical constants (identities preserved).
+def test_ew7_and_ew6_are_distinct_historical_identities():
+    # §38: EW7/EW6 (and all earlier) remain DISTINCT retained-historical constants; EW8 current.
     ids = {
+        EXPECTED_EW8_CHECKPOINT_TAG,
         EXPECTED_EW7_CHECKPOINT_TAG,
         EXPECTED_EW6_CHECKPOINT_TAG,
         EXPECTED_EW5_CHECKPOINT_TAG,
@@ -557,11 +577,11 @@ def test_ew6_and_ew5_are_distinct_historical_identities():
         EXPECTED_PF1_CHECKPOINT_TAG,
         EXPECTED_B1_R2_CHECKPOINT_TAG,
     }
-    assert len(ids) == 9  # all nine identities are distinct
-    assert EXPECTED_EW6_CHECKPOINT_TAG == "graphrag-pn02db1ew6-index-conflict-recovery-approved"
+    assert len(ids) == 10  # all ten identities are distinct
+    assert EXPECTED_EW7_CHECKPOINT_TAG == "graphrag-pn02db1ew7-index-observation-timing-approved"
 
 
-def test_ew7_tag_alone_does_not_authorize_provider_run():
-    # §34: even with the Git gate satisfiable (exact EW7 tag at HEAD), the provider-run
+def test_ew8_tag_alone_does_not_authorize_provider_run():
+    # §39: even with the Git gate satisfiable (exact EW8 tag at HEAD), the provider-run
     # governance flag stays NO — a valid checkpoint tag ALONE can never mint a live run.
     assert PN02_PROVIDER_RUN_AUTHORIZED is False

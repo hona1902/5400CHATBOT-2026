@@ -196,7 +196,7 @@ def attest_approved_clean_baseline(
 # the ONLY producer of a ``TrustedB1R2Observation`` (module-private ``__slots__`` key
 # mint), so a self-constructed public look-alike cannot cross the security boundary
 # (``SELF_CONSTRUCTED_PUBLIC_DATACLASS_CAN_AUTHORIZE = NO``). The approved-EXPECTED B1-R2
-# identity comes from GOVERNANCE (``current_approved_b1_r2_checkpoint``), now the PN02D-B1-EW7
+# identity comes from GOVERNANCE (``current_approved_b1_r2_checkpoint``), now the PN02D-B1-EW8
 # checkpoint tag; the trusted reader observes real Git and, while that annotated tag is ABSENT,
 # a live authorization is not currently mintable, regardless of what a caller supplies
 # (fail-closed).
@@ -206,7 +206,7 @@ class B1R2CheckpointError(ValueError):
 
 
 #: Placeholder/sentinel values that can NEVER be an approved B1-R2 checkpoint identity.
-#: The configured approved identity is the EW7 checkpoint tag; these sentinels are never it, so
+#: The configured approved identity is the EW8 checkpoint tag; these sentinels are never it, so
 #: any of them (or an unset identity) fails closed.
 _B1_R2_SENTINELS = frozenset(
     {
@@ -243,7 +243,7 @@ EXPECTED_B1_R2_CHECKPOINT_TAG = "graphrag-pn02db1r2-provider-authorization-prefl
 #: production change moves HEAD off ``082dc95``, and the PF1 tag no longer peels to the
 #: authorized HEAD, so the PF1 Git gate is superseded (``b1_r2_tag_not_at_authorized_head``).
 #: This constant is retained for reference/history ONLY — it is NO LONGER the governance-
-#: approved identity (that is now ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: approved identity (that is now ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_PF1_CHECKPOINT_TAG = "graphrag-pn02db1pf1-preflight-readiness-approved"
 
 #: HISTORICAL as of PN02D-B1-EW2 — the PN02D-B1-EW1 real-execution-wiring checkpoint tag,
@@ -252,7 +252,7 @@ EXPECTED_PF1_CHECKPOINT_TAG = "graphrag-pn02db1pf1-preflight-readiness-approved"
 #: (the real B1 execution defect fix); committing that production change moves HEAD off
 #: ``1b8ca5b``, and the EW1 tag no longer peels to the authorized HEAD, so the EW1 Git gate is
 #: superseded. Retained for reference/history ONLY — it is NO LONGER the governance-approved
-#: identity (that is now ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: identity (that is now ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW1_CHECKPOINT_TAG = "graphrag-pn02db1ew1-real-execution-wiring-approved"
 
 #: PN02D-B1-EW2 checkpoint. Its annotated tag now EXISTS in real Git (peeling to the approved
@@ -260,7 +260,7 @@ EXPECTED_EW1_CHECKPOINT_TAG = "graphrag-pn02db1ew1-real-execution-wiring-approve
 #: governance-approved identity: the EW3 isolation-runtime-id fix (a real B1 execution defect
 #: fix) is a NEW production change that moves HEAD past ``707c8782``, so the EW2 tag no longer
 #: peels to the authorized HEAD and the EW2 Git gate is superseded (that is now
-#: ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW2_CHECKPOINT_TAG = "graphrag-pn02db1ew2-isolated-model-seed-approved"
 
 #: HISTORICAL as of PN02D-B1-EW4 — the PN02D-B1-EW3 isolation-runtime-id-compatibility
@@ -270,7 +270,7 @@ EXPECTED_EW2_CHECKPOINT_TAG = "graphrag-pn02db1ew2-isolated-model-seed-approved"
 #: readiness wait (the real B1 execution defect exposed by EXEC #4 / diagnosed by EF1); that
 #: NEW production change moves HEAD past ``9f41728``, so the EW3 tag no longer peels to the
 #: authorized HEAD and the EW3 Git gate is superseded. Retained for reference/history ONLY —
-#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW3_CHECKPOINT_TAG = "graphrag-pn02db1ew3-isolation-id-compat-approved"
 
 #: HISTORICAL as of PN02D-B1-EW5 — the PN02D-B1-EW4 Boot-2 readiness-parity checkpoint tag.
@@ -281,7 +281,7 @@ EXPECTED_EW3_CHECKPOINT_TAG = "graphrag-pn02db1ew3-isolation-id-compat-approved"
 #: provider status) — that NEW production change moves HEAD past ``1949b92``, so the EW4 tag no
 #: longer peels to the authorized HEAD and the EW4 Git gate is superseded. Retained for
 #: reference/history ONLY — it is NO LONGER the governance-approved identity (that is now
-#: ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW4_CHECKPOINT_TAG = "graphrag-pn02db1ew4-boot2-readiness-approved"
 
 #: HISTORICAL as of PN02D-B1-EW6 — the PN02D-B1-EW5 sanitized-provider-error-observability
@@ -292,7 +292,7 @@ EXPECTED_EW4_CHECKPOINT_TAG = "graphrag-pn02db1ew4-boot2-readiness-approved"
 #: accepted ``file_source``; EW6 resumes/observes the accepted track instead) — that NEW
 #: production change moves HEAD past ``8b0325a``, so the EW5 tag no longer peels to the
 #: authorized HEAD and the EW5 Git gate is superseded. Retained for reference/history ONLY —
-#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW5_CHECKPOINT_TAG = "graphrag-pn02db1ew5-provider-error-observability-approved"
 
 #: HISTORICAL as of PN02D-B1-EW7 — the PN02D-B1-EW6 index-conflict-recovery checkpoint tag.
@@ -303,29 +303,40 @@ EXPECTED_EW5_CHECKPOINT_TAG = "graphrag-pn02db1ew5-provider-error-observability-
 #: abandoned accepted documents while still IN_PROGRESS; EW7 waits between polls) — that NEW
 #: production change moves HEAD past ``0baacef``, so the EW6 tag no longer peels to the
 #: authorized HEAD and the EW6 Git gate is superseded. Retained for reference/history ONLY —
-#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW7_CHECKPOINT_TAG``).
+#: it is NO LONGER the governance-approved identity (that is now ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW6_CHECKPOINT_TAG = "graphrag-pn02db1ew6-index-conflict-recovery-approved"
 
-#: The EXACT operator/governance-approved provider-authorization checkpoint identity, now
-#: FROZEN to the PN02D-B1-EW7 SUCCESSOR checkpoint (the bounded index-observation-timing change
-#: that moves HEAD past the historical EW6 commit ``0baacef``). This is a control-plane
-#: declaration of the future successor tag — it is NOT the tag itself. The annotated Git tag of
-#: this name does not exist yet; the trusted reader observes real Git and, finding no such tag,
-#: the live mint FAILS CLOSED (PN02D-B1-EW7 §34). Only after a future operator-approved EW7
-#: checkpoint creates this exact annotated tag (peeling to the approved EW7 HEAD) can the mint
-#: become satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity
-#: (the same pattern used for B1-R2 → PF1 → EW1 → EW2 → EW3 → EW4 → EW5 → EW6).
+#: HISTORICAL as of PN02D-B1-EW8 — the PN02D-B1-EW7 index-observation-timing checkpoint tag.
+#: Its annotated Git tag EXISTS peeling to the approved EW7 commit
+#: ``ab90202e1fe4b9b5938cd927aa69c7bc3a4224f6`` and it WAS the governance-approved identity
+#: THROUGH the EW7 phase. PN02D-B1-EW8 adds scientific-result observability (EF5: the frozen
+#: evaluator already computed the scientific result into ``outcome.report`` but the CLI dropped
+#: it; EW8 projects it) — that NEW production change moves HEAD past ``ab90202``, so the EW7 tag
+#: no longer peels to the authorized HEAD and the EW7 Git gate is superseded. Retained for
+#: reference/history ONLY — it is NO LONGER the governance-approved identity (that is now
+#: ``EXPECTED_EW8_CHECKPOINT_TAG``).
 EXPECTED_EW7_CHECKPOINT_TAG = "graphrag-pn02db1ew7-index-observation-timing-approved"
 
+#: The EXACT operator/governance-approved provider-authorization checkpoint identity, now
+#: FROZEN to the PN02D-B1-EW8 SUCCESSOR checkpoint (the scientific-result-observability change
+#: that moves HEAD past the historical EW7 commit ``ab90202``). This is a control-plane
+#: declaration of the future successor tag — it is NOT the tag itself. The annotated Git tag of
+#: this name does not exist yet; the trusted reader observes real Git and, finding no such tag,
+#: the live mint FAILS CLOSED (PN02D-B1-EW8 §39). Only after a future operator-approved EW8
+#: checkpoint creates this exact annotated tag (peeling to the approved EW8 HEAD) can the mint
+#: become satisfiable. Freezing the EXPECTED identity before the tag exists removes circularity
+#: (the same pattern used for B1-R2 → PF1 → EW1 → EW2 → EW3 → EW4 → EW5 → EW6 → EW7).
+EXPECTED_EW8_CHECKPOINT_TAG = "graphrag-pn02db1ew8-scientific-result-observability-approved"
+
 #: Governance state for the provider-authorization checkpoint. FROZEN to the successor
-#: ``EXPECTED_EW7_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the
+#: ``EXPECTED_EW8_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the
 #: real mint — never a caller string / Git-tag heuristic). It is non-None, but the live
 #: authorization is STILL not mintable until the trusted reader observes that exact tag in
 #: real Git (which does not yet exist): the mint fails closed with
-#: ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW7 §34). The mint remains FAIL CLOSED before
-#: the successor tag exists. EW1, PF1, B1-R2, EW2, EW3, EW4, EW5 and EW6 are retained as
+#: ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW8 §39). The mint remains FAIL CLOSED before
+#: the successor tag exists. EW1, PF1, B1-R2, EW2, EW3, EW4, EW5, EW6 and EW7 are retained as
 #: HISTORICAL identities only and can never substitute (exact-identity + trusted-reader §35).
-_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW7_CHECKPOINT_TAG
+_APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW8_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
@@ -334,14 +345,14 @@ _B1_R2_TRUSTED_KEY = object()
 def current_approved_b1_r2_checkpoint() -> Optional[str]:
     """The operator/governance-approved provider-authorization checkpoint identity.
 
-    Returns the frozen ``EXPECTED_EW7_CHECKPOINT_TAG`` — the PN02D-B1-EW7 SUCCESSOR that
-    supersedes the historical EW6 checkpoint (the bounded index-observation-timing change
-    moves HEAD past ``0baacef``, so the EW6 tag no longer peels to the authorized HEAD). It is
+    Returns the frozen ``EXPECTED_EW8_CHECKPOINT_TAG`` — the PN02D-B1-EW8 SUCCESSOR that
+    supersedes the historical EW7 checkpoint (the scientific-result-observability change
+    moves HEAD past ``ab90202``, so the EW7 tag no longer peels to the authorized HEAD). It is
     non-None, but a live authorization is still not currently mintable: the trusted reader
     observes real Git and, while no annotated tag of that name exists, the mint fails closed
-    with ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW7 §34). The value is NEVER derived from
+    with ``b1_r2_tag_not_observed_in_git`` (PN02D-B1-EW8 §39). The value is NEVER derived from
     a caller string, a Git-tag naming heuristic, or a prefix match. EW1, PF1, B1-R2, EW2, EW3,
-    EW4, EW5 and EW6 remain HISTORICAL identities that can never substitute for the current EW7 successor.
+    EW4, EW5, EW6 and EW7 remain HISTORICAL identities that can never substitute for the current EW8 successor.
 
     This is a MODULE-LEVEL governance function the mint (and CLI defense-in-depth) look up
     and call INTERNALLY — no caller/parameter can override its result (B0CB-RR4-H1). Tests
@@ -419,7 +430,7 @@ class RealTrustedB1R2Reader:
     ``refs/tags/<name>`` tag object — a branch name or raw SHA does not qualify) and mints
     an unforgeable observation with the module-private key. ``git_runner`` is the git
     boundary (real subprocess by default; injectable so the REAL reader logic is
-    unit-testable without creating a real tag). The current approved EW7 checkpoint tag does
+    unit-testable without creating a real tag). The current approved EW8 checkpoint tag does
     not yet exist in real Git, so a real observation reports ``observed_tag_exists=False``.
     """
 
@@ -534,7 +545,7 @@ def b1_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[
     from module-level functions (``current_approved_b1_r2_checkpoint`` +
     ``_build_trusted_b1_r2_reader``) with NO caller input (B0CB-RR4-H1): this function
     takes NO reader/identity parameter. ``current_approved_b1_r2_checkpoint()`` returns the
-    EW7 checkpoint tag; while that annotated tag is ABSENT from real Git it fails closed. It
+    EW8 checkpoint tag; while that annotated tag is ABSENT from real Git it fails closed. It
     returns refusal reasons only; it CANNOT mint a capability. Tests simulate a future
     approval by patching the two
     module-level functions above — never by passing trust roots here.
@@ -693,7 +704,7 @@ def mint_live_provider_run_authorization(
     approved identity or the Git reader. The mint resolves BOTH internally via
     ``_resolve_b1_r2_verification`` (governance identity from
     ``current_approved_b1_r2_checkpoint`` + the default real-Git ``RealTrustedB1R2Reader``).
-    Governance returns the EW7 checkpoint tag; while that annotated tag is ABSENT from real Git
+    Governance returns the EW8 checkpoint tag; while that annotated tag is ABSENT from real Git
     the trusted reader observes its absence and this fails closed regardless of any caller
     input. Tests simulate a future approval by patching those
     two module-level functions — never through this signature.
@@ -766,7 +777,7 @@ def mint_live_provider_run_authorization(
     #     `_resolve_b1_r2_verification` resolves BOTH trust roots INTERNALLY — the
     #     governance-approved identity (`current_approved_b1_r2_checkpoint`) and the default
     #     real-Git reader (`_build_trusted_b1_r2_reader`) — with NO caller input. There is
-    #     no parameter to substitute either. Governance returns the EW7 checkpoint tag; while
+    #     no parameter to substitute either. Governance returns the EW8 checkpoint tag; while
     #     that annotated tag is ABSENT from real Git this fails closed BEFORE mint regardless
     #     of any caller.
     b1_r2_reasons = b1_r2_refusal_reasons(operator_grant, git_baseline_attestation)
@@ -898,6 +909,7 @@ __all__ = [
     "verify_b1_r2_checkpoint",
     "b1_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
+    "EXPECTED_EW8_CHECKPOINT_TAG",
     "EXPECTED_EW7_CHECKPOINT_TAG",
     "EXPECTED_EW6_CHECKPOINT_TAG",
     "EXPECTED_EW5_CHECKPOINT_TAG",

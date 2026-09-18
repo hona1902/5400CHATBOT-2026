@@ -4,8 +4,8 @@ EVALUATION-ONLY. Nothing in production imports this (``PRODUCTION_IMPORTS_EVAL =
 This module is a CONTROL-PLANE authorization gate — it is NOT the provider-backed B1
 execution. It freezes the B1 authorization envelope against the approved B0C-B
 implementation baseline and proves, from real Git, that a live provider-run authorization
-is NOT currently mintable (the current governance-approved checkpoint tag — the PN02D-B1-EW7
-index-observation-timing tag — does not yet exist).
+is NOT currently mintable (the current governance-approved checkpoint tag — the PN02D-B1-EW8
+scientific-result-observability tag — does not yet exist).
 
 It contacts NO provider and mints NO usable capability (design/task §1/§2/§22):
 
@@ -53,13 +53,18 @@ Temporal correctness (task §6/§7/§8; PN02D-B1-EW1 §38/§39). THREE DISTINCT 
     WAS the governance-approved identity through EW6. The EW7 bounded index-observation-timing
     change moves HEAD past ``0baacef``, so it no longer peels to the authorized HEAD and is
     NO LONGER approved.
-  * CURRENT — ``authmintlivepn02d.EXPECTED_EW7_CHECKPOINT_TAG``
-    (``graphrag-pn02db1ew7-index-observation-timing-approved``): the SUCCESSOR that
+  * HISTORICAL — ``authmintlivepn02d.EXPECTED_EW7_CHECKPOINT_TAG``
+    (``graphrag-pn02db1ew7-index-observation-timing-approved``): peels to ``ab90202`` and
+    WAS the governance-approved identity through EW7. The EW8 scientific-result-observability
+    change moves HEAD past ``ab90202``, so it no longer peels to the authorized HEAD and is
+    NO LONGER approved.
+  * CURRENT — ``authmintlivepn02d.EXPECTED_EW8_CHECKPOINT_TAG``
+    (``graphrag-pn02db1ew8-scientific-result-observability-approved``): the SUCCESSOR that
     governance now freezes as the approved identity. Its annotated Git tag does NOT exist yet.
 
 Because the current approved tag is absent, the trusted reader observes real Git, finds no
-such tag, and the live mint FAILS CLOSED. Only a FUTURE operator-approved EW7 checkpoint
-that creates the exact annotated tag (peeling to the approved EW7 HEAD) can make the Git
+such tag, and the live mint FAILS CLOSED. Only a FUTURE operator-approved EW8 checkpoint
+that creates the exact annotated tag (peeling to the approved EW8 HEAD) can make the Git
 checkpoint prerequisite satisfiable — and a satisfiable prerequisite is NOT operator run
 authorization and NOT provider execution.
 """
@@ -75,7 +80,7 @@ from open_notebook.integrations.graphrag.eval.authlivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     B1_ALLOWED_OPERATION_VALUES,
-    EXPECTED_EW7_CHECKPOINT_TAG,
+    EXPECTED_EW8_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
     EXPECTED_PROVIDER_CONFIG_ID,
     GitBaselineAttestation,
@@ -109,11 +114,11 @@ APPROVED_IMPLEMENTATION_CHECKPOINT_TAG = "graphrag-pn02db0cb-real-provider-wirin
 APPROVED_IMPLEMENTATION_CHECKPOINT_COMMIT = "5abeaaa09b7157232b1ac5a234c9d8c50b542585"
 
 #: The EXPECTED (governance-frozen) provider-authorization checkpoint tag. Single source of
-#: truth is ``authmintlivepn02d.EXPECTED_EW7_CHECKPOINT_TAG`` (the PN02D-B1-EW7 successor
-#: that supersedes the historical EW6 checkpoint — the bounded index-observation-timing
-#: change moves HEAD past ``0baacef``); re-exported here for the grant/manifest. The annotated
+#: truth is ``authmintlivepn02d.EXPECTED_EW8_CHECKPOINT_TAG`` (the PN02D-B1-EW8 successor
+#: that supersedes the historical EW7 checkpoint — the scientific-result-observability
+#: change moves HEAD past ``ab90202``); re-exported here for the grant/manifest. The annotated
 #: tag does not exist yet, so the live mint stays FAIL CLOSED.
-B1_R2_EXPECTED_CHECKPOINT_TAG = EXPECTED_EW7_CHECKPOINT_TAG
+B1_R2_EXPECTED_CHECKPOINT_TAG = EXPECTED_EW8_CHECKPOINT_TAG
 
 #: A NEW, locally-generated run identity for the FUTURE B1 attempt (task §10). The prior
 #: B1 run_id ``pn02db1-daf6b760-7d68-4674-9222-ac9f962ef6c4`` is RETIRED and NOT reused.
@@ -244,7 +249,7 @@ def b1_r2_authorization_manifest(
     checkpoint tag (B1EW3-R1-M1): it is derived from the canonical trusted Git reader — the
     SAME authority ``b1_r2_preflight`` uses — never a hardcoded constant. It reports the real
     current Git state (State A: successor tag absent → ``False``; State B: the exact tag
-    present → ``True``), so it stays truthful across the EW7 checkpoint lifecycle instead of
+    present → ``True``), so it stays truthful across the EW8 checkpoint lifecycle instead of
     flipping to a lie once the annotated tag is created. It is content-safe METADATA only:
     existence is an observation, NOT authorization — a ``True`` here does NOT authorize a
     provider run (the manifest's ``live_provider_authorization_minted`` /
@@ -340,7 +345,7 @@ def b1_r2_preflight(
 ) -> B1R2PreflightReport:
     """Provider-free control-plane preflight (task §8/§19). Contacts NO provider.
 
-    Observes real Git for the current EXPECTED checkpoint tag (the PN02D-B1-EW7
+    Observes real Git for the current EXPECTED checkpoint tag (the PN02D-B1-EW8
     ``B1_R2_EXPECTED_CHECKPOINT_TAG``) via the trusted reader and proves the live
     authorization is NOT currently mintable (that tag does not exist). It does NOT
     mint a capability. ``git_runner`` is the git boundary (real by default; injectable so
