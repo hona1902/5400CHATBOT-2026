@@ -33,6 +33,8 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Protocol,
+    Sequence,
     Tuple,
 )
 
@@ -58,6 +60,7 @@ from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
 from open_notebook.integrations.graphrag.eval.datasetpn02 import (
     NOTEBOOK_IDS,
     FixturePN02,
+    QueryPN02,
     load_fixture,
     membership_removal_scenario,
     verify_fixture_hash,
@@ -107,6 +110,7 @@ from open_notebook.integrations.graphrag.eval.routelivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.schemaspn02 import (
     GDEvidenceResult,
+    QAAnswerResult,
     VectorEvidenceResult,
 )
 from open_notebook.integrations.graphrag.eval.vectorlivepn02d import (
@@ -120,6 +124,28 @@ EXPECTED_FIXTURE_HASH = (
 )
 
 CleanupFn = Callable[[], Awaitable[Mapping[str, object]]]
+
+
+class QAStageSeam(Protocol):
+    """OPTIONAL Stage-2 QA seam (PN02D-B2, operator Option A — additive).
+
+    Absent (``B1DriverDeps.qa_stage_seam is None``) → B1 is byte-identical to the
+    EW8-approved path: the evaluator receives ``qa_results=None`` and 0 final-answer
+    calls occur. Present (a B2 run) → the seam receives the ALREADY-computed
+    notebook-scoped baseline GD/vector evidence and returns the ``QAAnswerResult``
+    sequence the EXISTING ``evaluatepn02`` evaluator consumes. The seam produces
+    answers only; it computes NO QA verdict/metrics and recomputes NO leakage gate
+    (the frozen evaluator remains the sole scientific decision path).
+    """
+
+    async def __call__(
+        self,
+        *,
+        fx: FixturePN02,
+        ordered_queries: Sequence[QueryPN02],
+        vector_results: Mapping[str, VectorEvidenceResult],
+        gd_results: Mapping[str, GDEvidenceResult],
+    ) -> Sequence[QAAnswerResult]: ...
 
 
 @dataclass
@@ -136,6 +162,9 @@ class B1DriverDeps:
     artifact_writer: Optional[Callable[[dict], None]] = None
     #: optional owned-resource cleanup (idempotent). None -> a trivial zero report.
     cleanup_fn: Optional[CleanupFn] = None
+    #: OPTIONAL Stage-2 QA seam (PN02D-B2 Option A). None → B1 behaviour is
+    #: byte-identical (qa_results=None, 0 final-answer calls). Never set on a B1 run.
+    qa_stage_seam: Optional[QAStageSeam] = None
 
 
 @dataclass
@@ -378,6 +407,20 @@ class B1OfflineDriver:
         )
         removal_outcome = await removal_exec.run(scenario, members_after=members_after)
 
+        # -- 9b) OPTIONAL Stage-2 QA seam (PN02D-B2 Option A, additive). ----------
+        # When no QA seam is injected this is EXACTLY the B1 path (qa_results=None,
+        # design §43 — B1 excludes QA). A B2 run injects a seam that consumes the
+        # ALREADY-computed baseline GD/vector evidence and returns QAAnswerResult
+        # values for the SAME frozen evaluator. Membership-removal adds 0 QA calls.
+        qa_results: Optional[Sequence[QAAnswerResult]] = None
+        if self._deps.qa_stage_seam is not None:
+            qa_results = await self._deps.qa_stage_seam(
+                fx=self._fx,
+                ordered_queries=self._ordered_queries(),
+                vector_results=vector_results,
+                gd_results=gd_results,
+            )
+
         # -- 10) normalize -> frozen PN02B evaluator (design §42). ----------------
         evaluation = run_offline_evaluation(
             self._fx,
@@ -387,7 +430,7 @@ class B1OfflineDriver:
             gd_results=gd_results,
             removal_after_removed_nb=removal_outcome.removed_after,
             removal_after_retained_nb=removal_outcome.retained_after,
-            qa_results=None,  # B1 excludes QA (design §43).
+            qa_results=qa_results,  # None on a B1 run (design §43); B2 supplies answers.
         )
 
         report = self._build_report(
@@ -450,6 +493,14 @@ class B1OfflineDriver:
             manifest=manifest,
             stage1=evaluation.stage1 if evaluation else None,
             retrieval=evaluation.retrieval if (evaluation and isolation) else None,
+            # PN02D-B2 (PN02DB2-R1-H1): forward the EXISTING evaluator's QA outputs so the
+            # canonical report emits report["qa"]. build_report only emits it when all three
+            # are non-None, so B1 (qa_results=None → qa_baseline=None) is byte-identical (no
+            # report["qa"]); a B2 run (evaluated QA) gets the authoritative verdict + arms.
+            # This is pure plumbing — the driver recomputes NO QA verdict/metrics/leakage.
+            qa_baseline=evaluation.qa_baseline if evaluation else None,
+            qa_graph_arms=evaluation.qa_graph_arms if evaluation else None,
+            qa_decision_result=evaluation.qa if evaluation else None,
             multihop=evaluation.multihop if (evaluation and isolation) else None,
             removal=evaluation.removal if evaluation else None,
             scientific=evaluation.scientific if evaluation else None,
@@ -674,6 +725,7 @@ async def run_offline_b1_simulation(
 __all__ = [
     "EXPECTED_FIXTURE_HASH",
     "CleanupFn",
+    "QAStageSeam",
     "B1DriverDeps",
     "B1RunOutcome",
     "B1OfflineDriver",

@@ -24,21 +24,26 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from open_notebook.integrations.graphrag.eval.authlivepn02d import (
     frozen_provider_config_id,
 )
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     B1_ALLOWED_OPERATION_VALUES,
+    B2_ALLOWED_OPERATION_VALUES,
     EXPECTED_FIXTURE_HASH,
     GitBaselineAttestation,
     OperatorRunGrant,
     attest_approved_clean_baseline,
     b1_r2_refusal_reasons,
+    b2_r2_refusal_reasons,
     frozen_b1_operator_grant_template,
 )
-from open_notebook.integrations.graphrag.eval.budgetlivepn02d import b1_caps_dict
+from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
+    b1_caps_dict,
+    b2_caps_dict,
+)
 from open_notebook.integrations.graphrag.eval.datasetpn02 import verify_fixture_hash
 from open_notebook.integrations.graphrag.eval.driver_live_pn02d import plan_live_b1
 from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
@@ -201,6 +206,9 @@ def validate_live_run_inputs(
     grant: OperatorRunGrant,
     git_baseline: GitBaselineAttestation,
     observed_fixture_hash: str,
+    refusal_fn: Callable[[object, object], List[str]] = b1_r2_refusal_reasons,
+    allowlist: "FrozenSet[str]" = B1_ALLOWED_OPERATION_VALUES,
+    expected_caps_dict: Callable[[], Dict[str, int]] = b1_caps_dict,
 ) -> List[str]:
     """Pre-binding validation of the live-run inputs (mirrors the mint, no minting).
 
@@ -239,14 +247,14 @@ def validate_live_run_inputs(
     )
     # B0CB-RR2-M1/RR3-H1/RR4-H1: the approved B1-R2 checkpoint is trust-observed in Git at
     # the authorized HEAD via the mint-owned resolver (no CLI-controllable trust root).
-    reasons.extend(b1_r2_refusal_reasons(grant, git_baseline))
+    reasons.extend(refusal_fn(grant, git_baseline))
     if grant.provider_config_fingerprint != frozen_provider_config_id():
         reasons.append("provider_config_fingerprint_mismatch")
     if grant.real_internal_data_allowed or not grant.synthetic_only:
         reasons.append("boundary_b_violation")
-    if frozenset(grant.operation_allowlist) != B1_ALLOWED_OPERATION_VALUES:
+    if frozenset(grant.operation_allowlist) != allowlist:
         reasons.append("operation_allowlist_mismatch")
-    if dict(grant.workload_caps) != b1_caps_dict():
+    if dict(grant.workload_caps) != expected_caps_dict():
         reasons.append("workload_caps_mismatch")
     return reasons
 
@@ -312,6 +320,85 @@ def _project_scientific_result(report: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def _project_b2_scientific_result(report: Dict[str, object]) -> Dict[str, object]:
+    """PN02D-B2 content-safe QA projection. A pure PROJECTION of the fields the EXISTING
+    ``evaluatepn02`` evaluator already computed into ``outcome.report`` — it recomputes NO
+    Q0-Q3 verdict, NO QAArmMetrics, NO leakage gate, and invents NO synthetic overall PASS.
+
+    Three explicit layers (kept separate, §11): TECHNICAL_RESULT is the payload's technical
+    status (set by the caller, not here); ISOLATION_HARD_GATE is a re-label of the evaluator's
+    ``PER_NOTEBOOK_ISOLATION_EVIDENCED`` verdict (PASS/FAIL/NOT_EVALUATED — not a recomputation);
+    QA_VALUE_VERDICT is the evaluator's ``report["qa"]["verdict"]``. Also surfaces the per-arm
+    QAArmMetrics (P1/P2/P3 + hard-safety S1/S2/S3 + extras) verbatim from the report and the
+    AUTHORITATIVE B2 final-answer spend/cap from ``report["b2_final_answer"]`` (the B2QAStage
+    budget, not the B1 ledger). Content-safe: ids/labels/counts/verdicts only — NEVER answer
+    text, question text, context, source snippets, provider body, or secret.
+    """
+    base = _project_scientific_result(report)
+    r = report if isinstance(report, dict) else {}
+    raw_qa = r.get("qa")
+    qa: Dict[str, object] = raw_qa if isinstance(raw_qa, dict) else {}
+    isolation = base.get("isolation_evidenced")
+    if isolation == "YES":
+        gate = "PASS"
+    elif isolation == "NO":
+        gate = "FAIL"
+    else:
+        gate = "NOT_EVALUATED"
+    # AUTHORITATIVE B2 final-answer spend (PN02DB2-R1-H1): the B2 final-answer calls are
+    # reserved in the B2QAStage's OWN budget (cap 72), NOT the B1 orchestrator workload
+    # ledger (which keeps FINAL_ANSWER=0). ``run_live_b2_execution`` attaches the stage's
+    # read-only spend/cap as report["b2_final_answer"]; cap (72) and spent (actual) are kept
+    # distinct so a partial run reports its real spend, not the planned 72.
+    raw_fa = r.get("b2_final_answer")
+    b2_fa: Dict[str, object] = raw_fa if isinstance(raw_fa, dict) else {}
+    base.update(
+        {
+            "isolation_hard_gate": gate,
+            "qa_value_verdict": qa.get("verdict"),
+            "qa_decision_rule": qa.get("rule"),
+            "qa_positive_arms": qa.get("positive_arms"),
+            "qa_arms": qa.get("arms"),
+            # final_answer_calls == COMPLETED answers (PN02DB2-RR2-M1): a partial/failing run
+            # reports the true completed count, NOT the reserved/planned 72. reserved_attempts
+            # is surfaced separately; cap (72) stays distinct from both.
+            "final_answer_calls": b2_fa.get("completed_answers"),
+            "final_answer_completed_answers": b2_fa.get("completed_answers"),
+            "final_answer_reserved_attempts": b2_fa.get("reserved_attempts"),
+            "final_answer_cap": b2_fa.get("cap"),
+        }
+    )
+    return base
+
+
+def _default_live_b2_runner(
+    *,
+    operator_grant: OperatorRunGrant,
+    git_baseline: GitBaselineAttestation,
+    observed_fixture_hash: str,
+    env: Dict[str, str],
+) -> B1RunOutcome:
+    """Run the real in-process two-boot B2 execution (lazy import; asyncio boundary).
+
+    Uses ``realseamsb2pn02d.run_live_b2_execution`` — the B2 mint (B2 checkpoint gate) + the
+    Stage-2 QA seam. It reuses the B1 two-boot/index/GD/vector orchestration unchanged.
+    """
+    import asyncio
+
+    from open_notebook.integrations.graphrag.eval.realseamsb2pn02d import (
+        run_live_b2_execution,
+    )
+
+    return asyncio.run(
+        run_live_b2_execution(
+            operator_grant=operator_grant,
+            git_baseline_attestation=git_baseline,
+            observed_fixture_hash=observed_fixture_hash,
+            env=env,
+        )
+    )
+
+
 def evaluate_execute_b1_live(
     *,
     manifest_path: Optional[str],
@@ -336,6 +423,35 @@ def evaluate_execute_b1_live(
     )
 
 
+def evaluate_execute_b2_live(
+    *,
+    manifest_path: Optional[str],
+    explicit_authorize: bool,
+    env: Dict[str, str],
+) -> Tuple[int, Dict[str, object]]:
+    """PUBLIC production evaluator for ``execute-b2-live`` (PN02D-B2).
+
+    Reuses the shared composed evaluator with the fixed B2 profile: the B2 checkpoint gate
+    (``b2_r2_refusal_reasons`` → the B2 tag, ABSENT today → fail closed), B2 caps
+    (FINAL_ANSWER=72), the B2 allowlist (B1 + QA-V/QA-GD/QA-V+GD), the B2 live runner
+    (``run_live_b2_execution``), and the B2 content-safe projection. Its signature exposes NO
+    trust-root / profile / runner override — a caller cannot select the B1 profile or override
+    the trusted read. TODAY (B2 tag absent) it REFUSES with ``b1_r2_tag_not_observed_in_git``
+    before any provider binding or runtime boot; EW8 cannot authorize a B2 run.
+    """
+    return _evaluate_execute_b1_live_composed(
+        manifest_path=manifest_path,
+        explicit_authorize=explicit_authorize,
+        env=env,
+        live_runner=_default_live_b2_runner,
+        command="execute-b2-live",
+        refusal_fn=b2_r2_refusal_reasons,
+        allowlist=B2_ALLOWED_OPERATION_VALUES,
+        expected_caps_dict=b2_caps_dict,
+        projector=_project_b2_scientific_result,
+    )
+
+
 def _evaluate_execute_b1_live_composed(
     *,
     manifest_path: Optional[str],
@@ -344,6 +460,11 @@ def _evaluate_execute_b1_live_composed(
     git_baseline_reader: GitBaselineReader = read_git_baseline,
     fixture_hash_reader: Callable[[], Tuple[bool, str]] = verify_fixture_hash,
     live_runner: LiveRunner = _default_live_runner,
+    command: str = "execute-b1-live",
+    refusal_fn: Callable[[object, object], List[str]] = b1_r2_refusal_reasons,
+    allowlist: FrozenSet[str] = B1_ALLOWED_OPERATION_VALUES,
+    expected_caps_dict: Callable[[], Dict[str, int]] = b1_caps_dict,
+    projector: Callable[[Dict[str, object]], Dict[str, object]] = _project_scientific_result,
 ) -> Tuple[int, Dict[str, object]]:
     """PRIVATE, NON-LIVE composition evaluator (PN02D-B1-EW2 §17). NOT a production entrypoint.
 
@@ -360,7 +481,7 @@ def _evaluate_execute_b1_live_composed(
     ``provider_secret_missing`` and never boots. This function reads no secret VALUE.
     """
     payload: Dict[str, object] = {
-        "command": "execute-b1-live",
+        "command": command,
         "provider_traffic": 0,
         "runtime_booted": False,
         "provider_bound": False,
@@ -394,6 +515,9 @@ def _evaluate_execute_b1_live_composed(
         grant=grant,
         git_baseline=git_baseline,
         observed_fixture_hash=observed_fixture_hash,
+        refusal_fn=refusal_fn,
+        allowlist=allowlist,
+        expected_caps_dict=expected_caps_dict,
     )
     payload["run_id"] = grant.run_id
     payload["operator_grant_id"] = grant.grant_id
@@ -470,7 +594,7 @@ def _evaluate_execute_b1_live_composed(
     # content-safe report fields + the workload-ledger spent counts — the CLI never recomputes
     # the leakage/retrieval/multihop/isolation verdicts (the evaluator stays authoritative), and
     # ``state="COMPLETE"``/``technical_status`` stay TECHNICAL-only (never a scientific PASS).
-    payload["scientific_result"] = _project_scientific_result(outcome.report)
+    payload["scientific_result"] = projector(outcome.report)
     return (0 if outcome.state == "COMPLETE" else 4), payload
 
 
@@ -478,6 +602,18 @@ def cmd_execute_b1_live(args: argparse.Namespace) -> int:
     import os
 
     exit_code, payload = evaluate_execute_b1_live(
+        manifest_path=getattr(args, "manifest", None),
+        explicit_authorize=bool(getattr(args, "authorize", False)),
+        env=dict(os.environ),
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return exit_code
+
+
+def cmd_execute_b2_live(args: argparse.Namespace) -> int:
+    import os
+
+    exit_code, payload = evaluate_execute_b2_live(
         manifest_path=getattr(args, "manifest", None),
         explicit_authorize=bool(getattr(args, "authorize", False)),
         env=dict(os.environ),
@@ -517,6 +653,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="operator intent flag (still requires the governance env token; refused otherwise)",
     )
     e.set_defaults(func=cmd_execute_b1_live)
+
+    b2 = sub.add_parser(
+        "execute-b2-live",
+        help=(
+            "validate a live B2 QA run manifest and (fail-closed) refuse until the B2 "
+            "checkpoint tag exists + governance is open"
+        ),
+    )
+    b2.add_argument("--manifest", help="path to the operator run-grant manifest JSON")
+    b2.add_argument(
+        "--authorize",
+        action="store_true",
+        help="operator intent flag (still requires the governance env token; refused otherwise)",
+    )
+    b2.set_defaults(func=cmd_execute_b2_live)
 
     d = sub.add_parser(
         "dry-run-b1-live-plan",

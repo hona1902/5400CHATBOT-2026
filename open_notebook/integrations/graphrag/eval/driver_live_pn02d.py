@@ -63,6 +63,7 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import (
     B1DriverDeps,
     B1OfflineDriver,
     B1RunOutcome,
+    QAStageSeam,
 )
 from open_notebook.integrations.graphrag.eval.gdadapterpn02d import (
     build_real_gd_backend_factory,
@@ -70,6 +71,7 @@ from open_notebook.integrations.graphrag.eval.gdadapterpn02d import (
 from open_notebook.integrations.graphrag.eval.indexadapterpn02d import (
     build_real_index_client_factory,
 )
+from open_notebook.integrations.graphrag.eval.live_seam_pn02 import FinalAnswerSeam
 from open_notebook.integrations.graphrag.eval.provbindpn02d import (
     MaterializedProviderBinding,
     materialize_provider_binding,
@@ -147,6 +149,10 @@ class LiveB1Seams:
     lightrag_api_key: Optional[str] = None
     present_secret_envs: Optional[FrozenSet[str]] = None
     corpus_teardown: Optional[Callable[[], Awaitable[None]]] = None
+    #: OPTIONAL ON-owned final-answer seam (PN02D-B2 Option A). None on a B1 run →
+    #: no QA stage is wired and B1 stays byte-identical. A B2 run supplies it and the
+    #: B2 QA stage (built by the B2 seams builder) consumes it.
+    final_answer_seam: Optional[FinalAnswerSeam] = None
 
 
 def build_live_b1_driver_deps(
@@ -155,8 +161,14 @@ def build_live_b1_driver_deps(
     corpus: ProvisionedCorpus,
     seams: LiveB1Seams,
     cleanup_fn: Optional[Callable[[], Awaitable[Mapping[str, object]]]] = None,
+    qa_stage_seam: Optional[QAStageSeam] = None,
 ) -> B1DriverDeps:
-    """Build the ``B1DriverDeps`` (real factories) for the reused orchestrator (§39)."""
+    """Build the ``B1DriverDeps`` (real factories) for the reused orchestrator (§39).
+
+    ``qa_stage_seam`` is the OPTIONAL PN02D-B2 Stage-2 QA seam (Option A, additive).
+    None (a B1 run) → the reused orchestrator receives ``qa_results=None`` and is
+    byte-identical to the EW8-approved B1 path.
+    """
     require_live_provider_run_authorization(live_auth)
     index_factory = build_real_index_client_factory(
         live_auth=live_auth,
@@ -188,15 +200,32 @@ def build_live_b1_driver_deps(
         delete_backend_factory=delete_factory,
         present_secret_envs=seams.present_secret_envs,
         cleanup_fn=cleanup_fn,
+        qa_stage_seam=qa_stage_seam,
     )
 
 
 class RealB1Driver:
     """Thin live wrapper that reuses ``B1OfflineDriver`` with REAL injected deps (§15)."""
 
-    def __init__(self, fx: FixturePN02, seams: LiveB1Seams) -> None:
+    def __init__(
+        self,
+        fx: FixturePN02,
+        seams: LiveB1Seams,
+        *,
+        qa_stage_seam: Optional[QAStageSeam] = None,
+        mint_fn: Callable[..., LiveProviderRunAuthorization] = (
+            mint_live_provider_run_authorization
+        ),
+    ) -> None:
         self._fx = fx
         self._seams = seams
+        # OPTIONAL PN02D-B2 Stage-2 QA seam (Option A). None → byte-identical B1.
+        self._qa_stage_seam = qa_stage_seam
+        # The LIVE mint entry. Defaults to the B1 mint (EW8 gate + B1 caps/allowlist) →
+        # byte-identical B1. A B2 run injects ``mint_live_b2_provider_run_authorization``
+        # (B2 checkpoint gate + b2 caps + b2 allowlist). Both resolve their trust roots
+        # INTERNALLY; this is a mint SELECTOR, not a trust-root override.
+        self._mint_fn = mint_fn
         self._cleaned = False
         rt_kwargs: Dict[str, object] = dict(
             fx=fx,
@@ -244,7 +273,7 @@ class RealB1Driver:
             #    + mint-owned trusted B1-R2 read RR3-H1/RR4-H1). NO trust-root parameter is
             #    passed: the mint resolves the governance identity + real Git reader
             #    internally and fails closed while the EW4 successor tag is ABSENT from Git.
-            live_auth = mint_live_provider_run_authorization(
+            live_auth = self._mint_fn(
                 operator_grant=operator_grant,
                 real_preflight_auth=preflight_auth,
                 git_baseline_attestation=git_baseline_attestation,
@@ -286,6 +315,7 @@ class RealB1Driver:
                 corpus=corpus,
                 seams=self._seams,
                 cleanup_fn=self._cleanup,
+                qa_stage_seam=self._qa_stage_seam,
             )
             driver = B1OfflineDriver(
                 self._fx,

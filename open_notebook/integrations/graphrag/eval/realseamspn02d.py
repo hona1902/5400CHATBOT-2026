@@ -556,6 +556,7 @@ async def _run_live_b1_execution_composed(
     isolation: Optional[IsolationFactory] = None,
     model_seed: Optional[ModelSeedFactory] = None,
     builder_kwargs: Optional[Mapping[str, object]] = None,
+    driver_kwargs: Optional[Mapping[str, object]] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> B1RunOutcome:
     """PRIVATE, NON-LIVE composition helper (PN02D-B1-EW2 §29). NOT a production entrypoint.
@@ -596,10 +597,13 @@ async def _run_live_b1_execution_composed(
     # id; everything scientific (seams builder run_id, the operator grant, the live authorization
     # the driver mints, and all results) keeps the FROZEN operator_grant.run_id unchanged.
     isolation_runtime_id = _derive_isolation_runtime_id(operator_grant.run_id)
+    # ``driver_kwargs`` is the ADDITIVE PN02D-B2 seam: {} → byte-identical B1 (no qa stage,
+    # default B1 mint). A B2 run passes {qa_stage_seam=B2QAStage, mint_fn=mint_live_b2_...}.
+    driver_extra = dict(driver_kwargs or {})
     async with isolation_factory(isolation_runtime_id):
         async with seed_factory():
             seams = seams_builder(fx, run_id=operator_grant.run_id, env=env, **extra)
-            driver = RealB1Driver(fx, seams)
+            driver = RealB1Driver(fx, seams, **driver_extra)  # type: ignore[arg-type]
             return await driver.run(
                 operator_grant=operator_grant,
                 git_baseline_attestation=git_baseline_attestation,

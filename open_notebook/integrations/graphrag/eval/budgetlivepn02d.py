@@ -76,6 +76,24 @@ def b1_caps_dict() -> Dict[str, int]:
     return {k.value: v for k, v in b1_caps().items()}
 
 
+def b2_caps() -> Dict[BudgetClass, int]:
+    """Frozen B2 caps (PN02D-B2): identical to B1 EXCEPT FINAL_ANSWER = 72.
+
+    The Stage-2 QA arms consume ``workloadpn02.MAX_FINAL_ANSWER_CALLS = 72``
+    (24 queries × 3 arms, PN02A §26). CLIENT_QUERY and JUDGE_MODEL stay HARD 0
+    (deterministic grading, no LLM judge). All non-final-answer caps are the frozen
+    B1 values (fresh isolated index build reuses the same index/GD/vector envelope).
+    """
+    caps = b1_caps()
+    caps[BudgetClass.FINAL_ANSWER] = workloadpn02.MAX_FINAL_ANSWER_CALLS
+    return caps
+
+
+def b2_caps_dict() -> Dict[str, int]:
+    """Content-safe B2 caps view (for the B2 run manifest / provider-run capability)."""
+    return {k.value: v for k, v in b2_caps().items()}
+
+
 @dataclass
 class StatefulBudgetGuard:
     """A stateful, fail-closed per-class counter that reserves BEFORE each op.
@@ -86,9 +104,16 @@ class StatefulBudgetGuard:
     invoked (design §23). ``spent`` exposes the running counts for the manifest.
     """
 
-    def __init__(self, ledger: WorkloadLedger | None = None) -> None:
+    def __init__(
+        self,
+        ledger: WorkloadLedger | None = None,
+        *,
+        caps: Dict[BudgetClass, int] | None = None,
+    ) -> None:
         self._ledger = ledger or frozen_ledger()
-        self._caps = b1_caps()
+        # Default caps are the frozen B1 caps (FINAL_ANSWER=0). A B2 run passes
+        # ``caps=b2_caps()`` (FINAL_ANSWER=72); B1 construction is unchanged.
+        self._caps = caps if caps is not None else b1_caps()
         self._counts: Dict[BudgetClass, int] = {c: 0 for c in BudgetClass}
 
     def cap(self, cls: BudgetClass) -> int:
@@ -125,5 +150,7 @@ __all__ = [
     "WorkloadCapExceeded",
     "b1_caps",
     "b1_caps_dict",
+    "b2_caps",
+    "b2_caps_dict",
     "StatefulBudgetGuard",
 ]

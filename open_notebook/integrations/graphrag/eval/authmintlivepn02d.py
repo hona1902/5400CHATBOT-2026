@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import (
     Callable,
+    Dict,
     FrozenSet,
     List,
     Mapping,
@@ -48,12 +49,16 @@ from open_notebook.integrations.graphrag.eval.attestpn02d import (
 from open_notebook.integrations.graphrag.eval.authlivepn02d import (
     B1_ALLOWED_OPERATION_CLASSES,
     PN02ProviderRunAuthorization,
+    ProviderOperationClass,
     RunIdConsistencyError,
     assert_run_ids_consistent,
     frozen_provider_config_id,
     mint_provider_run_authorization,
 )
-from open_notebook.integrations.graphrag.eval.budgetlivepn02d import b1_caps_dict
+from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
+    b1_caps_dict,
+    b2_caps_dict,
+)
 
 #: The frozen PN02 fixture hash (design §5). Re-verified live at mint.
 EXPECTED_FIXTURE_HASH = (
@@ -70,6 +75,20 @@ _SIMULATION_BASELINE_SENTINELS = frozenset({"", "SIMULATION", "OFFLINE", "DRYRUN
 #: The frozen B1 operation allowlist as string values (design §13/§44).
 B1_ALLOWED_OPERATION_VALUES: FrozenSet[str] = frozenset(
     c.value for c in B1_ALLOWED_OPERATION_CLASSES
+)
+
+#: The frozen PN02D-B2 operation allowlist as string values. It is the B1 allowlist PLUS the
+#: three Open-Notebook-owned QA final-answer arms (PN02A §10a) — and NOTHING else. The
+#: LightRAG-owned final answer (``LIGHTRAG_FINAL_ANSWER``), ``CLIENT_QUERY``, ``JUDGE_MODEL``
+#: and any production op stay FORBIDDEN in B2 exactly as in B1 (deterministic grading, no
+#: judge; ON owns the answer). A B1 run NEVER carries these QA ops (B1 excludes QA, design
+#: §43); the B1 allowlist above is unchanged.
+B2_ALLOWED_OPERATION_VALUES: FrozenSet[str] = B1_ALLOWED_OPERATION_VALUES | frozenset(
+    {
+        ProviderOperationClass.QA_V.value,
+        ProviderOperationClass.QA_GD.value,
+        ProviderOperationClass.QA_V_GD.value,
+    }
 )
 
 
@@ -338,6 +357,26 @@ EXPECTED_EW8_CHECKPOINT_TAG = "graphrag-pn02db1ew8-scientific-result-observabili
 #: HISTORICAL identities only and can never substitute (exact-identity + trusted-reader §35).
 _APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW8_CHECKPOINT_TAG
 
+#: The EXACT operator/governance-approved checkpoint identity for a PN02D-**B2** live QA run.
+#: This is a SEPARATE authorization identity from B1 (never a shared "current checkpoint" that
+#: could silently collapse B2 back onto EW8/B1). It is a control-plane declaration of the
+#: future B2 successor tag — NOT the tag itself. The annotated Git tag of this name does not
+#: exist yet; the trusted reader observes real Git and, finding no such tag, a B2 mint FAILS
+#: CLOSED (``b1_r2_tag_not_observed_in_git``). B2 becomes mintable only after a future
+#: operator-approved B2 checkpoint creates this EXACT annotated tag peeling to the approved B2
+#: HEAD — and EW8 (which peels to today's HEAD) can NEVER satisfy it, because the B2 gate
+#: verifies THIS identity, not EW8. Freezing the EXPECTED identity before the tag exists
+#: removes circularity (the same pattern used for B1-R2 → PF1 → EW1 … → EW8).
+EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-approved"
+
+#: Governance state for the B2 provider-authorization checkpoint. FROZEN to the successor
+#: ``EXPECTED_B2_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the B2
+#: mint — never a caller string / EW8 fallback / Git-tag heuristic). Non-None, but a B2 live
+#: authorization is NOT mintable until the trusted reader observes that exact tag in real Git
+#: (which does not exist yet): the B2 mint fails closed. B1 identities (EW8 and all historical
+#: EWn/PF1/B1-R2) can never substitute for it (exact-identity + trusted-reader).
+_APPROVED_B2_CHECKPOINT: Optional[str] = EXPECTED_B2_CHECKPOINT_TAG
+
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
 
@@ -560,6 +599,81 @@ def b1_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[
     )
 
 
+def current_approved_b2_checkpoint() -> Optional[str]:
+    """The operator/governance-approved checkpoint identity for a PN02D-**B2** live QA run.
+
+    Returns the frozen ``EXPECTED_B2_CHECKPOINT_TAG`` — a SEPARATE identity from
+    ``current_approved_b1_r2_checkpoint()`` (which stays EW8). Non-None, but a B2 live
+    authorization is NOT mintable until the trusted reader observes that EXACT annotated tag
+    in real Git (which does not exist yet): the B2 mint fails closed with
+    ``b1_r2_tag_not_observed_in_git``. The value is NEVER derived from a caller string, an EW8
+    fallback, or a Git-tag naming heuristic. EW8 and all historical B1 identities can never
+    substitute. Tests simulate a future B2 approval by patching THIS function (and the trusted
+    reader factory) — never by passing trust roots.
+    """
+    return _APPROVED_B2_CHECKPOINT
+
+
+def b2_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[str]:
+    """Resolve the **B2** trust roots INTERNALLY and return refusal reasons (empty = OK).
+
+    Identical trust machinery to :func:`b1_r2_refusal_reasons` — the SAME hardened
+    :func:`verify_b1_r2_checkpoint` verifier and the SAME internal
+    ``_build_trusted_b1_r2_reader`` (no duplicated verifier, no weakened checks) — but the
+    approved-EXPECTED identity is ``current_approved_b2_checkpoint()`` (the B2 tag), NOT the
+    EW8/B1 identity. Both trust roots are resolved from module-level functions with NO caller
+    input (B0CB-RR4-H1): this function takes NO reader/identity parameter. While the B2 tag is
+    ABSENT from real Git it fails closed; EW8 peeling to today's HEAD cannot satisfy it because
+    the grant's ``b1_r2_checkpoint`` must EXACTLY equal the B2 identity and the reader must
+    observe THAT tag at HEAD.
+    """
+    approved_expected = current_approved_b2_checkpoint()
+    reader = _build_trusted_b1_r2_reader()
+    return verify_b1_r2_checkpoint(
+        reader=reader,
+        operator_grant=operator_grant,
+        approved_expected_checkpoint=approved_expected,
+        git_baseline=git_baseline,
+    )
+
+
+@dataclass(frozen=True)
+class _AuthProfile:
+    """INTERNAL, module-private mint profile (PN02D-B2). It selects the phase-specific
+    checkpoint gate, workload caps, and operation allowlist for a live mint.
+
+    It is chosen by WHICH public mint entry is called (B1 vs B2) — it is NEVER a public
+    parameter and can NEVER be supplied by a CLI/live caller (§22/§23/§24). Its ``refusal_fn``
+    resolves BOTH trust roots internally (governance identity + trusted reader); a profile
+    cannot inject an arbitrary reader, an "accept anything" gate, or a caller-named checkpoint.
+    """
+
+    name: str
+    refusal_fn: Callable[[object, object], List[str]]
+    expected_caps_dict: Callable[[], Dict[str, int]]
+    allowlist: FrozenSet[str]
+
+
+#: The DEFAULT B1 profile — byte-identical to the pre-B2 mint (EW8 gate, B1 caps FINAL_ANSWER=0,
+#: B1 allowlist). The public ``mint_live_provider_run_authorization`` uses ONLY this profile.
+_B1_AUTH_PROFILE = _AuthProfile(
+    name="B1",
+    refusal_fn=b1_r2_refusal_reasons,
+    expected_caps_dict=b1_caps_dict,
+    allowlist=B1_ALLOWED_OPERATION_VALUES,
+)
+
+#: The B2 profile — B2 checkpoint gate (fails closed until the B2 tag exists), B2 caps
+#: (FINAL_ANSWER=72), B2 allowlist (B1 + QA-V/QA-GD/QA-V+GD). Used ONLY by the public
+#: ``mint_live_b2_provider_run_authorization`` entry.
+_B2_AUTH_PROFILE = _AuthProfile(
+    name="B2",
+    refusal_fn=b2_r2_refusal_reasons,
+    expected_caps_dict=b2_caps_dict,
+    allowlist=B2_ALLOWED_OPERATION_VALUES,
+)
+
+
 # --------------------------------------------------------------------------- #
 # Operator one-run grant (design §7/§13) — operator INPUT, content-safe
 # --------------------------------------------------------------------------- #
@@ -675,15 +789,23 @@ class LiveProviderRunAuthorization:
         }
 
 
-def mint_live_provider_run_authorization(
+def _mint_live_provider_run_authorization_with_profile(
     *,
+    profile: _AuthProfile,
     operator_grant: OperatorRunGrant,
     real_preflight_auth: Optional[RealLightRAGPreflightAuthorization],
     git_baseline_attestation: object,
     observed_fixture_hash: str,
     expected_fixture_hash: str = EXPECTED_FIXTURE_HASH,
 ) -> LiveProviderRunAuthorization:
-    """Mint the LIVE provider-run capability — the ONLY real construction path (§7/§13).
+    """INTERNAL profile-driven mint core (PN02D-B2). ``profile`` is module-private and is set
+    ONLY by the public B1/B2 entry wrappers below — never by a CLI/live caller (§22/§23/§24).
+    All phase-invariant gates (real-preflight, grant type, simulation-baseline, run-id,
+    fixture-hash chain, clean git-baseline attestation, provider fingerprint, Boundary B) are
+    identical for B1 and B2; only the checkpoint-identity gate, the workload caps, and the
+    operation allowlist come from ``profile`` (B1 defaults = the pre-B2 behavior).
+
+    Mint the LIVE provider-run capability — the ONLY real construction path (§7/§13).
 
     Fails closed BEFORE any secret access or runtime start on: a missing/forged
     real-preflight capability (incl. one minted for another fixture — B0CB-H1), an
@@ -780,7 +902,7 @@ def mint_live_provider_run_authorization(
     #     no parameter to substitute either. Governance returns the EW8 checkpoint tag; while
     #     that annotated tag is ABSENT from real Git this fails closed BEFORE mint regardless
     #     of any caller.
-    b1_r2_reasons = b1_r2_refusal_reasons(operator_grant, git_baseline_attestation)
+    b1_r2_reasons = profile.refusal_fn(operator_grant, git_baseline_attestation)
     if b1_r2_reasons:
         raise B1R2CheckpointError(
             "B1-R2 checkpoint verification failed: " + ", ".join(b1_r2_reasons)
@@ -805,15 +927,16 @@ def mint_live_provider_run_authorization(
         raise LiveProviderRunAuthorizationError("synthetic_only must be True")
 
     # 9) operation allowlist == the frozen B1 allowlist (design §13/§44).
-    if frozenset(operator_grant.operation_allowlist) != B1_ALLOWED_OPERATION_VALUES:
+    if frozenset(operator_grant.operation_allowlist) != profile.allowlist:
         raise LiveProviderRunAuthorizationError(
-            "operator_grant.operation_allowlist does not match the frozen B1 allowlist"
+            "operator_grant.operation_allowlist does not match the frozen "
+            f"{profile.name} allowlist"
         )
 
     # 10) workload caps == the frozen B1 caps (design §13/§45).
-    if dict(operator_grant.workload_caps) != b1_caps_dict():
+    if dict(operator_grant.workload_caps) != profile.expected_caps_dict():
         raise LiveProviderRunAuthorizationError(
-            "operator_grant.workload_caps do not match the frozen B1 caps"
+            f"operator_grant.workload_caps do not match the frozen {profile.name} caps"
         )
 
     # Mint the underlying provider-run capability with a REAL git baseline (the frozen
@@ -840,6 +963,61 @@ def mint_live_provider_run_authorization(
         git_baseline_commit=operator_grant.approved_git_commit,
         git_baseline_tag=operator_grant.approved_git_tag,
         b1_r2_checkpoint=operator_grant.b1_r2_checkpoint,
+    )
+
+
+def mint_live_provider_run_authorization(
+    *,
+    operator_grant: OperatorRunGrant,
+    real_preflight_auth: Optional[RealLightRAGPreflightAuthorization],
+    git_baseline_attestation: object,
+    observed_fixture_hash: str,
+    expected_fixture_hash: str = EXPECTED_FIXTURE_HASH,
+) -> LiveProviderRunAuthorization:
+    """Mint a **B1** LIVE provider-run capability — the ONLY real B1 construction path.
+
+    Byte-identical to the pre-B2 behavior: it delegates to the internal profile-driven core
+    with the fixed private ``_B1_AUTH_PROFILE`` (EW8 checkpoint gate via
+    ``current_approved_b1_r2_checkpoint``, B1 caps with FINAL_ANSWER=0, B1 allowlist). The
+    public signature exposes NO profile / trust-root / checkpoint parameter — a caller cannot
+    select the B2 profile or override the trusted read (B0CB-RR4-H1; §22/§23).
+    """
+    return _mint_live_provider_run_authorization_with_profile(
+        profile=_B1_AUTH_PROFILE,
+        operator_grant=operator_grant,
+        real_preflight_auth=real_preflight_auth,
+        git_baseline_attestation=git_baseline_attestation,
+        observed_fixture_hash=observed_fixture_hash,
+        expected_fixture_hash=expected_fixture_hash,
+    )
+
+
+def mint_live_b2_provider_run_authorization(
+    *,
+    operator_grant: OperatorRunGrant,
+    real_preflight_auth: Optional[RealLightRAGPreflightAuthorization],
+    git_baseline_attestation: object,
+    observed_fixture_hash: str,
+    expected_fixture_hash: str = EXPECTED_FIXTURE_HASH,
+) -> LiveProviderRunAuthorization:
+    """Mint a **B2** LIVE provider-run capability — the ONLY real B2 construction path (PN02D-B2).
+
+    Same hardened core as B1 but with the fixed private ``_B2_AUTH_PROFILE``: the B2 checkpoint
+    gate (``current_approved_b2_checkpoint`` → ``EXPECTED_B2_CHECKPOINT_TAG``), B2 caps
+    (FINAL_ANSWER=72), and the B2 allowlist (B1 + QA-V/QA-GD/QA-V+GD). Because the B2 tag is
+    ABSENT from real Git, this FAILS CLOSED today (``b1_r2_tag_not_observed_in_git``); EW8
+    (which peels to today's HEAD) can NEVER authorize a B2 run because the gate verifies the B2
+    identity, not EW8. The public signature exposes NO profile / trust-root / checkpoint
+    parameter (§22/§23); a valid B2 tag alone still cannot mint without a matching operator
+    grant.
+    """
+    return _mint_live_provider_run_authorization_with_profile(
+        profile=_B2_AUTH_PROFILE,
+        operator_grant=operator_grant,
+        real_preflight_auth=real_preflight_auth,
+        git_baseline_attestation=git_baseline_attestation,
+        observed_fixture_hash=observed_fixture_hash,
+        expected_fixture_hash=expected_fixture_hash,
     )
 
 
@@ -892,10 +1070,46 @@ def frozen_b1_operator_grant_template(
     )
 
 
+def frozen_b2_operator_grant_template(
+    *,
+    run_id: str,
+    implementation_checkpoint_commit: str,
+    implementation_checkpoint_tag: str,
+    b1_r2_checkpoint: str,
+    approved_git_commit: str,
+    approved_git_tag: str,
+) -> OperatorRunGrant:
+    """Build a PN02D-**B2** OperatorRunGrant with every FROZEN field pre-filled.
+
+    Identical to :func:`frozen_b1_operator_grant_template` EXCEPT the two B2-distinct frozen
+    values: ``workload_caps=b2_caps_dict()`` (FINAL_ANSWER=72) and
+    ``operation_allowlist=B2_ALLOWED_OPERATION_VALUES`` (B1 + QA-V/QA-GD/QA-V+GD). The caller
+    still supplies the B2 checkpoint identity as ``b1_r2_checkpoint`` (the grant's single
+    checkpoint field); the B2 mint verifies it against ``current_approved_b2_checkpoint()``.
+    B1 grants (and the B1 template above) are UNCHANGED — a B1 grant never carries B2 caps or
+    the QA ops, so it can never authorize a B2 run.
+    """
+    return OperatorRunGrant(
+        run_id=run_id,
+        fixture_hash=EXPECTED_FIXTURE_HASH,
+        implementation_checkpoint_commit=implementation_checkpoint_commit,
+        implementation_checkpoint_tag=implementation_checkpoint_tag,
+        b1_r2_checkpoint=b1_r2_checkpoint,
+        provider_config_fingerprint=frozen_provider_config_id(),
+        workload_caps=b2_caps_dict(),
+        operation_allowlist=B2_ALLOWED_OPERATION_VALUES,
+        approved_git_commit=approved_git_commit,
+        approved_git_tag=approved_git_tag,
+        synthetic_only=True,
+        real_internal_data_allowed=False,
+    )
+
+
 __all__ = [
     "EXPECTED_FIXTURE_HASH",
     "EXPECTED_PROVIDER_CONFIG_ID",
     "B1_ALLOWED_OPERATION_VALUES",
+    "B2_ALLOWED_OPERATION_VALUES",
     "LiveProviderRunAuthorizationError",
     "LiveProviderRunNotAuthorized",
     "OperatorGrantError",
@@ -908,7 +1122,10 @@ __all__ = [
     "RealTrustedB1R2Reader",
     "verify_b1_r2_checkpoint",
     "b1_r2_refusal_reasons",
+    "b2_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
+    "current_approved_b2_checkpoint",
+    "EXPECTED_B2_CHECKPOINT_TAG",
     "EXPECTED_EW8_CHECKPOINT_TAG",
     "EXPECTED_EW7_CHECKPOINT_TAG",
     "EXPECTED_EW6_CHECKPOINT_TAG",
@@ -922,6 +1139,8 @@ __all__ = [
     "OperatorRunGrant",
     "LiveProviderRunAuthorization",
     "mint_live_provider_run_authorization",
+    "mint_live_b2_provider_run_authorization",
     "require_live_provider_run_authorization",
     "frozen_b1_operator_grant_template",
+    "frozen_b2_operator_grant_template",
 ]
