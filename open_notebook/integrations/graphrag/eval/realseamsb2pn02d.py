@@ -12,10 +12,12 @@ on top of the approved B1 machinery + the B2 mint-identity security boundary:
     (``authmintlivepn02d.mint_live_b2_provider_run_authorization``) via the additive
     ``driver_kwargs`` seam. When those are absent the B1 path is byte-identical.
 
-The B2 mint gates on ``current_approved_b2_checkpoint()`` (the future
-``graphrag-pn02db2-qa-live-wiring-approved`` tag). While that annotated tag is ABSENT from
-real Git, ``run_live_b2_execution`` FAILS CLOSED inside the driver's mint before any
-provider binding/boot — EW8 (which peels to today's HEAD) can never authorize a B2 run.
+The B2 mint gates on ``current_approved_b2_checkpoint()`` (the future SUCCESSOR
+``graphrag-pn02db2-qa-live-wiring-lifecycle-approved`` tag; the historical first-B2 tag
+``graphrag-pn02db2-qa-live-wiring-approved`` at commit ``41eb3f3`` is immutable/superseded).
+While that successor annotated tag is ABSENT from real Git, ``run_live_b2_execution`` FAILS
+CLOSED inside the driver's mint before any provider binding/boot — neither EW8 (which peels to
+a B1 HEAD) nor the historical first-B2 tag can ever authorize a B2 run.
 
 The ON final-answer transport is an injected ``completion_fn``: provider-free tests pass a
 fake; a live run builds the real one lazily from the repository provisioning abstraction

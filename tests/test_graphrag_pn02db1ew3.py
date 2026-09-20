@@ -300,26 +300,41 @@ def test_ew1_pf1_b1r2_ew2_cannot_substitute_in_historical_ew3_scenario():
 # --------------------------------------------------------------------------- #
 
 def test_ew3_successor_tag_git_state_is_lifecycle_valid():
-    # §28: real-Git checkpoint identity is lifecycle-aware from day one — never a permanent
-    # tag-absence assertion. STATE A (pre-checkpoint): EW3 tag absent → empty peel. STATE B
-    # (post-checkpoint): EXACT tag present, valid 40-hex peel == authorized HEAD.
+    # §28: lifecycle-aware across THREE states for the CURRENT approved identity (EW8) — never a
+    # permanent tag-absence OR tag-at-HEAD assumption. STATE A (pre-checkpoint): EW8 absent →
+    # empty peel. STATE 1 (checkpoint-current): EW8 present, valid 40-hex peel == authorized HEAD.
+    # STATE 2 (successor-head): EW8 present and peels to its immutable approved commit, but a later
+    # successor commit moved HEAD off it → HISTORICAL validity, NOT current-HEAD authorization
+    # (the B1 gate fails closed with the exact not-at-HEAD reason).
     from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
         EXPECTED_EW8_CHECKPOINT_TAG,
         RealTrustedB1R2Reader,
         current_approved_b1_r2_checkpoint,
+        verify_b1_r2_checkpoint,
     )
 
     approved = current_approved_b1_r2_checkpoint()
     assert approved == EXPECTED_EW8_CHECKPOINT_TAG
     obs = RealTrustedB1R2Reader().observe(approved)
     if not obs.observed_tag_exists:
-        assert obs.observed_tag_peel == ""
+        assert obs.observed_tag_peel == ""  # STATE A
     else:
         assert obs.checkpoint_tag == approved
         assert len(obs.observed_tag_peel) == 40 and all(
             c in "0123456789abcdef" for c in obs.observed_tag_peel
         )
-        assert obs.observed_tag_peel == obs.observed_head
+        if obs.observed_tag_peel == obs.observed_head:
+            pass  # STATE 1 — EW8 is the current authorized HEAD
+        else:
+            # STATE 2 — successor-head: valid historical checkpoint, NOT at HEAD → the current-HEAD
+            # B1 trust gate FAILS CLOSED (historical validity != execution authorization).
+            reasons = verify_b1_r2_checkpoint(
+                reader=RealTrustedB1R2Reader(),
+                operator_grant=C.frozen_test_grant(b1_r2_checkpoint=approved),
+                approved_expected_checkpoint=approved,
+                git_baseline=C.clean_git_baseline(commit=obs.observed_head, tag=approved),
+            )
+            assert "b1_r2_tag_not_at_authorized_head" in reasons
 
 
 def test_ew3_synthetic_state_a_mint_fails_closed_when_tag_absent():

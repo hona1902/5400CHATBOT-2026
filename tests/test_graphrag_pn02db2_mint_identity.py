@@ -28,6 +28,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_B2_CHECKPOINT_TAG,
     EXPECTED_EW7_CHECKPOINT_TAG,
     EXPECTED_EW8_CHECKPOINT_TAG,
+    HISTORICAL_B2_CHECKPOINT_TAG,
     LiveProviderRunAuthorization,
     LiveProviderRunAuthorizationError,
     RealTrustedB1R2Reader,
@@ -115,13 +116,35 @@ def _b2_full_mint(grant, *, head: str = C.TEST_COMMIT) -> LiveProviderRunAuthori
         )
 
 
+@pytest.fixture(autouse=True)
+def _maybe_simulate_state_b():
+    """Lifecycle harness (provider-free). When ``PN02DB2_SIMULATE_STATE_B=1`` is set, patch the B2
+    trust roots MODULE-WIDE so the SUCCESSOR B2 tag is observed PRESENT at a fixed authorized HEAD
+    (``C.TEST_COMMIT``) for the whole file. This lets the ENTIRE mint-identity suite be run
+    UNFILTERED in a simulated State B (no deselection); with the env var unset the suite runs
+    against real Git (State A today). The lifecycle-aware tests branch on the trusted observation,
+    so BOTH runs are green — proving no permanent tag-absence assumption. It patches only the two
+    module-level B2 trust roots (never the verifier/caps/allowlist/mint logic)."""
+    import os
+
+    if os.environ.get("PN02DB2_SIMULATE_STATE_B") == "1":
+        with _b2_state_b(tag=EXPECTED_B2_CHECKPOINT_TAG, head=C.TEST_COMMIT):
+            yield
+    else:
+        yield
+
+
 # --------------------------------------------------------------------------- #
 # identity + distinctness
 # --------------------------------------------------------------------------- #
 
 
 def test_expected_b2_checkpoint_tag_exact():
-    assert EXPECTED_B2_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-approved"
+    # SUCCESSOR B2 identity (the first-B2 tag was immutable/superseded after the lifecycle-test
+    # forensic — operator Resolution B, no retroactive exception).
+    assert EXPECTED_B2_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
+    assert HISTORICAL_B2_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-approved"
+    assert EXPECTED_B2_CHECKPOINT_TAG != HISTORICAL_B2_CHECKPOINT_TAG
 
 
 def test_current_approved_b2_resolves_b2_identity():
@@ -139,30 +162,54 @@ def test_b1_resolver_still_ew8_and_distinct_from_b2():
 
 
 def test_b2_fails_closed_today_real_reader():
-    # Real repo, B2 tag absent → the B2 gate fails closed even though EW8 peels to HEAD.
-    reasons = b2_r2_refusal_reasons(_b2_grant(), C.clean_git_baseline())
-    assert "b1_r2_tag_not_observed_in_git" in reasons
+    # LIFECYCLE-AWARE (successor). Branches on the trusted observation of the SUCCESSOR B2 tag via
+    # the module seam (``authmint._build_trusted_b1_r2_reader`` + ``current_approved_b2_checkpoint``)
+    # — the same seam the lifecycle harness patches, so this test is valid in BOTH states with NO
+    # permanent tag-absence assumption. STATE A (successor tag absent): the B2 gate fails closed with
+    # ``b1_r2_tag_not_observed_in_git`` even though EW8 peels to a HEAD. STATE B (successor tag present
+    # at the authorized HEAD): a HEAD-bound B2 grant is ACCEPTED (no tag-not-observed).
+    approved = authmint.current_approved_b2_checkpoint()
+    obs = authmint._build_trusted_b1_r2_reader().observe(approved)
+    if not obs.observed_tag_exists:
+        reasons = b2_r2_refusal_reasons(_b2_grant(), C.clean_git_baseline())
+        assert "b1_r2_tag_not_observed_in_git" in reasons
+    else:
+        assert obs.checkpoint_tag == approved
+        assert len(obs.observed_tag_peel) == 40 and obs.observed_tag_peel == obs.observed_head
+        reasons = b2_r2_refusal_reasons(
+            _b2_grant(commit=obs.observed_head),
+            C.clean_git_baseline(commit=obs.observed_head, tag=approved),
+        )
+        assert "b1_r2_tag_not_observed_in_git" not in reasons
+        assert reasons == []
 
 
 def test_ew8_cannot_substitute_for_b2():
-    # A grant citing the EW8 identity, verified against the B2 approved identity, is refused:
-    # the grant's checkpoint must EXACTLY equal the B2 identity. EW8 peeling to HEAD is
-    # irrelevant — the B2 gate verifies the B2 tag, not EW8.
-    reader = RealTrustedB1R2Reader()  # real git (B2 tag absent)
+    # LIFECYCLE-AWARE. A grant citing the EW8 identity, verified against the B2 (successor) approved
+    # identity, is refused in BOTH states: the grant's checkpoint must EXACTLY equal the B2 identity,
+    # so ``b1_r2_grant_identity_mismatch`` is always present (EW8 peeling to a HEAD is irrelevant —
+    # the B2 gate verifies the B2 successor tag, not EW8). STATE A additionally reports
+    # ``b1_r2_tag_not_observed_in_git``.
+    approved = authmint.current_approved_b2_checkpoint()
+    reader = authmint._build_trusted_b1_r2_reader()
+    obs = reader.observe(approved)
+    commit = obs.observed_head or C.TEST_COMMIT
     reasons = verify_b1_r2_checkpoint(
         reader=reader,
-        operator_grant=_b2_grant(b1_r2=EXPECTED_EW8_CHECKPOINT_TAG),
-        approved_expected_checkpoint=current_approved_b2_checkpoint(),
-        git_baseline=C.clean_git_baseline(),
+        operator_grant=_b2_grant(b1_r2=EXPECTED_EW8_CHECKPOINT_TAG, commit=commit),
+        approved_expected_checkpoint=approved,
+        git_baseline=C.clean_git_baseline(commit=commit, tag=approved),
     )
-    assert "b1_r2_grant_identity_mismatch" in reasons
-    assert "b1_r2_tag_not_observed_in_git" in reasons
+    assert "b1_r2_grant_identity_mismatch" in reasons  # fails closed in BOTH states
+    if not obs.observed_tag_exists:
+        assert "b1_r2_tag_not_observed_in_git" in reasons  # STATE A only
 
 
 @pytest.mark.parametrize(
     "bad_tag",
     [EXPECTED_EW7_CHECKPOINT_TAG, "graphrag-pn02db1ew6-index-conflict-recovery-approved",
-     "totally-arbitrary-tag", "graphrag-pn02db2-qa-live-wiring-approved-EVIL"],
+     "totally-arbitrary-tag", "graphrag-pn02db2-qa-live-wiring-lifecycle-approved-EVIL",
+     HISTORICAL_B2_CHECKPOINT_TAG],
 )
 def test_older_or_arbitrary_tag_cannot_substitute_for_b2(bad_tag):
     reasons = verify_b1_r2_checkpoint(
@@ -185,6 +232,24 @@ def test_wrong_b2_tag_peel_fails_closed():
             _b2_grant(), C.clean_git_baseline(commit=C.TEST_COMMIT)
         )
     assert "b1_r2_tag_not_at_authorized_head" in reasons
+
+
+def test_historical_first_b2_tag_cannot_substitute_for_successor():
+    # The HISTORICAL first-B2 tag (immutable at commit 41eb3f3) can NEVER authorize the successor
+    # B2 run — the grant's checkpoint must EXACTLY equal the successor identity. Proven two ways,
+    # in BOTH lifecycle states: (1) a grant citing the historical tag → identity mismatch;
+    # (2) even simulating the historical tag PRESENT at HEAD as the approved-expected identity, it
+    # is not the successor identity the resolver returns, so it cannot mint. Here we assert the
+    # direct identity-mismatch path, which is state-independent.
+    reasons = verify_b1_r2_checkpoint(
+        reader=RealTrustedB1R2Reader(),
+        operator_grant=_b2_grant(b1_r2=HISTORICAL_B2_CHECKPOINT_TAG),
+        approved_expected_checkpoint=current_approved_b2_checkpoint(),
+        git_baseline=C.clean_git_baseline(),
+    )
+    assert "b1_r2_grant_identity_mismatch" in reasons
+    # The resolver's approved identity is the SUCCESSOR, never the historical first-B2 tag.
+    assert authmint.current_approved_b2_checkpoint() != HISTORICAL_B2_CHECKPOINT_TAG
 
 
 # --------------------------------------------------------------------------- #

@@ -357,24 +357,38 @@ EXPECTED_EW8_CHECKPOINT_TAG = "graphrag-pn02db1ew8-scientific-result-observabili
 #: HISTORICAL identities only and can never substitute (exact-identity + trusted-reader §35).
 _APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW8_CHECKPOINT_TAG
 
+#: HISTORICAL — the FIRST PN02D-B2 live-QA-wiring checkpoint tag. It is an IMMUTABLE record of
+#: approved commit ``41eb3f3`` (annotated tag object ``dbeba1f3``, created BACKUP-only). A
+#: post-checkpoint lifecycle forensic then found two State-A-only mint-identity tests that hard-
+#: coded ``b1_r2_tag_not_observed_in_git`` and fail once this tag exists at HEAD (a test-design
+#: lifecycle defect — the runtime trust gate was proven correct). The operator selected a
+#: SUCCESSOR checkpoint (no retroactive exception); fixing the tests moves HEAD off ``41eb3f3``,
+#: so this historical tag no longer peels to the authorized HEAD, and it is NO LONGER the
+#: governance-approved B2 identity. It is retained for reference/history ONLY and can never
+#: authorize a successor B2 run (exact-identity + trusted-reader + not-at-authorized-HEAD).
+HISTORICAL_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-approved"
+
 #: The EXACT operator/governance-approved checkpoint identity for a PN02D-**B2** live QA run.
 #: This is a SEPARATE authorization identity from B1 (never a shared "current checkpoint" that
-#: could silently collapse B2 back onto EW8/B1). It is a control-plane declaration of the
-#: future B2 successor tag — NOT the tag itself. The annotated Git tag of this name does not
-#: exist yet; the trusted reader observes real Git and, finding no such tag, a B2 mint FAILS
-#: CLOSED (``b1_r2_tag_not_observed_in_git``). B2 becomes mintable only after a future
-#: operator-approved B2 checkpoint creates this EXACT annotated tag peeling to the approved B2
-#: HEAD — and EW8 (which peels to today's HEAD) can NEVER satisfy it, because the B2 gate
-#: verifies THIS identity, not EW8. Freezing the EXPECTED identity before the tag exists
-#: removes circularity (the same pattern used for B1-R2 → PF1 → EW1 … → EW8).
-EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-approved"
+#: could silently collapse B2 back onto EW8/B1). It is now the SUCCESSOR B2 identity (the first
+#: B2 checkpoint ``HISTORICAL_B2_CHECKPOINT_TAG`` is immutable/superseded, above). It is a
+#: control-plane declaration of the future B2 successor tag — NOT the tag itself. The annotated
+#: Git tag of this name does not exist yet; the trusted reader observes real Git and, finding no
+#: such tag, a B2 mint FAILS CLOSED (``b1_r2_tag_not_observed_in_git``). B2 becomes mintable only
+#: after a future operator-approved SUCCESSOR B2 checkpoint creates this EXACT annotated tag
+#: peeling to the approved B2 HEAD — and neither EW8 (which peels to a B1 HEAD) nor the historical
+#: first-B2 tag can ever satisfy it, because the B2 gate verifies THIS identity. Freezing the
+#: EXPECTED identity before the tag exists removes circularity (the same pattern used for
+#: B1-R2 → PF1 → EW1 … → EW8, and now first-B2 → successor-B2).
+EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
 
 #: Governance state for the B2 provider-authorization checkpoint. FROZEN to the successor
 #: ``EXPECTED_B2_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the B2
-#: mint — never a caller string / EW8 fallback / Git-tag heuristic). Non-None, but a B2 live
-#: authorization is NOT mintable until the trusted reader observes that exact tag in real Git
-#: (which does not exist yet): the B2 mint fails closed. B1 identities (EW8 and all historical
-#: EWn/PF1/B1-R2) can never substitute for it (exact-identity + trusted-reader).
+#: mint — never a caller string / EW8 fallback / historical-first-B2 fallback / Git-tag
+#: heuristic). Non-None, but a B2 live authorization is NOT mintable until the trusted reader
+#: observes that exact tag in real Git (which does not exist yet): the B2 mint fails closed. B1
+#: identities (EW8 and all historical EWn/PF1/B1-R2) AND the historical first-B2 tag can never
+#: substitute for it (exact-identity + trusted-reader).
 _APPROVED_B2_CHECKPOINT: Optional[str] = EXPECTED_B2_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
@@ -1126,6 +1140,7 @@ __all__ = [
     "current_approved_b1_r2_checkpoint",
     "current_approved_b2_checkpoint",
     "EXPECTED_B2_CHECKPOINT_TAG",
+    "HISTORICAL_B2_CHECKPOINT_TAG",
     "EXPECTED_EW8_CHECKPOINT_TAG",
     "EXPECTED_EW7_CHECKPOINT_TAG",
     "EXPECTED_EW6_CHECKPOINT_TAG",

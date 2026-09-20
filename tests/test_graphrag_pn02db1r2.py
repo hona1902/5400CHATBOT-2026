@@ -76,24 +76,36 @@ def test_expected_b1_r2_tag_frozen_in_governance():
 
 
 def test_current_approved_checkpoint_git_state_is_valid():
-    # CHECKPOINT-LIFECYCLE aware for the CURRENT approved identity (EW8). State A = the
-    # successor tag is absent (pre-checkpoint) → gate unsatisfied; State B = the exact EW8
-    # tag exists at the authorized HEAD. Stays green before AND after the EW8 checkpoint,
-    # and is UNAFFECTED by the historical EW6/EW5/EW4/EW3/EW1/PF1/B1-R2/EW2 tags (see the immutability test below).
+    # CHECKPOINT-LIFECYCLE aware (THREE states) for the CURRENT approved identity (EW8). Validity
+    # here means the resolver identity + the EW8 tag's OWN internal Git state are intact — NOT that
+    # EW8 must peel to HEAD forever. STATE A (pre-checkpoint): successor/EW8 tag absent → gate
+    # unsatisfied. STATE 1 (checkpoint-current): EW8 present at the authorized HEAD → control-plane
+    # gate satisfiable. STATE 2 (successor-head): EW8 present with a valid 40-hex peel to its
+    # immutable commit, but a later successor commit moved HEAD off it → HISTORICAL validity, NOT
+    # current-HEAD authorization: the gate FAILS CLOSED (checkpoint existence != authorization).
     approved = current_approved_b1_r2_checkpoint()
     assert approved == EXPECTED_EW8_CHECKPOINT_TAG
     obs = RealTrustedB1R2Reader().observe(approved)
     if not obs.observed_tag_exists:
-        # STATE A — pre-checkpoint: successor tag absent → Git prerequisite NOT satisfied.
+        # STATE A — pre-checkpoint: tag absent → Git prerequisite NOT satisfied.
         assert obs.observed_tag_peel == ""
         assert B.b1_r2_preflight().real_b1_r2_tag_exists is False
     else:
-        # STATE B — post-checkpoint: EXACT tag present, valid peeled commit, at HEAD.
+        # Tag exists → historical checkpoint identity intact: valid 40-hex peel, correct tag.
         assert obs.checkpoint_tag == approved
         assert len(obs.observed_tag_peel) == 40 and all(
             c in "0123456789abcdef" for c in obs.observed_tag_peel
         )
-        assert obs.observed_tag_peel == obs.observed_head  # tag at authorized HEAD
+        rep = B.b1_r2_preflight()
+        assert rep.real_b1_r2_tag_exists is True
+        if obs.observed_tag_peel == obs.observed_head:
+            # STATE 1 — EW8 at the authorized HEAD → control-plane gate satisfiable.
+            assert rep.live_provider_authorization_mintable is True
+        else:
+            # STATE 2 — successor-head: valid historical checkpoint, NOT at HEAD → the current-HEAD
+            # gate FAILS CLOSED with the exact reason; historical validity != authorization.
+            assert rep.live_provider_authorization_mintable is False
+            assert "b1_r2_tag_not_at_authorized_head" in rep.fail_closed_reasons
     # Neither state authorizes a provider run — checkpoint existence != authorization.
     assert PN02_PROVIDER_RUN_AUTHORIZED is False
 
@@ -235,24 +247,32 @@ def test_no_secret_values_in_manifest():
 # --------------------------------------------------------------------------- #
 
 def test_preflight_reports_git_gate_state():
-    # State-aware (pre/post checkpoint). The frozen envelope fields are invariant; only the
-    # Git-gate observation and its consequence change with the real tag's existence.
+    # State-aware across THREE lifecycle states. The frozen envelope fields are invariant; only the
+    # Git-gate observation and its consequence change with the real tag's existence AND its peel
+    # relative to HEAD.
     rep = B.b1_r2_preflight()
     assert rep.expected_tag_configured is True
     assert rep.fixture_hash_match is True
     assert rep.provider_fingerprint_match is True
     assert rep.workload_caps_match is True
     assert rep.old_run_id_reused is False
+    obs = RealTrustedB1R2Reader().observe(EXPECTED_EW8_CHECKPOINT_TAG)
     if not rep.real_b1_r2_tag_exists:
-        # STATE A — pre-checkpoint: Git gate unsatisfied → not mintable, reason present.
+        # STATE A — pre-checkpoint: tag absent → not mintable, tag-not-observed reason present.
         assert rep.live_provider_authorization_mintable is False
         assert "b1_r2_tag_not_observed_in_git" in rep.fail_closed_reasons
-    else:
-        # STATE B — post-checkpoint: the B1-R2 GIT gate is satisfiable (no fail reasons).
-        # `mintable` here reflects only that control-plane gate — NOT that a provider run
-        # is authorized (see the separation test + PN02_PROVIDER_RUN_AUTHORIZED below).
+    elif obs.observed_tag_peel == obs.observed_head:
+        # STATE 1 — checkpoint-current: the B1-R2 GIT gate is satisfiable (no fail reasons).
+        # `mintable` here reflects only that control-plane gate — NOT that a provider run is
+        # authorized (see the separation test + PN02_PROVIDER_RUN_AUTHORIZED below).
         assert rep.fail_closed_reasons == []
         assert rep.live_provider_authorization_mintable is True
+    else:
+        # STATE 2 — successor-head: the EW8 tag exists but a later successor commit moved HEAD off
+        # its peel → the current-HEAD Git gate FAILS CLOSED. Historical checkpoint validity does
+        # NOT authorize execution at the new HEAD.
+        assert rep.live_provider_authorization_mintable is False
+        assert "b1_r2_tag_not_at_authorized_head" in rep.fail_closed_reasons
     assert PN02_PROVIDER_RUN_AUTHORIZED is False
 
 

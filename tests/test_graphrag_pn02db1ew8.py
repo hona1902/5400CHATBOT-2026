@@ -254,8 +254,13 @@ def test_ew8_governance_repoint_complete():
 
 
 def test_ew8_successor_tag_git_state_is_lifecycle_valid():
-    # §40: lifecycle-aware. STATE A: EW8 tag absent -> empty peel. STATE B: exact tag present,
-    # peels to a 40-hex commit == the authorized HEAD.
+    # §40: lifecycle-aware across THREE states — never a permanent tag-absence OR permanent
+    # tag-at-HEAD assumption. STATE A (pre-checkpoint): EW8 tag absent -> empty peel. STATE 1
+    # (checkpoint-current): exact tag present, valid 40-hex peel == authorized HEAD. STATE 2
+    # (successor-head): a later successor commit moved HEAD, so the EW8 tag still exists and peels
+    # to its IMMUTABLE approved commit but peel != HEAD — HISTORICAL checkpoint validity, NOT
+    # current-HEAD execution authorization (the B1 gate must fail closed with the exact reason).
+    _EW8_COMMIT = "95670adce1ac243f894b14de74c564cabc5325b4"
     obs = RealTrustedB1R2Reader().observe(EXPECTED_EW8_CHECKPOINT_TAG)
     if not obs.observed_tag_exists:
         assert obs.observed_tag_peel == ""  # STATE A
@@ -264,7 +269,22 @@ def test_ew8_successor_tag_git_state_is_lifecycle_valid():
         assert len(obs.observed_tag_peel) == 40 and all(
             c in "0123456789abcdef" for c in obs.observed_tag_peel
         )
-        assert obs.observed_tag_peel == obs.observed_head  # STATE B
+        if obs.observed_tag_peel == obs.observed_head:
+            pass  # STATE 1 — the EW8 checkpoint is the current authorized HEAD
+        else:
+            # STATE 2 — EW8 remains the IMMUTABLE historical checkpoint (peels to its own approved
+            # commit) but HEAD has moved past it. Historical validity != authorization: the
+            # current-HEAD B1 trust gate FAILS CLOSED with the exact not-at-HEAD reason.
+            assert obs.observed_tag_peel == _EW8_COMMIT
+            reasons = verify_b1_r2_checkpoint(
+                reader=RealTrustedB1R2Reader(),
+                operator_grant=C.frozen_test_grant(b1_r2_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG),
+                approved_expected_checkpoint=EXPECTED_EW8_CHECKPOINT_TAG,
+                git_baseline=C.clean_git_baseline(
+                    commit=obs.observed_head, tag=EXPECTED_EW8_CHECKPOINT_TAG
+                ),
+            )
+            assert "b1_r2_tag_not_at_authorized_head" in reasons
 
 
 def test_ew8_exact_tag_with_peel_is_accepted_by_git_gate():
