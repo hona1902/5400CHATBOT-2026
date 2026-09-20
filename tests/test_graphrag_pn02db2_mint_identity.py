@@ -172,26 +172,42 @@ def test_b1_resolver_still_ew8_and_distinct_from_b2():
 
 
 def test_b2_fails_closed_today_real_reader():
-    # LIFECYCLE-AWARE (successor). Branches on the trusted observation of the SUCCESSOR B2 tag via
-    # the module seam (``authmint._build_trusted_b1_r2_reader`` + ``current_approved_b2_checkpoint``)
-    # — the same seam the lifecycle harness patches, so this test is valid in BOTH states with NO
-    # permanent tag-absence assumption. STATE A (successor tag absent): the B2 gate fails closed with
-    # ``b1_r2_tag_not_observed_in_git`` even though EW8 peels to a HEAD. STATE B (successor tag present
-    # at the authorized HEAD): a HEAD-bound B2 grant is ACCEPTED (no tag-not-observed).
+    # LIFECYCLE-AWARE (successor), THREE real Git states — branches on the trusted observation of the
+    # B2 tag via the module seam (``authmint._build_trusted_b1_r2_reader`` + ``current_approved_b2_
+    # checkpoint``), the same seam the lifecycle harness patches, so this test is valid in EVERY state
+    # with NO permanent tag-absence / tag-at-HEAD assumption:
+    #   STATE A — expected tag ABSENT: the B2 gate fails closed with ``b1_r2_tag_not_observed_in_git``.
+    #   STATE B — expected tag present AT EXACT HEAD: a HEAD-bound B2 grant is ACCEPTED.
+    #   STATE C — expected tag present but peeling to a NON-HEAD commit (e.g. an ANCESTOR after a later
+    #             PN02D-B3 checkpoint moved HEAD past the B2 tag): the gate MUST FAIL CLOSED with
+    #             ``b1_r2_tag_not_at_authorized_head`` — a historical/ancestor checkpoint never
+    #             authorizes the current HEAD (no grandfathering). This is exact-HEAD trust, unchanged.
     approved = cast(str, authmint.current_approved_b2_checkpoint())  # frozen non-None B2 identity
     obs = authmint._build_trusted_b1_r2_reader().observe(approved)
     if not obs.observed_tag_exists:
+        # STATE A
         reasons = b2_r2_refusal_reasons(_b2_grant(), C.clean_git_baseline())
         assert "b1_r2_tag_not_observed_in_git" in reasons
-    else:
-        assert obs.checkpoint_tag == approved
-        assert len(obs.observed_tag_peel) == 40 and obs.observed_tag_peel == obs.observed_head
+        return
+    assert obs.checkpoint_tag == approved
+    assert len(obs.observed_tag_peel) == 40
+    if obs.observed_tag_peel == obs.observed_head:
+        # STATE B — tag at exact HEAD: HEAD-bound grant accepted (subject to the normal grant rules).
         reasons = b2_r2_refusal_reasons(
             _b2_grant(commit=obs.observed_head),
             C.clean_git_baseline(commit=obs.observed_head, tag=approved),
         )
         assert "b1_r2_tag_not_observed_in_git" not in reasons
         assert reasons == []
+    else:
+        # STATE C — tag exists but peels to a non-HEAD (ancestor) commit: FAIL CLOSED. Even binding the
+        # grant/baseline to the ACTUAL current HEAD cannot rescue it, because the trusted reader sees
+        # the tag peel (an ancestor) != HEAD, so exact-HEAD verification refuses it.
+        reasons = b2_r2_refusal_reasons(
+            _b2_grant(commit=obs.observed_head),
+            C.clean_git_baseline(commit=obs.observed_head, tag=approved),
+        )
+        assert "b1_r2_tag_not_at_authorized_head" in reasons
 
 
 def test_ew8_cannot_substitute_for_b2():
@@ -242,6 +258,29 @@ def test_wrong_b2_tag_peel_fails_closed():
             _b2_grant(), C.clean_git_baseline(commit=C.TEST_COMMIT)
         )
     assert "b1_r2_tag_not_at_authorized_head" in reasons
+
+
+def test_b2_ancestor_tag_fails_closed_on_successor_head():
+    # STATE C (deterministic, simulated): the exact B2 tag EXISTS and peels to an ANCESTOR commit,
+    # while HEAD has advanced to a successor commit (the real shape after the PN02D-B3 checkpoint
+    # moved HEAD past the B2 tag). A historically-approved ancestor checkpoint MUST NOT authorize the
+    # current HEAD — exact-HEAD trust refuses it with ``b1_r2_tag_not_at_authorized_head`` (no
+    # ancestor/merge-base grandfathering). Independent of the actual current Git HEAD.
+    ancestor = "a" * 40  # the tag peel (an earlier approved commit)
+    successor_head = "b" * 40  # the current HEAD, a descendant of the ancestor
+    assert ancestor != successor_head
+    reader = C.b1r2_reader_ok(
+        tag=EXPECTED_B2_CHECKPOINT_TAG, peel=ancestor, head=successor_head
+    )
+    with _patch_b2(EXPECTED_B2_CHECKPOINT_TAG, reader):
+        # bind the grant/baseline to the ACTUAL successor HEAD — still refused, because the tag peel
+        # (the ancestor) does not equal HEAD.
+        reasons = b2_r2_refusal_reasons(
+            _b2_grant(commit=successor_head),
+            C.clean_git_baseline(commit=successor_head, tag=EXPECTED_B2_CHECKPOINT_TAG),
+        )
+    assert "b1_r2_tag_not_at_authorized_head" in reasons
+    assert reasons != []  # fail closed — not accepted
 
 
 def test_historical_first_b2_tag_cannot_substitute_for_successor():

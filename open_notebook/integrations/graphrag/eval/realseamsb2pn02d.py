@@ -45,7 +45,10 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import (
     B1RunOutcome,
     QAStageSeam,
 )
-from open_notebook.integrations.graphrag.eval.qastagepn02db2 import B2QAStage
+from open_notebook.integrations.graphrag.eval.qastagepn02db2 import (
+    B2QAStage,
+    QAExecutionObserver,
+)
 from open_notebook.integrations.graphrag.eval.real_final_answer_seam_pn02d import (
     CompletionFn,
     RealFinalAnswerSeam,
@@ -109,13 +112,24 @@ def build_real_final_answer_completion_fn() -> CompletionFn:
     return _complete
 
 
-def build_b2_qa_stage(*, completion_fn: Optional[CompletionFn] = None) -> B2QAStage:
+def build_b2_qa_stage(
+    *,
+    completion_fn: Optional[CompletionFn] = None,
+    execution_observer: Optional[QAExecutionObserver] = None,
+) -> B2QAStage:
     """Build the B2 Stage-2 QA seam. A live run uses the real ON completion transport; a
     provider-free test injects a fake ``completion_fn``. The stage carries its own frozen
     72-cap budget guard and computes NO scientific result.
+
+    ``execution_observer`` (PN02D-B3B, default ``None`` = no-op) is an OPTIONAL live-
+    observability hook the stage calls once per completed (query, arm); it never alters the
+    answer/budget/metrics. It is threaded through unchanged for a future B3 observational run.
     """
     fn = completion_fn if completion_fn is not None else build_real_final_answer_completion_fn()
-    return B2QAStage(answer_seam=RealFinalAnswerSeam(completion_fn=fn))
+    return B2QAStage(
+        answer_seam=RealFinalAnswerSeam(completion_fn=fn),
+        execution_observer=execution_observer,
+    )
 
 
 def attach_b2_final_answer_spend(outcome: B1RunOutcome, qa_stage: B2QAStage) -> B1RunOutcome:
@@ -158,6 +172,7 @@ async def run_live_b2_execution(
     git_baseline_attestation: GitBaselineAttestation,
     observed_fixture_hash: str = EXPECTED_FIXTURE_HASH,
     env: Optional[Mapping[str, str]] = None,
+    qa_execution_observer: Optional[QAExecutionObserver] = None,
 ) -> B1RunOutcome:
     """PRODUCTION live B2 entrypoint (used by ``execute-b2-live``).
 
@@ -165,8 +180,12 @@ async def run_live_b2_execution(
     and model attestor are the real production defaults; the B2 QA stage uses the real ON
     completion transport; and the mint is the B2 mint (fails closed until the B2 checkpoint
     tag exists). Reuses the B1 two-boot/mint/index/GD/vector orchestration unchanged.
+
+    ``qa_execution_observer`` (PN02D-B3B, default ``None`` = byte-identical B2) is threaded to
+    the QA stage's optional observability hook for a future B3 observational run; it never
+    changes retrieval/generation/grading/metrics or the B2 scientific result.
     """
-    qa_stage = build_b2_qa_stage()
+    qa_stage = build_b2_qa_stage(execution_observer=qa_execution_observer)
     outcome = await _run_live_b1_execution_composed(
         operator_grant=operator_grant,
         git_baseline_attestation=git_baseline_attestation,
@@ -190,14 +209,18 @@ async def _run_live_b2_execution_composed(
     model_seed=None,
     builder_kwargs: Optional[Mapping[str, object]] = None,
     env: Optional[Mapping[str, str]] = None,
+    qa_execution_observer: Optional[QAExecutionObserver] = None,
 ) -> B1RunOutcome:
     """PRIVATE, NON-LIVE B2 composition helper (provider-free tests only).
 
     Like ``realseamspn02d._run_live_b1_execution_composed`` but injects the B2 QA stage (with
     a fake ``completion_fn``) and the B2 mint. NOT a production entrypoint; the CLI never
     calls this. Any keyword left ``None`` falls back to the shared helper's real default.
+    ``qa_execution_observer`` (default ``None`` = no-op) threads the B3B observability hook.
     """
-    qa_stage = build_b2_qa_stage(completion_fn=completion_fn)
+    qa_stage = build_b2_qa_stage(
+        completion_fn=completion_fn, execution_observer=qa_execution_observer
+    )
     # Default to the B2 combined (embedding + chat) seed so a composed B2 run resolves the chat
     # default too; an explicit ``model_seed`` (e.g. a no-op seed in a fully-faked test) overrides.
     effective_model_seed = model_seed if model_seed is not None else _default_b2_model_seed

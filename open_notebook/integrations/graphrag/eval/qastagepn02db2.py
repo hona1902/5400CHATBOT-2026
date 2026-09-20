@@ -29,7 +29,7 @@ Frozen behaviour (PN02A §10a/§10b/§26):
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import List, Mapping, Sequence, Tuple
+from typing import Callable, List, Mapping, Optional, Sequence, Tuple
 
 from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
     BudgetClass,
@@ -64,6 +64,31 @@ class B2AnswerPlanItem:
     evidence_source_ids: Tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class B2QAExecutionRecord:
+    """Transient record of one COMPLETED (query, arm) execution, handed to an
+    OPTIONAL observer AFTER the answer is produced (PN02D-B3B live-observability
+    seam). Carries the exact member-filtered ``evidence_source_ids`` the stage
+    passed to the answer seam plus the produced ``QAAnswerResult`` (which may hold
+    transient ``answer_text``) — so a downstream B3 observer can reuse the EXISTING
+    grader and the checkpointed diagnostic. A PERSISTING consumer MUST project
+    content-safe and NEVER persist ``answer_text`` (task B3B §20). This record is
+    NOT part of any scientific result and NOT persisted by the stage."""
+
+    query_id: str
+    notebook_id: str
+    arm: ArmId
+    evidence_source_ids: Tuple[str, ...]
+    result: QAAnswerResult
+
+
+#: An OPTIONAL, side-effect-only observer invoked once per successfully-produced
+#: (query, arm) answer. Default is ``None`` (a strict no-op — the normal B2 path is
+#: byte-identical). It is a GENERIC callback type: this module does NOT import the
+#: B3 diagnostic; a B3 execution adapter installs the observer (task B3B §3/§47).
+QAExecutionObserver = Callable[[B2QAExecutionRecord], None]
+
+
 @dataclass
 class B2QAStage:
     """The injectable Stage-2 QA seam (implements ``driverpn02d.QAStageSeam``).
@@ -79,6 +104,11 @@ class B2QAStage:
     budget: StatefulBudgetGuard = field(
         default_factory=lambda: StatefulBudgetGuard(caps=b2_caps())
     )
+    #: OPTIONAL live-observability hook (PN02D-B3B). Default ``None`` = strict no-op
+    #: (normal B2 path byte-identical). When set, it is called ONCE per successfully
+    #: produced (query, arm) answer, AFTER the result is appended and counted — it
+    #: never regrades, alters the answer/citations, or affects the budget/metrics.
+    execution_observer: Optional[QAExecutionObserver] = None
     #: COMPLETED final answers — incremented ONLY after a QAAnswerResult is successfully
     #: produced (PN02DB2-RR2-M1). Distinct from the budget's RESERVED count: the guard
     #: reserves BEFORE each provider call (to keep the 72-cap fail-closed), so on a partial
@@ -174,6 +204,19 @@ class B2QAStage:
             # Count a COMPLETED answer ONLY after a successful append (PN02DB2-RR2-M1). If the
             # await above raised, this is not reached, so completed stays < reserved.
             self._completed_answers += 1
+            # OPTIONAL B3B live-observability hook — runs AFTER the answer is produced and
+            # counted; exactly once per completed (query, arm); no-op when unset (byte-identical
+            # B2). It observes only; it never regrades or mutates the result/budget/metrics.
+            if self.execution_observer is not None:
+                self.execution_observer(
+                    B2QAExecutionRecord(
+                        query_id=item.query_id,
+                        notebook_id=item.notebook_id,
+                        arm=item.arm,
+                        evidence_source_ids=item.evidence_source_ids,
+                        result=results[-1],
+                    )
+                )
         return results
 
     @staticmethod
@@ -198,5 +241,7 @@ __all__ = [
     "ARM_ORDER",
     "STAGE2_K",
     "B2AnswerPlanItem",
+    "B2QAExecutionRecord",
+    "QAExecutionObserver",
     "B2QAStage",
 ]
