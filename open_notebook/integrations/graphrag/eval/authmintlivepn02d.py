@@ -368,27 +368,39 @@ _APPROVED_B1_R2_CHECKPOINT: Optional[str] = EXPECTED_EW8_CHECKPOINT_TAG
 #: authorize a successor B2 run (exact-identity + trusted-reader + not-at-authorized-HEAD).
 HISTORICAL_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-approved"
 
+#: HISTORICAL — the PN02D-B2 QA-live-wiring LIFECYCLE (successor) checkpoint tag. It is an
+#: IMMUTABLE record of approved commit ``40d3a6f`` (annotated tag object ``a6d38aae``); it was the
+#: governance-approved B2 identity between the successor-lifecycle checkpoint and the chat-model
+#: remediation. The Real B2 Execution #1 failure (missing isolated default chat model) drove a
+#: provider-free chat-model + live_wiring remediation whose D_PASS_CLEAN diff moves HEAD off
+#: ``40d3a6f``; a NEW governance identity (below) supersedes it. This predecessor tag is retained
+#: for reference/history ONLY and can NEVER authorize the current B2 run — even though it still
+#: peels correctly to ``40d3a6f`` (which is now an ancestor, not the authorized HEAD): the B2 gate
+#: verifies the EXACT current identity, and an ancestor checkpoint never authorizes a later HEAD.
+HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
+
 #: The EXACT operator/governance-approved checkpoint identity for a PN02D-**B2** live QA run.
 #: This is a SEPARATE authorization identity from B1 (never a shared "current checkpoint" that
-#: could silently collapse B2 back onto EW8/B1). It is now the SUCCESSOR B2 identity (the first
-#: B2 checkpoint ``HISTORICAL_B2_CHECKPOINT_TAG`` is immutable/superseded, above). It is a
-#: control-plane declaration of the future B2 successor tag — NOT the tag itself. The annotated
+#: could silently collapse B2 back onto EW8/B1). It is now the CHAT-MODEL-REMEDIATION identity —
+#: superseding BOTH the first-B2 tag ``HISTORICAL_B2_CHECKPOINT_TAG`` and the lifecycle/successor
+#: tag ``HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG`` (both immutable/historical, above). It is a
+#: control-plane declaration of the future B2 checkpoint tag — NOT the tag itself. The annotated
 #: Git tag of this name does not exist yet; the trusted reader observes real Git and, finding no
 #: such tag, a B2 mint FAILS CLOSED (``b1_r2_tag_not_observed_in_git``). B2 becomes mintable only
-#: after a future operator-approved SUCCESSOR B2 checkpoint creates this EXACT annotated tag
-#: peeling to the approved B2 HEAD — and neither EW8 (which peels to a B1 HEAD) nor the historical
-#: first-B2 tag can ever satisfy it, because the B2 gate verifies THIS identity. Freezing the
-#: EXPECTED identity before the tag exists removes circularity (the same pattern used for
-#: B1-R2 → PF1 → EW1 … → EW8, and now first-B2 → successor-B2).
-EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
+#: after a future operator-approved checkpoint creates this EXACT annotated tag peeling to the
+#: approved B2 HEAD — and neither EW8 (a B1 HEAD), the historical first-B2 tag, NOR the historical
+#: lifecycle/predecessor tag can ever satisfy it, because the B2 gate verifies THIS identity.
+#: Freezing the EXPECTED identity before the tag exists removes circularity (the same pattern used
+#: for B1-R2 → PF1 → EW1 … → EW8, and now first-B2 → lifecycle-B2 → chat-model-B2).
+EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-chat-model-remediation-approved"
 
-#: Governance state for the B2 provider-authorization checkpoint. FROZEN to the successor
-#: ``EXPECTED_B2_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the B2
-#: mint — never a caller string / EW8 fallback / historical-first-B2 fallback / Git-tag
-#: heuristic). Non-None, but a B2 live authorization is NOT mintable until the trusted reader
-#: observes that exact tag in real Git (which does not exist yet): the B2 mint fails closed. B1
-#: identities (EW8 and all historical EWn/PF1/B1-R2) AND the historical first-B2 tag can never
-#: substitute for it (exact-identity + trusted-reader).
+#: Governance state for the B2 provider-authorization checkpoint. FROZEN to the current
+#: ``EXPECTED_B2_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED identity for the B2 mint —
+#: never a caller string / EW8 fallback / historical-first-B2 fallback / historical-lifecycle-B2
+#: fallback / Git-tag heuristic). Non-None, but a B2 live authorization is NOT mintable until the
+#: trusted reader observes that exact tag in real Git (which does not exist yet): the B2 mint fails
+#: closed. B1 identities (EW8 and all historical EWn/PF1/B1-R2) AND both historical B2 tags (first
+#: and lifecycle/predecessor) can never substitute for it (exact-identity + trusted-reader).
 _APPROVED_B2_CHECKPOINT: Optional[str] = EXPECTED_B2_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
@@ -1141,6 +1153,7 @@ __all__ = [
     "current_approved_b2_checkpoint",
     "EXPECTED_B2_CHECKPOINT_TAG",
     "HISTORICAL_B2_CHECKPOINT_TAG",
+    "HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG",
     "EXPECTED_EW8_CHECKPOINT_TAG",
     "EXPECTED_EW7_CHECKPOINT_TAG",
     "EXPECTED_EW6_CHECKPOINT_TAG",

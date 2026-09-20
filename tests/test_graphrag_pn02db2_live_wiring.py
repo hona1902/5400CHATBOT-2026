@@ -11,6 +11,7 @@ provider errors surface as safe structured fields.
 from __future__ import annotations
 
 import json
+from typing import Mapping, cast
 from unittest import mock
 
 import graphrag_pn02db0cb_common as C
@@ -73,14 +74,19 @@ def _b2_state_b(*, head: str = C.TEST_COMMIT):
 
 
 def test_execute_b2_live_fails_closed_before_b2_checkpoint(tmp_path):
-    # Isolate the B2-checkpoint reason with a CLEAN baseline reader + a runner sentinel that
-    # explodes if ever called — proving no mint / no provider use happens.
+    # LIFECYCLE-AWARE (successor). The B2 checkpoint gate fails closed BEFORE any boot with a
+    # runner sentinel that explodes if ever called — proving no mint / no provider use. The
+    # canonical refusal reason depends on the trusted observation of the SUCCESSOR B2 tag (no
+    # permanent tag-absence assumption): STATE A (tag absent) -> b1_r2_tag_not_observed_in_git;
+    # STATE B (tag present at the approved HEAD, but this grant's synthetic C.TEST_COMMIT clean
+    # baseline is not that HEAD) -> the grant's baseline is not bound to the trust-observed HEAD.
+    # In BOTH states the run is REFUSED, nothing boots, and the guarded runner is never called.
     grant = _b2_grant()
     man = tmp_path / "b2.json"
     man.write_text(json.dumps(_grant_to_manifest(grant)), encoding="utf-8")
 
     def _boom(**_kw):  # must never be reached
-        raise AssertionError("live_runner must NOT run when the B2 checkpoint is absent")
+        raise AssertionError("live_runner must NOT run when the B2 checkpoint gate refuses")
 
     code, payload = cli._evaluate_execute_b1_live_composed(
         manifest_path=str(man),
@@ -97,13 +103,25 @@ def test_execute_b2_live_fails_closed_before_b2_checkpoint(tmp_path):
     assert code == 2
     assert payload["command"] == "execute-b2-live"
     assert payload["result"] == "REFUSED"
-    assert "b1_r2_tag_not_observed_in_git" in payload["reasons"]
     assert payload["runtime_booted"] is False
     assert payload["provider_bound"] is False
+    obs = authmint._build_trusted_b1_r2_reader().observe(
+        cast(str, authmint.current_approved_b2_checkpoint())
+    )
+    if not obs.observed_tag_exists:
+        assert "b1_r2_tag_not_observed_in_git" in cast(list, payload["reasons"])  # STATE A
+    else:
+        # STATE B — successor tag present; the synthetic clean baseline is not the authorized HEAD.
+        assert "b1_r2_head_not_bound_to_approved_baseline" in cast(list, payload["reasons"])
 
 
 def test_evaluate_execute_b2_live_public_refuses_today(tmp_path):
-    # The PUBLIC B2 evaluator (real readers) also refuses today (B2 tag absent), no boot.
+    # LIFECYCLE-AWARE. The PUBLIC B2 evaluator (real readers) refuses with NO boot in every
+    # lifecycle state (no permanent tag-absence assumption). The canonical reason branches on the
+    # trusted observation of the SUCCESSOR B2 tag: STATE A (tag absent) -> tag-not-observed;
+    # STATE B (tag present — current) -> this grant's synthetic C.TEST_COMMIT approved baseline is
+    # not the real authorized HEAD, so the git baseline gate refuses (git_commit_baseline_mismatch),
+    # deterministically present regardless of worktree cleanliness. Either way: REFUSED, no boot.
     grant = _b2_grant()
     man = tmp_path / "b2.json"
     man.write_text(json.dumps(_grant_to_manifest(grant)), encoding="utf-8")
@@ -113,8 +131,16 @@ def test_evaluate_execute_b2_live_public_refuses_today(tmp_path):
         env={"PN02_PROVIDER_RUN_AUTHORIZED": "YES", "OPENROUTER_API_KEY": "x"},
     )
     assert code == 2 and payload["result"] == "REFUSED"
-    assert "b1_r2_tag_not_observed_in_git" in payload["reasons"]
     assert payload["runtime_booted"] is False
+    obs = authmint._build_trusted_b1_r2_reader().observe(
+        cast(str, authmint.current_approved_b2_checkpoint())
+    )
+    if not obs.observed_tag_exists:
+        assert "b1_r2_tag_not_observed_in_git" in cast(list, payload["reasons"])  # STATE A
+    else:
+        # STATE B — successor tag present at the approved HEAD; the synthetic grant baseline is not
+        # that HEAD, so the run fails closed at the git baseline gate (NOT tag-not-observed).
+        assert "git_commit_baseline_mismatch" in cast(list, payload["reasons"])
 
 
 # --------------------------------------------------------------------------- #
@@ -225,7 +251,7 @@ async def test_b2_partial_failure_reports_completed_not_reserved(fail_at):
     assert outcome.state == "FAILED"
     assert calls["n"] == fail_at
     # RESERVED (budget) counts the failing attempt; COMPLETED counts only successful appends.
-    b2fa = outcome.report["b2_final_answer"]
+    b2fa = cast(Mapping[str, object], outcome.report["b2_final_answer"])
     assert b2fa["reserved_attempts"] == fail_at
     assert b2fa["completed_answers"] == fail_at - 1
     assert b2fa["spent"] == fail_at - 1  # spent == completed, NOT reserved/planned 72

@@ -58,6 +58,7 @@ from loguru import logger
 
 from open_notebook.integrations.graphrag.eval.provider_binding08 import (
     FROZEN_EMBEDDING_MODEL,
+    FROZEN_LLM_MODEL,
 )
 from open_notebook.integrations.graphrag.eval.vectoradapterpn02d import (
     FROZEN_EMBEDDING_PROVIDER,
@@ -66,6 +67,20 @@ from open_notebook.integrations.graphrag.eval.vectoradapterpn02d import (
 #: The ``Model.type`` value for an embedding model (matches the normal model registry).
 FROZEN_EMBEDDING_TYPE = "embedding"
 
+#: The frozen CHAT/final-answer model identity (PN02D-B2 remediation #2). The B2 QA
+#: final-answer seam routes through the repository model-provisioning path
+#: (``provision_langchain_model(type="chat")`` → ``DefaultModels.default_chat_model``); a fresh
+#: isolated namespace has ``default_chat_model = None`` so that provisioning fails closed
+#: (Real B2 Execution #1: ``model_id=None`` → ``FinalAnswerProviderError``). Seeding this ONE
+#: ``Model`` (``type="language"``, the registry's chat/LLM branch) + binding it as the isolated
+#: ``default_chat_model`` makes the frozen final-answer model resolvable — WITHOUT a provider
+#: call (the ``OPENROUTER_API_KEY`` env-key fallback is resolved late, by NAME, at answer time).
+#: Provider matches the embedding seed (OpenRouter, OpenAI-compatible); model = ``openai/gpt-4o-mini``.
+FROZEN_CHAT_MODEL = FROZEN_LLM_MODEL
+FROZEN_CHAT_PROVIDER = FROZEN_EMBEDDING_PROVIDER
+#: The ``Model.type`` value for a chat/LLM model (the ``get_model`` "language" branch).
+FROZEN_CHAT_TYPE = "language"
+
 
 class IsolatedModelSeedError(RuntimeError):
     """The frozen embedding model could not be seeded/cleaned up (fail-closed, content-free)."""
@@ -73,6 +88,10 @@ class IsolatedModelSeedError(RuntimeError):
 
 class ConflictingEmbeddingModelError(IsolatedModelSeedError):
     """A DIFFERENT default embedding model is already bound — never silently overwritten."""
+
+
+class ConflictingChatModelError(IsolatedModelSeedError):
+    """A DIFFERENT default chat model is already bound — never silently overwritten."""
 
 
 class SeedCleanupOwnershipError(IsolatedModelSeedError):
@@ -225,11 +244,128 @@ async def seeded_frozen_embedding_model() -> AsyncIterator[str]:
             await _cleanup_owned_seed()
 
 
+def is_frozen_chat_identity(model: object) -> bool:
+    """Whether ``model`` is EXACTLY the frozen chat identity (name+provider+type)."""
+    return (
+        str(getattr(model, "name", "") or "") == FROZEN_CHAT_MODEL
+        and str(getattr(model, "provider", "") or "") == FROZEN_CHAT_PROVIDER
+        and str(getattr(model, "type", "") or "") == FROZEN_CHAT_TYPE
+    )
+
+
+@asynccontextmanager
+async def seeded_frozen_chat_model() -> AsyncIterator[str]:
+    """Seed the frozen CHAT model as the bound default inside the active isolation (PN02D-B2).
+
+    The chat analogue of :func:`seeded_frozen_embedding_model`, with the SAME security model
+    (unconditional active-isolation guard before any DB access; lexical, zero-argument,
+    ownership- and identity-checked, restore-before-delete teardown; PROVIDER-FREE — no
+    provider call, no discovery, no stored credential). It seeds
+    ``DefaultModels.default_chat_model`` so ``provision_langchain_model(type="chat")`` (the B2
+    final-answer transport) resolves the frozen ``openai/gpt-4o-mini`` instead of ``None``.
+
+    Conflict policy (mirrors the embedding seed):
+
+      * default unset (fresh isolated namespace) -> CREATE the frozen chat model + bind it;
+      * default already the EXACT frozen chat identity -> REUSE it (idempotent, no create);
+      * default bound to a DIFFERENT model -> ``ConflictingChatModelError`` (fail-closed).
+
+    A missing/corrupt chat seed therefore never silently falls back to another model — if this
+    seed is not applied, ``default_chat_model`` stays ``None`` and provisioning fails closed.
+    """
+    from open_notebook.integrations.graphrag.eval.isolation08 import (
+        require_active_isolation,
+    )
+
+    # UNCONDITIONAL guard, before ANY DefaultModels/Model access (mirrors the embedding seed).
+    require_active_isolation()
+
+    from open_notebook.ai.models import DefaultModels, Model
+
+    created = False
+    created_model_id: Optional[str] = None
+    prior_default: Optional[str] = None
+    owner_namespace, owner_database = _active_isolation_identity()
+
+    async def _cleanup_owned_chat_seed() -> None:
+        """Ordered, fail-closed teardown of the chat seed THIS invocation created.
+
+        A zero-argument closure (never returned/exported); acts only on values captured
+        lexically from this invocation. Fails closed on any isolation / identity / ownership
+        mismatch BEFORE any mutation; restores the prior default chat model FIRST, then deletes
+        the owned model (a delete never runs after a failed restore).
+        """
+        require_active_isolation()
+        if _active_isolation_identity() != (owner_namespace, owner_database):
+            raise SeedCleanupOwnershipError(
+                "active isolation identity differs from the chat seed's creation identity "
+                "(cross-namespace teardown refused; fail-closed)"
+            )
+        cleanup_defaults = await DefaultModels.get_instance()
+        if str(cleanup_defaults.default_chat_model) != str(created_model_id):
+            raise SeedCleanupOwnershipError(
+                "current default chat model is no longer the owned seeded model — the default "
+                "changed during the seed scope; failing closed (no destructive cleanup)"
+            )
+        owned = await Model.get(str(created_model_id))
+        if not is_frozen_chat_identity(owned):
+            raise SeedCleanupOwnershipError(
+                "owned chat model identity was mutated/replaced — refusing destructive delete"
+            )
+        cleanup_defaults = await DefaultModels.get_instance()
+        cleanup_defaults.default_chat_model = prior_default
+        await cleanup_defaults.update()
+        await owned.delete()
+        logger.debug(
+            "[model-seed] owned temp chat model torn down (default restored, model deleted)"
+        )
+
+    defaults = await DefaultModels.get_instance()
+    existing_id = defaults.default_chat_model
+
+    if existing_id:
+        existing = await Model.get(existing_id)
+        if existing is not None and is_frozen_chat_identity(existing):
+            model_id = str(existing_id)  # EXACT_MATCH_REUSE — not owned, no teardown
+        else:
+            raise ConflictingChatModelError(
+                "a non-frozen default chat model is already bound in the isolated namespace "
+                "(refusing to overwrite; fail-closed)"
+            )
+    else:
+        prior_default = existing_id  # None on a fresh namespace
+        model = Model(
+            name=FROZEN_CHAT_MODEL,
+            provider=FROZEN_CHAT_PROVIDER,
+            type=FROZEN_CHAT_TYPE,
+            credential=None,
+        )
+        await model.save()
+        created_model_id = str(model.id)
+        model_id = created_model_id
+        defaults = await DefaultModels.get_instance()
+        defaults.default_chat_model = created_model_id
+        await defaults.update()
+        created = True
+
+    try:
+        yield model_id
+    finally:
+        if created and created_model_id is not None:
+            await _cleanup_owned_chat_seed()
+
+
 __all__ = [
     "FROZEN_EMBEDDING_TYPE",
+    "FROZEN_CHAT_MODEL",
+    "FROZEN_CHAT_PROVIDER",
+    "FROZEN_CHAT_TYPE",
     "IsolatedModelSeedError",
     "ConflictingEmbeddingModelError",
+    "ConflictingChatModelError",
     "SeedCleanupOwnershipError",
     "is_frozen_embedding_identity",
+    "is_frozen_chat_identity",
     "seeded_frozen_embedding_model",
+    "seeded_frozen_chat_model",
 ]

@@ -16,6 +16,7 @@ B2 tag present at HEAD) are both covered — no permanent-absence assumption.
 from __future__ import annotations
 
 import inspect
+from typing import cast
 from unittest import mock
 
 import graphrag_pn02db0cb_common as C
@@ -29,6 +30,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_EW7_CHECKPOINT_TAG,
     EXPECTED_EW8_CHECKPOINT_TAG,
     HISTORICAL_B2_CHECKPOINT_TAG,
+    HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG,
     LiveProviderRunAuthorization,
     LiveProviderRunAuthorizationError,
     RealTrustedB1R2Reader,
@@ -140,11 +142,19 @@ def _maybe_simulate_state_b():
 
 
 def test_expected_b2_checkpoint_tag_exact():
-    # SUCCESSOR B2 identity (the first-B2 tag was immutable/superseded after the lifecycle-test
-    # forensic — operator Resolution B, no retroactive exception).
-    assert EXPECTED_B2_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
+    # CHAT-MODEL-REMEDIATION B2 identity. Three distinct B2-era trust identities now exist: the
+    # first-B2 tag and the lifecycle/predecessor tag are both immutable/historical; the current
+    # expected identity supersedes BOTH (Real B2 EXEC #1 chat-model remediation; no retroactive
+    # exception).
+    assert EXPECTED_B2_CHECKPOINT_TAG == "graphrag-pn02db2-chat-model-remediation-approved"
     assert HISTORICAL_B2_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-approved"
-    assert EXPECTED_B2_CHECKPOINT_TAG != HISTORICAL_B2_CHECKPOINT_TAG
+    assert HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG == "graphrag-pn02db2-qa-live-wiring-lifecycle-approved"
+    # all three are distinct identities
+    assert len({
+        EXPECTED_B2_CHECKPOINT_TAG,
+        HISTORICAL_B2_CHECKPOINT_TAG,
+        HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG,
+    }) == 3
 
 
 def test_current_approved_b2_resolves_b2_identity():
@@ -168,7 +178,7 @@ def test_b2_fails_closed_today_real_reader():
     # permanent tag-absence assumption. STATE A (successor tag absent): the B2 gate fails closed with
     # ``b1_r2_tag_not_observed_in_git`` even though EW8 peels to a HEAD. STATE B (successor tag present
     # at the authorized HEAD): a HEAD-bound B2 grant is ACCEPTED (no tag-not-observed).
-    approved = authmint.current_approved_b2_checkpoint()
+    approved = cast(str, authmint.current_approved_b2_checkpoint())  # frozen non-None B2 identity
     obs = authmint._build_trusted_b1_r2_reader().observe(approved)
     if not obs.observed_tag_exists:
         reasons = b2_r2_refusal_reasons(_b2_grant(), C.clean_git_baseline())
@@ -190,7 +200,7 @@ def test_ew8_cannot_substitute_for_b2():
     # so ``b1_r2_grant_identity_mismatch`` is always present (EW8 peeling to a HEAD is irrelevant —
     # the B2 gate verifies the B2 successor tag, not EW8). STATE A additionally reports
     # ``b1_r2_tag_not_observed_in_git``.
-    approved = authmint.current_approved_b2_checkpoint()
+    approved = cast(str, authmint.current_approved_b2_checkpoint())  # frozen non-None B2 identity
     reader = authmint._build_trusted_b1_r2_reader()
     obs = reader.observe(approved)
     commit = obs.observed_head or C.TEST_COMMIT
@@ -208,8 +218,8 @@ def test_ew8_cannot_substitute_for_b2():
 @pytest.mark.parametrize(
     "bad_tag",
     [EXPECTED_EW7_CHECKPOINT_TAG, "graphrag-pn02db1ew6-index-conflict-recovery-approved",
-     "totally-arbitrary-tag", "graphrag-pn02db2-qa-live-wiring-lifecycle-approved-EVIL",
-     HISTORICAL_B2_CHECKPOINT_TAG],
+     "totally-arbitrary-tag", "graphrag-pn02db2-chat-model-remediation-approved-EVIL",
+     HISTORICAL_B2_CHECKPOINT_TAG, HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG],
 )
 def test_older_or_arbitrary_tag_cannot_substitute_for_b2(bad_tag):
     reasons = verify_b1_r2_checkpoint(
@@ -250,6 +260,28 @@ def test_historical_first_b2_tag_cannot_substitute_for_successor():
     assert "b1_r2_grant_identity_mismatch" in reasons
     # The resolver's approved identity is the SUCCESSOR, never the historical first-B2 tag.
     assert authmint.current_approved_b2_checkpoint() != HISTORICAL_B2_CHECKPOINT_TAG
+
+
+def test_predecessor_lifecycle_tag_cannot_substitute_for_successor():
+    # The PREDECESSOR lifecycle tag (``...qa-live-wiring-lifecycle-approved``, immutable at commit
+    # 40d3a6f) was the approved identity for the prior turn AND still peels correctly to the current
+    # HEAD (40d3a6f) — yet after the successor resolver identity is introduced it is HISTORICAL and can
+    # NEVER authorize the chat-model-remediation successor run. The grant's checkpoint must EXACTLY
+    # equal the successor identity, so a grant citing the predecessor → ``b1_r2_grant_identity_mismatch``
+    # in BOTH lifecycle states (peeling-to-HEAD is irrelevant: the gate verifies the successor tag).
+    # There is NO ancestor authorization: a checkpoint valid for a prior HEAD does not authorize a later
+    # HEAD even when the commit is identical.
+    reasons = verify_b1_r2_checkpoint(
+        reader=RealTrustedB1R2Reader(),
+        operator_grant=_b2_grant(b1_r2=HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG),
+        approved_expected_checkpoint=current_approved_b2_checkpoint(),
+        git_baseline=C.clean_git_baseline(),
+    )
+    assert "b1_r2_grant_identity_mismatch" in reasons
+    # The resolver's approved identity is the SUCCESSOR, never the predecessor lifecycle tag.
+    assert authmint.current_approved_b2_checkpoint() != HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG
+    # ...and the predecessor remains a DISTINCT immutable historical identity from the first-B2 tag.
+    assert HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG != HISTORICAL_B2_CHECKPOINT_TAG
 
 
 # --------------------------------------------------------------------------- #

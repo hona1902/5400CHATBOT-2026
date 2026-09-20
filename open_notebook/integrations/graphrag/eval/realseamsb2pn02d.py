@@ -12,12 +12,15 @@ on top of the approved B1 machinery + the B2 mint-identity security boundary:
     (``authmintlivepn02d.mint_live_b2_provider_run_authorization``) via the additive
     ``driver_kwargs`` seam. When those are absent the B1 path is byte-identical.
 
-The B2 mint gates on ``current_approved_b2_checkpoint()`` (the future SUCCESSOR
-``graphrag-pn02db2-qa-live-wiring-lifecycle-approved`` tag; the historical first-B2 tag
-``graphrag-pn02db2-qa-live-wiring-approved`` at commit ``41eb3f3`` is immutable/superseded).
-While that successor annotated tag is ABSENT from real Git, ``run_live_b2_execution`` FAILS
-CLOSED inside the driver's mint before any provider binding/boot — neither EW8 (which peels to
-a B1 HEAD) nor the historical first-B2 tag can ever authorize a B2 run.
+The B2 mint gates on ``current_approved_b2_checkpoint()`` (the current expected identity
+``graphrag-pn02db2-chat-model-remediation-approved`` — see ``EXPECTED_B2_CHECKPOINT_TAG``).
+Two prior B2-era tags are immutable/historical and can NEVER authorize the current run: the
+predecessor lifecycle tag ``graphrag-pn02db2-qa-live-wiring-lifecycle-approved`` at commit
+``40d3a6f`` (superseded by the chat-model-remediation identity; an ancestor never authorizes a
+later HEAD) and the first-B2 tag ``graphrag-pn02db2-qa-live-wiring-approved`` at commit
+``41eb3f3``. While the current expected annotated tag is ABSENT from real Git,
+``run_live_b2_execution`` FAILS CLOSED inside the driver's mint before any provider binding/boot
+— neither EW8 (which peels to a B1 HEAD) nor either historical B2 tag can ever authorize a B2 run.
 
 The ON final-answer transport is an injected ``completion_fn``: provider-free tests pass a
 fake; a live run builds the real one lazily from the repository provisioning abstraction
@@ -27,7 +30,8 @@ performs NO provider I/O and reads NO secret at import time.
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Mapping, Optional
 
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     OperatorRunGrant,
@@ -53,6 +57,33 @@ from open_notebook.integrations.graphrag.eval.realseamspn02d import (
 #: The default-model category for the ON final-answer chat call (routed through the
 #: provisioning abstraction; the frozen model is openai/gpt-4o-mini via OpenRouter).
 _FINAL_ANSWER_DEFAULT_TYPE = "chat"
+
+
+@asynccontextmanager
+async def _default_b2_model_seed() -> AsyncIterator[object]:
+    """Seed BOTH the frozen embedding AND the frozen chat model into the active isolation (B2).
+
+    The B1 default model seed (``realseamspn02d._default_model_seed``) seeds ONLY the embedding
+    default, which is why Real B2 Execution #1 failed at the first QA final-answer:
+    ``provision_langchain_model(type="chat")`` resolved ``model_id=None`` because the isolated
+    namespace had no ``default_chat_model``. This nests the two shared, provider-free seed
+    contexts — embedding OUTER, chat INNER — so BOTH ``DefaultModels`` defaults resolve the frozen
+    models inside the temp namespace, and both are torn down (chat first, then embedding) on exit.
+    It reuses the SINGLE-SOURCE ``isolated_model_seed`` mechanism (no second registry, no ad-hoc
+    provider client) and makes NO provider call. B1 is unaffected — it keeps the embedding-only
+    default seed.
+    """
+    from open_notebook.integrations.graphrag.eval.isolated_model_seed import (
+        seeded_frozen_chat_model,
+        seeded_frozen_embedding_model,
+    )
+
+    async with seeded_frozen_embedding_model() as embedding_model_id:
+        async with seeded_frozen_chat_model():
+            # Yield the embedding id to preserve the B1 model-seed contract (the frozen-model
+            # attestor + embedding stack resolve the embedding default); the chat default is
+            # bound in the inner scope for the B2 final-answer transport.
+            yield embedding_model_id
 
 
 def build_real_final_answer_completion_fn() -> CompletionFn:
@@ -141,6 +172,7 @@ async def run_live_b2_execution(
         git_baseline_attestation=git_baseline_attestation,
         observed_fixture_hash=observed_fixture_hash,
         driver_kwargs=_b2_driver_kwargs(qa_stage),
+        model_seed=_default_b2_model_seed,
         env=env,
     )
     return attach_b2_final_answer_spend(outcome, qa_stage)
@@ -166,13 +198,15 @@ async def _run_live_b2_execution_composed(
     calls this. Any keyword left ``None`` falls back to the shared helper's real default.
     """
     qa_stage = build_b2_qa_stage(completion_fn=completion_fn)
+    # Default to the B2 combined (embedding + chat) seed so a composed B2 run resolves the chat
+    # default too; an explicit ``model_seed`` (e.g. a no-op seed in a fully-faked test) overrides.
+    effective_model_seed = model_seed if model_seed is not None else _default_b2_model_seed
     passthrough = {
         k: v
         for k, v in dict(
             fx=fx,
             seams_builder=seams_builder,
             isolation=isolation,
-            model_seed=model_seed,
             builder_kwargs=builder_kwargs,
         ).items()
         if v is not None
@@ -182,6 +216,7 @@ async def _run_live_b2_execution_composed(
         git_baseline_attestation=git_baseline_attestation,
         observed_fixture_hash=observed_fixture_hash,
         driver_kwargs=_b2_driver_kwargs(qa_stage),
+        model_seed=effective_model_seed,
         env=env,
         **passthrough,
     )
