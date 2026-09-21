@@ -25,8 +25,10 @@ from open_notebook.integrations.graphrag.eval import p1diagrunnerpn02db3 as runn
 from open_notebook.integrations.graphrag.eval import realseamsb2pn02d as realseams
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_B2_CHECKPOINT_TAG,
+    EXPECTED_B3_LIVE_CHECKPOINT_TAG,
     EXPECTED_B3B_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
+    HISTORICAL_B3B_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     b2_r2_refusal_reasons,
     b3b_r2_refusal_reasons,
@@ -86,10 +88,31 @@ class _MultiPatch:
 # --------------------------------------------------------------------------- #
 
 
-def test_b3b_identity_distinct_and_resolves():
-    assert EXPECTED_B3B_CHECKPOINT_TAG == "graphrag-pn02db3b-live-observability-wiring-approved"
-    assert current_approved_b3b_checkpoint() == EXPECTED_B3B_CHECKPOINT_TAG
-    assert EXPECTED_B3B_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
+def test_b3_live_identity_is_b3j_successor_and_historical_b3b_separate():
+    # PN02D-B3J: the governed B3 LIVE authorization identity is the predeclared successor tag,
+    # DISTINCT from the historical B3B wiring tag (immutable evidence, now an ancestor).
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG == "graphrag-pn02db3j-b3-live-auth-successor-approved"
+    assert HISTORICAL_B3B_CHECKPOINT_TAG == "graphrag-pn02db3b-live-observability-wiring-approved"
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3B_CHECKPOINT_TAG
+    # resolver + backward-compat alias both point at the LIVE (B3J) identity, distinct from B2
+    assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
+    assert EXPECTED_B3B_CHECKPOINT_TAG == EXPECTED_B3_LIVE_CHECKPOINT_TAG
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
+
+
+def test_real_git_b3_live_profile_fails_closed_because_b3j_tag_absent():
+    # §13/§29/§30: at the REAL implementation HEAD (a986c72), the governed B3 LIVE profile expects
+    # the B3J successor tag, which does NOT exist yet — so the REAL trusted git reader observes it
+    # absent and the profile FAILS CLOSED (b1_r2_tag_not_observed_in_git). This proves the
+    # remediation does NOT prematurely authorize execution, even though the B3H governance tag is
+    # at exact HEAD and the historical B3B tag is present at an ancestor. No patching of the reader.
+    reasons = b3b_r2_refusal_reasons(
+        _b3_grant(b1_r2=EXPECTED_B3_LIVE_CHECKPOINT_TAG, commit=C.TEST_COMMIT),
+        C.clean_git_baseline(),
+    )
+    assert "b1_r2_tag_not_observed_in_git" in reasons
+    # the governed live identity is NOT the historical B3B tag (which IS present in real git)
+    assert current_approved_b3b_checkpoint() != HISTORICAL_B3B_CHECKPOINT_TAG
 
 
 # --------------------------------------------------------------------------- #
