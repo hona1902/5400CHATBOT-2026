@@ -28,9 +28,22 @@ Guarantees:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from open_notebook.integrations.graphrag.eval.datasetpn02 import FixturePN02
+from open_notebook.integrations.graphrag.eval import realseamsb2pn02d as _realseams
+from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
+    EXPECTED_FIXTURE_HASH,
+    OperatorRunGrant,
+    mint_live_b3_provider_run_authorization,
+)
+from open_notebook.integrations.graphrag.eval.datasetpn02 import (
+    FixturePN02,
+    load_fixture,
+)
+from open_notebook.integrations.graphrag.eval.driver_live_pn02d import (
+    GitBaselineAttestation,
+)
+from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
 from open_notebook.integrations.graphrag.eval.metricspn02 import grade_answer
 from open_notebook.integrations.graphrag.eval.p1diagpn02db3 import (
     P1QueryArmDiagnostic,
@@ -119,7 +132,18 @@ def build_b3_observability_artifact(
     fabricated complete set. All diagnostics come from the checkpointed projection."""
     if not observation_run_id:
         raise B3ObservabilityError("observation_run_id required")
-    if observation_run_id == reference_b2_run_id:
+    # M1 (PN02DB3D-ER1-M1): the security invariant is enforced against the IMMUTABLE
+    # frozen constant ``REFERENCE_B2_RUN_ID``, NEVER the caller-supplied
+    # ``reference_b2_run_id`` metadata — otherwise a caller could disable the guard by
+    # overriding the reference and smuggle the real closed B2 run id in as the
+    # observation id. The reference metadata is itself pinned to the frozen constant
+    # (fail-closed on any override) so the artifact field stays exactly the frozen value.
+    if reference_b2_run_id != REFERENCE_B2_RUN_ID:
+        raise B3ObservabilityError(
+            "reference_b2_run_id must be the frozen closed B2 scientific run id "
+            "(caller override of the security reference is refused)"
+        )
+    if observation_run_id == REFERENCE_B2_RUN_ID:
         raise B3ObservabilityError(
             "B3 observation run id must NOT reuse the frozen B2 scientific run id"
         )
@@ -139,6 +163,74 @@ def build_b3_observability_artifact(
     }
 
 
+async def run_live_b3_observability_execution(
+    *,
+    operator_grant: OperatorRunGrant,
+    git_baseline_attestation: GitBaselineAttestation,
+    observed_fixture_hash: str = EXPECTED_FIXTURE_HASH,
+    env: Optional[Mapping[str, str]] = None,
+    reference_b2_run_id: str = REFERENCE_B2_RUN_ID,
+    expected_pair_count: int = EXPECTED_QUERY_ARM_PAIRS,
+    fx: Optional[FixturePN02] = None,
+) -> Tuple[B1RunOutcome, Dict[str, object]]:
+    """CANONICAL governed B3 OBSERVABILITY execution (PN02D-B3D). OBSERVABILITY_ONLY.
+
+    Reuses the EXISTING real B2 scientific engine (``realseamsb2pn02d.run_live_b2_execution`` —
+    same two-boot / retrieval / generation / grading / budgets / provider accounting) with just
+    two additions: (1) the distinct **B3B mint** (``mint_live_b3_provider_run_authorization``),
+    so provider authorization gates on the B3B checkpoint at exact HEAD and fails closed
+    otherwise — the B2 mint is NOT used and NO second scientific pipeline is created; and (2) the
+    ``B3ObservabilityCollector`` injected as ``qa_execution_observer`` to capture per-(query,arm)
+    evidence + result during the run. After the run it builds the distinct, content-safe
+    ``PN02DB3_FACT_RECALL_OBSERVABILITY`` artifact from the checkpointed diagnostic and attaches it
+    additively to ``outcome.report['b3_observability']`` (never rewriting the B2 report shape).
+
+    Fail-closed: if the B3B mint refuses (tag absent / not at HEAD / ancestor / wrong peel / no
+    operator grant) ``run_live_b2_execution`` raises before any diagnostics; and
+    ``build_b3_observability_artifact`` raises ``B3ObservabilityError`` on any capture/diagnosis
+    failure or if ``operator_grant.run_id`` reuses the frozen B2 scientific run id. A partial run
+    yields ``completeness=PARTIAL`` with the true completed count. Returns ``(outcome, artifact)``.
+    """
+    # M1 (PN02DB3D-ER1-M1): reject B2-run-id reuse and any caller override of the
+    # security reference BEFORE provider binding / live mint / scientific execution —
+    # never only after the run. Both checks use the IMMUTABLE frozen constant.
+    if reference_b2_run_id != REFERENCE_B2_RUN_ID:
+        raise B3ObservabilityError(
+            "reference_b2_run_id must be the frozen closed B2 scientific run id "
+            "(caller override of the security reference is refused)"
+        )
+    if operator_grant.run_id == REFERENCE_B2_RUN_ID:
+        raise B3ObservabilityError(
+            "B3 observation run id must NOT reuse the frozen B2 scientific run id "
+            "(rejected before provider binding)"
+        )
+    collector = B3ObservabilityCollector()
+    outcome = await _realseams.run_live_b2_execution(
+        operator_grant=operator_grant,
+        git_baseline_attestation=git_baseline_attestation,
+        observed_fixture_hash=observed_fixture_hash,
+        env=env,
+        qa_execution_observer=collector,
+        mint_fn=mint_live_b3_provider_run_authorization,
+        # PN02D-B3G: the B3 observational run consumes its grant under the "B3B" profile via the
+        # SHARED RealB1Driver one-shot claim (reused through run_live_b2_execution) — this wrapper
+        # adds NO second claim, so a real B3 attempt consumes the grant exactly once.
+        execution_kind="B3B",
+    )
+    fixture = fx if fx is not None else load_fixture()
+    artifact = build_b3_observability_artifact(
+        fixture,
+        collector.records,
+        observation_run_id=operator_grant.run_id,  # DISTINCT observation id; B2 run id rejected
+        reference_b2_run_id=reference_b2_run_id,
+        expected_pair_count=expected_pair_count,
+    )
+    if isinstance(outcome.report, dict):
+        # Additive ONLY — the distinct B3 observability block never rewrites B2 report fields.
+        outcome.report["b3_observability"] = artifact
+    return outcome, artifact
+
+
 def observed_arm_coverage(records: Sequence[B2QAExecutionRecord]) -> Tuple[ArmId, ...]:
     """Distinct arms observed (for wiring verification). Order-stable by ARM enum order."""
     seen = {rec.arm for rec in records}
@@ -153,5 +245,6 @@ __all__ = [
     "B3ObservabilityCollector",
     "build_b3_diagnostics",
     "build_b3_observability_artifact",
+    "run_live_b3_observability_execution",
     "observed_arm_coverage",
 ]

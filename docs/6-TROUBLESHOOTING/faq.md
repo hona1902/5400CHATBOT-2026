@@ -115,6 +115,14 @@ tar -czf backup-$(date +%Y%m%d).tar.gz data/ surreal_data/
 tar -xzf backup-20240101.tar.gz
 ```
 
+> **Security state is not part of this backup.** The evaluation harness's one-shot
+> live-authorization consumption ledger is security state, stored per-user OUTSIDE the
+> application data directories (under `~/.open-notebook/security/`). It is intentionally **not**
+> captured by the `data/ surreal_data/` backup above, and an ordinary restore must never
+> replace, delete, or roll it back — doing so could make an already-consumed authorization
+> reusable. When migrating machines, carry this security ledger forward-only; never overwrite a
+> newer ledger with an older snapshot.
+
 ### Can I sync data between devices?
 
 **Currently**: No built-in sync functionality.

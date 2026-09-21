@@ -100,6 +100,29 @@ class LiveDriverError(RuntimeError):
     """The live driver could not assemble/run the real path (fail-closed, content-free)."""
 
 
+#: PN02D-B3G: the shared one-shot consumption enforcer type. Injected only in provider-free
+#: tests (backed by a temporary ledger / spy); production leaves it ``None`` so the driver uses
+#: the real durable ledger. Takes the operator grant + execution kind + optional ledger path.
+OneShotEnforcer = Callable[..., None]
+
+
+def _default_one_shot_enforcer(
+    *, operator_grant: object, execution_kind: str, ledger_path: Optional[str] = None
+) -> None:
+    """Default consumer = the real durable SQLite one-shot ledger (lazy import so importing
+    this driver has no ledger/config side effect). Raises ``GrantAlreadyConsumedError`` on a
+    replay and fails closed on any ledger open/lock/corruption/schema failure."""
+    from open_notebook.integrations.graphrag.eval.authledgerpn02d import (
+        enforce_one_shot,
+    )
+
+    enforce_one_shot(
+        operator_grant=operator_grant,
+        execution_kind=execution_kind,
+        ledger_path=ledger_path,
+    )
+
+
 def materialize_live_provider_binding(
     live_auth: object,
     *,
@@ -216,6 +239,9 @@ class RealB1Driver:
         mint_fn: Callable[..., LiveProviderRunAuthorization] = (
             mint_live_provider_run_authorization
         ),
+        execution_kind: str = "B1",
+        one_shot_enforcer: Optional[OneShotEnforcer] = None,
+        oneshot_ledger_path: Optional[str] = None,
     ) -> None:
         self._fx = fx
         self._seams = seams
@@ -226,6 +252,13 @@ class RealB1Driver:
         # (B2 checkpoint gate + b2 caps + b2 allowlist). Both resolve their trust roots
         # INTERNALLY; this is a mint SELECTOR, not a trust-root override.
         self._mint_fn = mint_fn
+        # PN02D-B3G one-shot: the profile/execution kind bound into the consumption digest
+        # ("B1"/"B2"/"B3B") and the enforcer that atomically consumes the grant at the shared
+        # execution boundary. ``one_shot_enforcer`` defaults to the real durable ledger; tests
+        # inject a temporary-ledger-backed / spy enforcer. Enforcement is shared across B1/B2/B3.
+        self._execution_kind = execution_kind
+        self._one_shot_enforcer = one_shot_enforcer
+        self._oneshot_ledger_path = oneshot_ledger_path
         self._cleaned = False
         rt_kwargs: Dict[str, object] = dict(
             fx=fx,
@@ -278,6 +311,25 @@ class RealB1Driver:
                 real_preflight_auth=preflight_auth,
                 git_baseline_attestation=git_baseline_attestation,
                 observed_fixture_hash=observed_fixture_hash,
+            )
+
+            # -- PN02D-B3G ONE-SHOT consumption (PN02DB3D-ER1-H1 closure). AFTER mint
+            #    validation PASS, BEFORE the first provider-bound action (materialize binding /
+            #    Boot 2). The mint stays side-effect-free; consumption lives ONLY here at the
+            #    canonical execution boundary — so B1, B2, and B3 (which reuses this same driver
+            #    via the B2 engine) each claim EXACTLY ONCE. A replay raises
+            #    GrantAlreadyConsumedError and any ledger failure fails closed, BEFORE any
+            #    provider binding. Boot-1/preflight failures above never reach this point, so a
+            #    pre-consumption refusal never consumes the grant.
+            enforcer = (
+                self._one_shot_enforcer
+                if self._one_shot_enforcer is not None
+                else _default_one_shot_enforcer
+            )
+            enforcer(
+                operator_grant=operator_grant,
+                execution_kind=self._execution_kind,
+                ledger_path=self._oneshot_ledger_path,
             )
 
             # -- materialize provider binding (live-gated; secret NAMES only).

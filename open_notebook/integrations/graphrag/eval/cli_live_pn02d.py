@@ -38,6 +38,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     attest_approved_clean_baseline,
     b1_r2_refusal_reasons,
     b2_r2_refusal_reasons,
+    b3b_r2_refusal_reasons,
     frozen_b1_operator_grant_template,
 )
 from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
@@ -399,6 +400,94 @@ def _default_live_b2_runner(
     )
 
 
+def _project_b3_observability_result(report: Dict[str, object]) -> Dict[str, object]:
+    """PN02D-B3D content-safe projection for a governed B3 OBSERVABILITY run. It surfaces the
+    DISTINCT, already-content-safe ``report['b3_observability']`` block (built by the checkpointed
+    diagnostic) plus the B2 technical/isolation context — NEVER as a B2 scientific verdict. It
+    recomputes nothing, invents no P1, and adds no answer/source/prompt/secret content. If the
+    observability block is absent (e.g. a fail-closed refusal before the run), it stays None.
+    """
+    base = _project_scientific_result(report)
+    r = report if isinstance(report, dict) else {}
+    raw_obs = r.get("b3_observability")
+    obs: Dict[str, object] = raw_obs if isinstance(raw_obs, dict) else {}
+    base.update(
+        {
+            "b3_report_kind": obs.get("report_kind"),
+            "b3_mode": obs.get("mode"),
+            "b3_observation_run_id": obs.get("observation_run_id"),
+            "b3_reference_b2_run_id": obs.get("reference_b2_run_id"),
+            "b3_expected_pair_count": obs.get("expected_pair_count"),
+            "b3_completed_diagnostic_pair_count": obs.get("completed_diagnostic_pair_count"),
+            "b3_completeness": obs.get("completeness"),
+            "b3_observability": obs or None,
+        }
+    )
+    return base
+
+
+def _default_live_b3_observability_runner(
+    *,
+    operator_grant: OperatorRunGrant,
+    git_baseline: GitBaselineAttestation,
+    observed_fixture_hash: str,
+    env: Dict[str, str],
+) -> B1RunOutcome:
+    """Run the real in-process two-boot governed B3 OBSERVABILITY execution (lazy import).
+
+    Uses ``p1diagrunnerpn02db3.run_live_b3_observability_execution`` — the B3B mint (B3B
+    checkpoint gate at exact HEAD) + the B3 observer over the EXISTING B2 engine. Returns the
+    technical outcome (the distinct content-safe B3 artifact is attached to
+    ``outcome.report['b3_observability']``). No second scientific pipeline.
+    """
+    import asyncio
+
+    from open_notebook.integrations.graphrag.eval.p1diagrunnerpn02db3 import (
+        run_live_b3_observability_execution,
+    )
+
+    outcome, _artifact = asyncio.run(
+        run_live_b3_observability_execution(
+            operator_grant=operator_grant,
+            git_baseline_attestation=git_baseline,
+            observed_fixture_hash=observed_fixture_hash,
+            env=env,
+        )
+    )
+    return outcome
+
+
+def evaluate_execute_b3_observability_live(
+    *,
+    manifest_path: Optional[str],
+    explicit_authorize: bool,
+    env: Dict[str, str],
+) -> Tuple[int, Dict[str, object]]:
+    """PUBLIC production evaluator for ``execute-b3-observability-live`` (PN02D-B3D).
+
+    Reuses the shared composed evaluator with the fixed B3B profile: the B3B checkpoint gate
+    (``b3b_r2_refusal_reasons`` → the B3B tag, verified at EXACT HEAD → fails closed unless
+    observed there), the B2-style caps (FINAL_ANSWER=72) and QA allowlist, the governed B3 runner
+    (``run_live_b3_observability_execution`` — B3B mint + observer over the existing B2 engine),
+    and the DISTINCT B3 observability projection. Its signature exposes NO trust-root / profile /
+    runner override. Without the governance env token + ``--authorize`` it REFUSES before any
+    provider binding or runtime boot; and a valid B3B tag alone still cannot authorize a run
+    (a matching operator grant is required). It never reinterprets or overwrites the closed B2
+    scientific result.
+    """
+    return _evaluate_execute_b1_live_composed(
+        manifest_path=manifest_path,
+        explicit_authorize=explicit_authorize,
+        env=env,
+        live_runner=_default_live_b3_observability_runner,
+        command="execute-b3-observability-live",
+        refusal_fn=b3b_r2_refusal_reasons,
+        allowlist=B2_ALLOWED_OPERATION_VALUES,
+        expected_caps_dict=b2_caps_dict,
+        projector=_project_b3_observability_result,
+    )
+
+
 def evaluate_execute_b1_live(
     *,
     manifest_path: Optional[str],
@@ -622,6 +711,18 @@ def cmd_execute_b2_live(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_execute_b3_observability_live(args: argparse.Namespace) -> int:
+    import os
+
+    exit_code, payload = evaluate_execute_b3_observability_live(
+        manifest_path=getattr(args, "manifest", None),
+        explicit_authorize=bool(getattr(args, "authorize", False)),
+        env=dict(os.environ),
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return exit_code
+
+
 def cmd_dry_run_b1_live_plan(args: argparse.Namespace) -> int:
     plan = plan_live_b1(run_id=args.run_id)
     if args.out:
@@ -668,6 +769,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="operator intent flag (still requires the governance env token; refused otherwise)",
     )
     b2.set_defaults(func=cmd_execute_b2_live)
+
+    b3 = sub.add_parser(
+        "execute-b3-observability-live",
+        help=(
+            "validate a live B3 fact-recall OBSERVABILITY run manifest and (fail-closed) refuse "
+            "until the B3B checkpoint tag exists at exact HEAD + governance is open"
+        ),
+    )
+    b3.add_argument("--manifest", help="path to the operator run-grant manifest JSON")
+    b3.add_argument(
+        "--authorize",
+        action="store_true",
+        help="operator intent flag (still requires the governance env token; refused otherwise)",
+    )
+    b3.set_defaults(func=cmd_execute_b3_observability_live)
 
     d = sub.add_parser(
         "dry-run-b1-live-plan",

@@ -31,7 +31,7 @@ performs NO provider I/O and reads NO secret at import time.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Mapping, Optional
+from typing import AsyncIterator, Callable, Mapping, Optional
 
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     OperatorRunGrant,
@@ -155,14 +155,24 @@ def attach_b2_final_answer_spend(outcome: B1RunOutcome, qa_stage: B2QAStage) -> 
     return outcome
 
 
-def _b2_driver_kwargs(qa_stage_seam: QAStageSeam) -> dict:
-    """The additive B2 ``driver_kwargs``: the QA stage + the B2 mint selector. The mint
-    resolves its trust roots INTERNALLY (B2 checkpoint gate); this is a mint SELECTOR, not a
-    trust-root override.
+def _b2_driver_kwargs(
+    qa_stage_seam: QAStageSeam,
+    *,
+    mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
+    execution_kind: str = "B2",
+) -> dict:
+    """The additive B2 ``driver_kwargs``: the QA stage + the mint SELECTOR + the one-shot
+    execution kind. The mint resolves its trust roots INTERNALLY (checkpoint gate); this is a
+    mint SELECTOR, not a trust-root override. ``mint_fn`` defaults to the B2 mint; a PN02D-B3B
+    observability run passes the distinct B3B mint (``mint_live_b3_provider_run_authorization``).
+    ``execution_kind`` ("B2" by default, "B3B" for a B3 observational run) is the profile bound
+    into the PN02D-B3G one-shot consumption digest; the shared ``RealB1Driver`` performs the
+    single atomic claim.
     """
     return {
         "qa_stage_seam": qa_stage_seam,
-        "mint_fn": mint_live_b2_provider_run_authorization,
+        "mint_fn": mint_fn,
+        "execution_kind": execution_kind,
     }
 
 
@@ -173,24 +183,31 @@ async def run_live_b2_execution(
     observed_fixture_hash: str = EXPECTED_FIXTURE_HASH,
     env: Optional[Mapping[str, str]] = None,
     qa_execution_observer: Optional[QAExecutionObserver] = None,
+    mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
+    execution_kind: str = "B2",
 ) -> B1RunOutcome:
     """PRODUCTION live B2 entrypoint (used by ``execute-b2-live``).
 
     Exposes NO composition or trust-root override: the seams builder, isolation, model seed,
     and model attestor are the real production defaults; the B2 QA stage uses the real ON
-    completion transport; and the mint is the B2 mint (fails closed until the B2 checkpoint
-    tag exists). Reuses the B1 two-boot/mint/index/GD/vector orchestration unchanged.
+    completion transport. Reuses the B1 two-boot/mint/index/GD/vector orchestration unchanged.
 
     ``qa_execution_observer`` (PN02D-B3B, default ``None`` = byte-identical B2) is threaded to
-    the QA stage's optional observability hook for a future B3 observational run; it never
-    changes retrieval/generation/grading/metrics or the B2 scientific result.
+    the QA stage's optional observability hook for a B3 observational run; it never changes
+    retrieval/generation/grading/metrics or the B2 scientific result. ``mint_fn`` (default the B2
+    mint → byte-identical B2) is the mint SELECTOR: a governed B3 run passes the distinct B3B mint
+    so authorization gates on the B3B checkpoint identity (the B2 mint still fails closed today).
+    ``execution_kind`` ("B2"; a B3 observational run passes "B3B") is the profile bound into the
+    PN02D-B3G one-shot consumption digest; the shared ``RealB1Driver`` performs ONE atomic claim.
     """
     qa_stage = build_b2_qa_stage(execution_observer=qa_execution_observer)
     outcome = await _run_live_b1_execution_composed(
         operator_grant=operator_grant,
         git_baseline_attestation=git_baseline_attestation,
         observed_fixture_hash=observed_fixture_hash,
-        driver_kwargs=_b2_driver_kwargs(qa_stage),
+        driver_kwargs=_b2_driver_kwargs(
+            qa_stage, mint_fn=mint_fn, execution_kind=execution_kind
+        ),
         model_seed=_default_b2_model_seed,
         env=env,
     )

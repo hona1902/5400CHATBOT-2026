@@ -403,6 +403,24 @@ EXPECTED_B2_CHECKPOINT_TAG = "graphrag-pn02db2-chat-model-remediation-approved"
 #: and lifecycle/predecessor) can never substitute for it (exact-identity + trusted-reader).
 _APPROVED_B2_CHECKPOINT: Optional[str] = EXPECTED_B2_CHECKPOINT_TAG
 
+#: The EXACT operator/governance-approved checkpoint identity for a PN02D-**B3B** live
+#: OBSERVABILITY run (PN02D-B3D). A SEPARATE identity from B1 (EW8) and B2 (chat-model): a
+#: B3B run must be authorized at the B3B checkpoint (which is a SUCCESSOR of the B2 checkpoint,
+#: so the B2 tag is now an ancestor and its profile fails closed here — no grandfathering). The
+#: B3B run reuses the B2 workload caps / QA allowlist (it is a diagnostic replay of the same QA
+#: envelope), differing ONLY in the checkpoint identity it gates on and in producing an
+#: OBSERVABILITY-only artifact. While this annotated tag is ABSENT from real Git a B3B mint fails
+#: closed; it becomes mintable only when the trusted reader observes THIS exact tag at the
+#: authorized HEAD. Neither B1/EW8 nor the B2 tag can ever substitute (exact-identity + trusted
+#: reader). NEVER a caller string / ancestor fallback / "latest tag" heuristic.
+EXPECTED_B3B_CHECKPOINT_TAG = "graphrag-pn02db3b-live-observability-wiring-approved"
+
+#: Governance state for the B3B provider-authorization checkpoint. FROZEN to the current
+#: ``EXPECTED_B3B_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED B3B identity). Non-None,
+#: but not mintable until the trusted reader observes that exact tag in real Git at the authorized
+#: HEAD; else fails closed. B1/EW8 and the B2 tag (an ancestor at the B3B HEAD) can never substitute.
+_APPROVED_B3B_CHECKPOINT: Optional[str] = EXPECTED_B3B_CHECKPOINT_TAG
+
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
 _B1_R2_TRUSTED_KEY = object()
 
@@ -663,6 +681,41 @@ def b2_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[
     )
 
 
+def current_approved_b3b_checkpoint() -> Optional[str]:
+    """The operator/governance-approved checkpoint identity for a PN02D-**B3B** live
+    OBSERVABILITY run (PN02D-B3D). Returns the frozen ``EXPECTED_B3B_CHECKPOINT_TAG`` — a
+    SEPARATE identity from ``current_approved_b1_r2_checkpoint()`` (EW8) and
+    ``current_approved_b2_checkpoint()`` (the B2 tag). Non-None, but a B3B live authorization is
+    NOT mintable until the trusted reader observes that EXACT annotated tag at the authorized
+    HEAD; else it fails closed. NEVER derived from a caller string, a B1/B2 fallback, an ancestor,
+    or a Git-tag heuristic. Tests simulate approval by patching THIS function (and the trusted
+    reader factory) — never by passing trust roots.
+    """
+    return _APPROVED_B3B_CHECKPOINT
+
+
+def b3b_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[str]:
+    """Resolve the **B3B** trust roots INTERNALLY and return refusal reasons (empty = OK).
+
+    Identical trust machinery to :func:`b1_r2_refusal_reasons` / :func:`b2_r2_refusal_reasons` —
+    the SAME hardened :func:`verify_b1_r2_checkpoint` verifier and the SAME internal
+    ``_build_trusted_b1_r2_reader`` (no duplicated verifier, no weakened checks) — but the
+    approved-EXPECTED identity is ``current_approved_b3b_checkpoint()`` (the B3B tag), NOT the
+    B1/EW8 or B2 identity. Takes NO reader/identity parameter. Exact-HEAD is required: a B3B tag
+    that peels to an ancestor of HEAD (or any non-HEAD commit) fails closed
+    (``b1_r2_tag_not_at_authorized_head``); no ancestor grandfathering. The B2 tag can never
+    satisfy it (the grant's ``b1_r2_checkpoint`` must EXACTLY equal the B3B identity).
+    """
+    approved_expected = current_approved_b3b_checkpoint()
+    reader = _build_trusted_b1_r2_reader()
+    return verify_b1_r2_checkpoint(
+        reader=reader,
+        operator_grant=operator_grant,
+        approved_expected_checkpoint=approved_expected,
+        git_baseline=git_baseline,
+    )
+
+
 @dataclass(frozen=True)
 class _AuthProfile:
     """INTERNAL, module-private mint profile (PN02D-B2). It selects the phase-specific
@@ -695,6 +748,20 @@ _B1_AUTH_PROFILE = _AuthProfile(
 _B2_AUTH_PROFILE = _AuthProfile(
     name="B2",
     refusal_fn=b2_r2_refusal_reasons,
+    expected_caps_dict=b2_caps_dict,
+    allowlist=B2_ALLOWED_OPERATION_VALUES,
+)
+
+#: The B3B OBSERVABILITY profile (PN02D-B3D) — B3B checkpoint gate (fails closed until the B3B
+#: tag exists AT HEAD), reusing the B2-style caps (FINAL_ANSWER=72) and the B2 QA allowlist
+#: (B1 + QA-V/QA-GD/QA-V+GD) because a B3B run is a DIAGNOSTIC replay of the same QA envelope.
+#: Used ONLY by the public ``mint_live_b3_provider_run_authorization`` entry; the distinct
+#: ``name`` marks the OBSERVABILITY run type. It reuses the B2 caps/allowlist but NEVER the B2
+#: checkpoint identity — the gate verifies the B3B tag, so the B2 tag (an ancestor at the B3B
+#: HEAD) can never authorize a B3B run, and a B3B grant can never authorize a B2 run.
+_B3B_AUTH_PROFILE = _AuthProfile(
+    name="B3B-OBSERVABILITY",
+    refusal_fn=b3b_r2_refusal_reasons,
     expected_caps_dict=b2_caps_dict,
     allowlist=B2_ALLOWED_OPERATION_VALUES,
 )
@@ -1047,6 +1114,35 @@ def mint_live_b2_provider_run_authorization(
     )
 
 
+def mint_live_b3_provider_run_authorization(
+    *,
+    operator_grant: OperatorRunGrant,
+    real_preflight_auth: Optional[RealLightRAGPreflightAuthorization],
+    git_baseline_attestation: object,
+    observed_fixture_hash: str,
+    expected_fixture_hash: str = EXPECTED_FIXTURE_HASH,
+) -> LiveProviderRunAuthorization:
+    """Mint a **B3B** OBSERVABILITY live provider-run capability (PN02D-B3D) — the ONLY real B3
+    observational construction path.
+
+    Same hardened core as B1/B2 but with the fixed private ``_B3B_AUTH_PROFILE``: the B3B
+    checkpoint gate (``current_approved_b3b_checkpoint`` → ``EXPECTED_B3B_CHECKPOINT_TAG``) plus
+    the B2-style caps (FINAL_ANSWER=72) and QA allowlist. Because the B3B tag must be observed at
+    the EXACT authorized HEAD, this fails closed unless that holds; the B2 tag (an ancestor at the
+    B3B HEAD) can NEVER authorize a B3B run, and a valid B3B tag alone still cannot mint without a
+    matching operator grant. Exposes NO profile / trust-root / checkpoint parameter (§22/§23).
+    The B1 and B2 mints are UNCHANGED and cannot be reached through this entry.
+    """
+    return _mint_live_provider_run_authorization_with_profile(
+        profile=_B3B_AUTH_PROFILE,
+        operator_grant=operator_grant,
+        real_preflight_auth=real_preflight_auth,
+        git_baseline_attestation=git_baseline_attestation,
+        observed_fixture_hash=observed_fixture_hash,
+        expected_fixture_hash=expected_fixture_hash,
+    )
+
+
 def require_live_provider_run_authorization(
     auth: object,
 ) -> LiveProviderRunAuthorization:
@@ -1131,6 +1227,41 @@ def frozen_b2_operator_grant_template(
     )
 
 
+def frozen_b3b_operator_grant_template(
+    *,
+    run_id: str,
+    implementation_checkpoint_commit: str,
+    implementation_checkpoint_tag: str,
+    b1_r2_checkpoint: str,
+    approved_git_commit: str,
+    approved_git_tag: str,
+) -> OperatorRunGrant:
+    """Build a PN02D-**B3B** OBSERVABILITY OperatorRunGrant with every FROZEN field pre-filled.
+
+    Identical FROZEN shape to :func:`frozen_b2_operator_grant_template` (``workload_caps=
+    b2_caps_dict()`` FINAL_ANSWER=72; ``operation_allowlist=B2_ALLOWED_OPERATION_VALUES``) — a
+    B3B observability run replays the same QA envelope. The caller supplies the B3B checkpoint
+    identity as ``b1_r2_checkpoint`` (the grant's single checkpoint field); the B3B mint verifies
+    it against ``current_approved_b3b_checkpoint()`` (the B3B tag), so a B2 grant (B2 tag) can
+    never authorize a B3B run and vice-versa. ``run_id`` here is the DISTINCT B3 observation run
+    id and must not be the frozen B2 scientific run id.
+    """
+    return OperatorRunGrant(
+        run_id=run_id,
+        fixture_hash=EXPECTED_FIXTURE_HASH,
+        implementation_checkpoint_commit=implementation_checkpoint_commit,
+        implementation_checkpoint_tag=implementation_checkpoint_tag,
+        b1_r2_checkpoint=b1_r2_checkpoint,
+        provider_config_fingerprint=frozen_provider_config_id(),
+        workload_caps=b2_caps_dict(),
+        operation_allowlist=B2_ALLOWED_OPERATION_VALUES,
+        approved_git_commit=approved_git_commit,
+        approved_git_tag=approved_git_tag,
+        synthetic_only=True,
+        real_internal_data_allowed=False,
+    )
+
+
 __all__ = [
     "EXPECTED_FIXTURE_HASH",
     "EXPECTED_PROVIDER_CONFIG_ID",
@@ -1149,9 +1280,12 @@ __all__ = [
     "verify_b1_r2_checkpoint",
     "b1_r2_refusal_reasons",
     "b2_r2_refusal_reasons",
+    "b3b_r2_refusal_reasons",
     "current_approved_b1_r2_checkpoint",
     "current_approved_b2_checkpoint",
+    "current_approved_b3b_checkpoint",
     "EXPECTED_B2_CHECKPOINT_TAG",
+    "EXPECTED_B3B_CHECKPOINT_TAG",
     "HISTORICAL_B2_CHECKPOINT_TAG",
     "HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG",
     "EXPECTED_EW8_CHECKPOINT_TAG",
@@ -1168,7 +1302,9 @@ __all__ = [
     "LiveProviderRunAuthorization",
     "mint_live_provider_run_authorization",
     "mint_live_b2_provider_run_authorization",
+    "mint_live_b3_provider_run_authorization",
     "require_live_provider_run_authorization",
     "frozen_b1_operator_grant_template",
     "frozen_b2_operator_grant_template",
+    "frozen_b3b_operator_grant_template",
 ]

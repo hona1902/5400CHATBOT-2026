@@ -8,6 +8,12 @@ sqlite_folder = f"{DATA_FOLDER}/sqlite-db"
 os.makedirs(sqlite_folder, exist_ok=True)
 LANGGRAPH_CHECKPOINT_FILE = f"{sqlite_folder}/checkpoints.sqlite"
 
+# NOTE (PN02D-B3H): the durable one-shot live-authorization consumption ledger is SECURITY STATE
+# and intentionally lives OUTSIDE this app ./data folder (resolved per-user under
+# ~/.open-notebook/security/ by open_notebook/integrations/graphrag/eval/authledgerpn02d.py), so
+# the documented `tar data/ surreal_data/` backup/restore cannot roll consumed grants backward.
+# It has NO config/env override on the production runtime path.
+
 # UPLOADS FOLDER
 UPLOADS_FOLDER = f"{DATA_FOLDER}/uploads"
 os.makedirs(UPLOADS_FOLDER, exist_ok=True)
