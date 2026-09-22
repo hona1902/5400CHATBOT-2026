@@ -23,12 +23,17 @@ import open_notebook.integrations.graphrag.eval.authmintlivepn02d as authmint
 from open_notebook.integrations.graphrag.eval import cli_live_pn02d as cli
 from open_notebook.integrations.graphrag.eval import p1diagrunnerpn02db3 as runner
 from open_notebook.integrations.graphrag.eval import realseamsb2pn02d as realseams
+from open_notebook.integrations.graphrag.eval.authb1r2pn02d import (
+    APPROVED_IMPLEMENTATION_CHECKPOINT_COMMIT,
+    APPROVED_IMPLEMENTATION_CHECKPOINT_TAG,
+)
 from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     EXPECTED_B2_CHECKPOINT_TAG,
     EXPECTED_B3_LIVE_CHECKPOINT_TAG,
     EXPECTED_B3B_CHECKPOINT_TAG,
     EXPECTED_FIXTURE_HASH,
     HISTORICAL_B3B_CHECKPOINT_TAG,
+    HISTORICAL_B3J_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     b2_r2_refusal_reasons,
     b3b_r2_refusal_reasons,
@@ -88,46 +93,79 @@ class _MultiPatch:
 # --------------------------------------------------------------------------- #
 
 
-def test_b3_live_identity_is_b3j_successor_and_historical_b3b_separate():
-    # PN02D-B3J: the governed B3 LIVE authorization identity is the predeclared successor tag,
-    # DISTINCT from the historical B3B wiring tag (immutable evidence, now an ancestor).
-    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG == "graphrag-pn02db3j-b3-live-auth-successor-approved"
+def test_b3_live_identity_is_b3q_successor_and_historical_tags_separate():
+    # PN02D-B3Q: the governed B3 LIVE authorization identity is the predeclared B3Q successor tag,
+    # DISTINCT from the historical B3B wiring tag AND the historical B3J successor tag (both now
+    # ancestors / immutable evidence, NEVER the live identity).
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG == "graphrag-pn02db3q-b3-live-auth-successor-approved"
     assert HISTORICAL_B3B_CHECKPOINT_TAG == "graphrag-pn02db3b-live-observability-wiring-approved"
+    assert HISTORICAL_B3J_CHECKPOINT_TAG == "graphrag-pn02db3j-b3-live-auth-successor-approved"
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3B_CHECKPOINT_TAG
-    # resolver + backward-compat alias both point at the LIVE (B3J) identity, distinct from B2
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3J_CHECKPOINT_TAG
+    # resolver + backward-compat alias both point at the LIVE (B3Q) identity, distinct from B2
     assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert EXPECTED_B3B_CHECKPOINT_TAG == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
 
 
-def test_real_git_b3_live_profile_exact_head_trust_passes_after_b3j_checkpoint():
-    # PN02D-B3P-R1 (M3, governance-state sync): the approved B3J governance checkpoint CREATED the
-    # B3J successor tag at the current exact HEAD (commit b5892409). So the REAL trusted git reader
-    # now OBSERVES it at HEAD and the governed B3 LIVE profile no longer fails closed on tag-absence
-    # — exact-head trust PASSES for a grant bound to the real HEAD. The tag ALONE still does NOT
-    # authorize a run: a HEAD-bound operator grant is required (proven by the synthetic/mismatch
-    # tests below). The trust ALGORITHM is unchanged; only the real repository state advanced.
+def test_real_git_b3_live_profile_fails_closed_because_b3q_tag_absent():
+    # PN02D-B3Q: the approved B3P implementation checkpoint advanced HEAD beyond the B3J tag, so the
+    # governed B3 LIVE identity is now the PREDECLARED B3Q successor tag, which does NOT exist yet.
+    # The REAL trusted git reader observes it absent and the profile FAILS CLOSED — the correct,
+    # intended state during B3Q implementation/review. The historical B3J tag is now an ANCESTOR and
+    # the B3P implementation tag peels exactly to HEAD, but NEITHER can authorize the B3Q profile
+    # (identity separation + no ancestor grandfathering). Trust ALGORITHM unchanged; only real state advanced.
     baseline = cli.read_git_baseline()
     reader = authmint._build_trusted_b1_r2_reader()
+    # the B3Q live tag is ABSENT from real Git -> fail closed on tag-not-observed
     obs = reader.observe(EXPECTED_B3_LIVE_CHECKPOINT_TAG)
-    # the B3J live tag exists in real Git and peels to the current HEAD
-    assert obs.observed_tag_exists is True
-    assert obs.observed_tag_peel == obs.observed_head == baseline.head_commit
-    # a grant bound to the REAL HEAD + B3J tag passes exact-head trust (no tag-absence / not-at-HEAD)
-    grant = frozen_b3b_operator_grant_template(
-        run_id=OBS_RUN_ID,
-        implementation_checkpoint_commit=C.TEST_COMMIT,
-        implementation_checkpoint_tag=C.TEST_TAG,
-        b1_r2_checkpoint=EXPECTED_B3_LIVE_CHECKPOINT_TAG,
-        approved_git_commit=baseline.head_commit,
-        approved_git_tag=baseline.head_tag,
+    assert obs.observed_tag_exists is False
+    reasons = b3b_r2_refusal_reasons(
+        frozen_b3b_operator_grant_template(
+            run_id=OBS_RUN_ID,
+            implementation_checkpoint_commit=C.TEST_COMMIT,
+            implementation_checkpoint_tag=C.TEST_TAG,
+            b1_r2_checkpoint=EXPECTED_B3_LIVE_CHECKPOINT_TAG,
+            approved_git_commit=baseline.head_commit,
+            approved_git_tag=baseline.head_tag,
+        ),
+        baseline,
     )
-    reasons = b3b_r2_refusal_reasons(grant, baseline)
-    assert "b1_r2_tag_not_observed_in_git" not in reasons
-    assert "b1_r2_tag_not_at_authorized_head" not in reasons
-    # governed live identity is the B3J tag, distinct from the historical B3B tag
-    assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
+    assert "b1_r2_tag_not_observed_in_git" in reasons
+    # the historical B3J tag IS present in real Git but is now an ANCESTOR (not the current HEAD) and
+    # is NOT the governed live identity -> cannot authorize
+    b3j_obs = reader.observe(HISTORICAL_B3J_CHECKPOINT_TAG)
+    assert b3j_obs.observed_tag_exists is True
+    assert b3j_obs.observed_tag_peel != b3j_obs.observed_head  # ancestor, not at HEAD
+    assert current_approved_b3b_checkpoint() != HISTORICAL_B3J_CHECKPOINT_TAG
     assert current_approved_b3b_checkpoint() != HISTORICAL_B3B_CHECKPOINT_TAG
+
+
+def test_real_git_b3p_implementation_tag_at_head_cannot_authorize_b3_live():
+    # PN02D-B3Q (§14/§21): the B3P implementation checkpoint tag peels EXACTLY to the current HEAD,
+    # but it is an IMPLEMENTATION tag, NOT the governed B3 live-auth identity (which is the absent
+    # B3Q successor tag). A grant naming the B3P tag as its B3 live checkpoint must fail closed on
+    # identity mismatch — an exact-HEAD tag alone can never authorize the B3 live profile.
+    B3P_IMPL_TAG = "graphrag-pn02db3p-materialization-treatment-approved"
+    baseline = cli.read_git_baseline()
+    reader = authmint._build_trusted_b1_r2_reader()
+    b3p_obs = reader.observe(B3P_IMPL_TAG)
+    assert b3p_obs.observed_tag_exists is True
+    assert b3p_obs.observed_tag_peel == b3p_obs.observed_head == baseline.head_commit  # at HEAD
+    assert B3P_IMPL_TAG != current_approved_b3b_checkpoint()  # NOT the live identity
+    reasons = b3b_r2_refusal_reasons(
+        frozen_b3b_operator_grant_template(
+            run_id=OBS_RUN_ID,
+            implementation_checkpoint_commit=C.TEST_COMMIT,
+            implementation_checkpoint_tag=C.TEST_TAG,
+            b1_r2_checkpoint=B3P_IMPL_TAG,  # try to use the impl tag as the live identity
+            approved_git_commit=baseline.head_commit,
+            approved_git_tag=baseline.head_tag,
+        ),
+        baseline,
+    )
+    # the grant's B3-live identity does not match the approved B3Q identity -> fail closed
+    assert "b1_r2_grant_identity_mismatch" in reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -488,8 +526,11 @@ def _write_b3_manifest(tmp_path, *, run_id=OBS_RUN_ID, b1_r2=EXPECTED_B3B_CHECKP
     manifest = {
         "run_id": run_id,
         "fixture_hash": EXPECTED_FIXTURE_HASH,
-        "implementation_checkpoint_commit": "3eaf28b",
-        "implementation_checkpoint_tag": EXPECTED_B3B_CHECKPOINT_TAG,
+        # PN02D-B3Q-R1 (IR1-L1): the implementation checkpoint identity is the frozen B0C-B
+        # baseline — DISTINCT from the B3 live-auth identity (b1_r2_checkpoint). Using the live-auth
+        # tag here previously conflated the two (and would trip the impl==live equality refusal).
+        "implementation_checkpoint_commit": APPROVED_IMPLEMENTATION_CHECKPOINT_COMMIT,
+        "implementation_checkpoint_tag": APPROVED_IMPLEMENTATION_CHECKPOINT_TAG,
         "b1_r2_checkpoint": b1_r2,
         "provider_config_fingerprint": frozen_provider_config_id(),
         "workload_caps": b2_caps_dict(),
@@ -502,6 +543,27 @@ def _write_b3_manifest(tmp_path, *, run_id=OBS_RUN_ID, b1_r2=EXPECTED_B3B_CHECKP
     p = tmp_path / "b3_manifest.json"
     p.write_text(json.dumps(manifest), encoding="utf-8")
     return str(p)
+
+
+def test_b3_manifest_identity_separation_and_no_equality_refusal(tmp_path):
+    # PN02D-B3Q-R1 (IR1-L1 closure): a correctly-built B3 manifest keeps the implementation
+    # checkpoint identity (frozen B0C-B baseline) DISTINCT from the B3 live-auth identity (B3Q).
+    # Parsing it + running the shared B3 refusal machinery must NOT raise the impl==live equality
+    # refusals; the run still fails closed only because the B3Q live tag is absent from real Git —
+    # i.e. a well-formed manifest alone (without the tag + operator grant) cannot mint.
+    manifest_path = _write_b3_manifest(tmp_path, b1_r2=EXPECTED_B3_LIVE_CHECKPOINT_TAG)
+    with open(manifest_path, encoding="utf-8") as fh:
+        m = json.loads(fh.read())
+    assert m["implementation_checkpoint_tag"] == "graphrag-pn02db0cb-real-provider-wiring-approved"
+    assert m["implementation_checkpoint_commit"] == "5abeaaa09b7157232b1ac5a234c9d8c50b542585"
+    assert m["b1_r2_checkpoint"] == "graphrag-pn02db3q-b3-live-auth-successor-approved"
+    assert m["implementation_checkpoint_tag"] != m["b1_r2_checkpoint"]
+    assert m["implementation_checkpoint_commit"] != m["b1_r2_checkpoint"]
+    reasons = b3b_r2_refusal_reasons(cli.parse_operator_grant(m), cli.read_git_baseline())
+    assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
+    assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
+    # distinct identities do NOT authorize on their own: the B3Q tag is absent -> fail closed
+    assert "b1_r2_tag_not_observed_in_git" in reasons
 
 
 def test_cli_b3_without_operator_auth_fails_closed_before_boot(tmp_path):
