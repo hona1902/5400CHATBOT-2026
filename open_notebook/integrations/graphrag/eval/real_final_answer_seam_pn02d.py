@@ -31,6 +31,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple
 
+from open_notebook.integrations.graphrag.eval.evidence_materialization_pn02d import (
+    EvidenceItem,
+)
 from open_notebook.integrations.graphrag.eval.schemaspn02 import (
     ArmId,
     QAAnswerResult,
@@ -66,26 +69,60 @@ class FinalAnswerProviderError(RuntimeError):
         self.diagnostic = diagnostic
 
 
+#: The final-answer INSTRUCTION text (task B3P §21: FROZEN across control/treatment —
+#: only the EVIDENCE-representation line between them changes). Split into a header and a
+#: footer so the CONTROL prompt is byte-identical to the pre-B3P prompt.
+_PROMPT_HEADER = (
+    "You are the Open Notebook answerer. Answer the question using ONLY the "
+    "evidence Sources listed below, and cite ONLY those Source ids. If the "
+    "evidence does not answer the question, abstain.\n\n"
+)
+_PROMPT_FOOTER = (
+    "Respond with the answer text, then two final lines exactly:\n"
+    f"{_CITATIONS_MARKER} <comma-separated Source ids you used, or empty>\n"
+    f"{_ABSTAIN_MARKER} <YES or NO>\n"
+)
+
+
 def build_final_answer_prompt(
     *, question: str, evidence_source_ids: Sequence[str]
 ) -> str:
-    """Deterministic ON final-answer prompt (content-safe: ids + question only).
+    """Deterministic CONTROL final-answer prompt (content-safe: ids + question only).
 
     Instructs the model to answer ONLY from the provided evidence Source ids, to
     cite ONLY those ids, and to abstain when the evidence does not answer the
     question. The exact answer text is provider output; this builder never embeds a
-    secret and is used identically for every arm.
+    secret and is used identically for every arm. Byte-identical to the pre-B3P prompt.
     """
     ids = ", ".join(evidence_source_ids) if evidence_source_ids else "(none)"
     return (
-        "You are the Open Notebook answerer. Answer the question using ONLY the "
-        "evidence Sources listed below, and cite ONLY those Source ids. If the "
-        "evidence does not answer the question, abstain.\n\n"
-        f"Question: {question}\n"
-        f"Evidence Source ids: {ids}\n\n"
-        "Respond with the answer text, then two final lines exactly:\n"
-        f"{_CITATIONS_MARKER} <comma-separated Source ids you used, or empty>\n"
-        f"{_ABSTAIN_MARKER} <YES or NO>\n"
+        _PROMPT_HEADER
+        + f"Question: {question}\n"
+        + f"Evidence Source ids: {ids}\n\n"
+        + _PROMPT_FOOTER
+    )
+
+
+def build_final_answer_prompt_with_content(
+    *, question: str, evidence_items: "Sequence[EvidenceItem]"
+) -> str:
+    """Deterministic TREATMENT prompt: the SAME instruction text (header/footer) as the
+    control prompt, differing ONLY in the evidence representation — each selected Source
+    id is now rendered WITH its bounded content as ``[Source: <id>] <content>`` in the
+    frozen selected order (task B3P §20-§23). Source ids remain visible so the citation
+    contract is unchanged. Evidence-representation-only change; no instruction edit.
+    """
+    if evidence_items:
+        block = "\n".join(
+            f"[Source: {item.source_id}] {item.content}" for item in evidence_items
+        )
+    else:
+        block = "(none)"
+    return (
+        _PROMPT_HEADER
+        + f"Question: {question}\n"
+        + f"Evidence Sources:\n{block}\n\n"
+        + _PROMPT_FOOTER
     )
 
 
@@ -124,9 +161,31 @@ class RealFinalAnswerSeam:
         question: str,
         evidence_source_ids: Sequence[str],
     ) -> QAAnswerResult:
+        """CONTROL path: prompt carries Source ids ONLY (byte-identical to pre-B3P)."""
         prompt = build_final_answer_prompt(
             question=question, evidence_source_ids=evidence_source_ids
         )
+        return await self._answer_from_prompt(notebook_id, prompt)
+
+    async def answer_materialized(
+        self,
+        notebook_id: str,
+        question: str,
+        evidence_items: Sequence[EvidenceItem],
+    ) -> QAAnswerResult:
+        """TREATMENT path (PN02D-B3P): prompt carries the SAME selected Source ids PLUS
+        their bounded content. Identical instruction text and identical single-call /
+        no-retry / citation-preservation behaviour as ``answer`` — only the evidence
+        representation differs (the one isolated causal variable)."""
+        prompt = build_final_answer_prompt_with_content(
+            question=question, evidence_items=evidence_items
+        )
+        return await self._answer_from_prompt(notebook_id, prompt)
+
+    async def _answer_from_prompt(
+        self, notebook_id: str, prompt: str
+    ) -> QAAnswerResult:
+        """Shared single-call transport + parse (control and treatment identical here)."""
         try:
             completion = await self.completion_fn(prompt)  # EXACTLY once; no retry.
         except Exception as exc:  # noqa: BLE001 - classify to a content-safe diagnostic
@@ -170,6 +229,7 @@ __all__ = [
     "CompletionFn",
     "FinalAnswerProviderError",
     "build_final_answer_prompt",
+    "build_final_answer_prompt_with_content",
     "parse_final_answer",
     "RealFinalAnswerSeam",
     "build_real_final_answer_seam",

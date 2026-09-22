@@ -13,7 +13,14 @@ stays under this eval/test namespace and is vendor-facing, never production.
 
 from __future__ import annotations
 
-from typing import AbstractSet, Optional, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    AbstractSet,
+    Optional,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 from open_notebook.integrations.graphrag.eval.manifestpn02 import WorkspaceAttestation
 from open_notebook.integrations.graphrag.eval.schemaspn02 import (
@@ -21,6 +28,11 @@ from open_notebook.integrations.graphrag.eval.schemaspn02 import (
     QAAnswerResult,
     VectorEvidenceResult,
 )
+
+if TYPE_CHECKING:
+    from open_notebook.integrations.graphrag.eval.evidence_materialization_pn02d import (
+        EvidenceItem,
+    )
 
 # Frozen posture flags (task §60).
 PN02_LIVE_AUTHORIZED = False
@@ -69,6 +81,22 @@ class FinalAnswerSeam(Protocol):
 
     async def answer(
         self, notebook_id: str, question: str, evidence_source_ids: Sequence[str]
+    ) -> QAAnswerResult: ...
+
+
+@runtime_checkable
+class MaterializingFinalAnswerSeam(Protocol):
+    """A final-answer seam that ALSO accepts materialized evidence CONTENT (PN02D-B3P
+    treatment). This is the OPTIONAL extension used ONLY when the B2 QA stage is given an
+    evidence materializer; the control path uses ``FinalAnswerSeam.answer`` unchanged. The
+    ``evidence_items`` carry ``(source_id, content)`` — the seam preserves the citation
+    contract (Source ids stay visible) and never persists content."""
+
+    async def answer_materialized(
+        self,
+        notebook_id: str,
+        question: str,
+        evidence_items: "Sequence[EvidenceItem]",
     ) -> QAAnswerResult: ...
 
 

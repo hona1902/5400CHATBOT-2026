@@ -100,18 +100,33 @@ def test_b3_live_identity_is_b3j_successor_and_historical_b3b_separate():
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
 
 
-def test_real_git_b3_live_profile_fails_closed_because_b3j_tag_absent():
-    # §13/§29/§30: at the REAL implementation HEAD (a986c72), the governed B3 LIVE profile expects
-    # the B3J successor tag, which does NOT exist yet — so the REAL trusted git reader observes it
-    # absent and the profile FAILS CLOSED (b1_r2_tag_not_observed_in_git). This proves the
-    # remediation does NOT prematurely authorize execution, even though the B3H governance tag is
-    # at exact HEAD and the historical B3B tag is present at an ancestor. No patching of the reader.
-    reasons = b3b_r2_refusal_reasons(
-        _b3_grant(b1_r2=EXPECTED_B3_LIVE_CHECKPOINT_TAG, commit=C.TEST_COMMIT),
-        C.clean_git_baseline(),
+def test_real_git_b3_live_profile_exact_head_trust_passes_after_b3j_checkpoint():
+    # PN02D-B3P-R1 (M3, governance-state sync): the approved B3J governance checkpoint CREATED the
+    # B3J successor tag at the current exact HEAD (commit b5892409). So the REAL trusted git reader
+    # now OBSERVES it at HEAD and the governed B3 LIVE profile no longer fails closed on tag-absence
+    # — exact-head trust PASSES for a grant bound to the real HEAD. The tag ALONE still does NOT
+    # authorize a run: a HEAD-bound operator grant is required (proven by the synthetic/mismatch
+    # tests below). The trust ALGORITHM is unchanged; only the real repository state advanced.
+    baseline = cli.read_git_baseline()
+    reader = authmint._build_trusted_b1_r2_reader()
+    obs = reader.observe(EXPECTED_B3_LIVE_CHECKPOINT_TAG)
+    # the B3J live tag exists in real Git and peels to the current HEAD
+    assert obs.observed_tag_exists is True
+    assert obs.observed_tag_peel == obs.observed_head == baseline.head_commit
+    # a grant bound to the REAL HEAD + B3J tag passes exact-head trust (no tag-absence / not-at-HEAD)
+    grant = frozen_b3b_operator_grant_template(
+        run_id=OBS_RUN_ID,
+        implementation_checkpoint_commit=C.TEST_COMMIT,
+        implementation_checkpoint_tag=C.TEST_TAG,
+        b1_r2_checkpoint=EXPECTED_B3_LIVE_CHECKPOINT_TAG,
+        approved_git_commit=baseline.head_commit,
+        approved_git_tag=baseline.head_tag,
     )
-    assert "b1_r2_tag_not_observed_in_git" in reasons
-    # the governed live identity is NOT the historical B3B tag (which IS present in real git)
+    reasons = b3b_r2_refusal_reasons(grant, baseline)
+    assert "b1_r2_tag_not_observed_in_git" not in reasons
+    assert "b1_r2_tag_not_at_authorized_head" not in reasons
+    # governed live identity is the B3J tag, distinct from the historical B3B tag
+    assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert current_approved_b3b_checkpoint() != HISTORICAL_B3B_CHECKPOINT_TAG
 
 

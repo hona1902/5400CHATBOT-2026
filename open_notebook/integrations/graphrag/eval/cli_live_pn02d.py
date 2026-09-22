@@ -432,6 +432,7 @@ def _default_live_b3_observability_runner(
     git_baseline: GitBaselineAttestation,
     observed_fixture_hash: str,
     env: Dict[str, str],
+    treatment_materialization: bool = False,
 ) -> B1RunOutcome:
     """Run the real in-process two-boot governed B3 OBSERVABILITY execution (lazy import).
 
@@ -439,6 +440,10 @@ def _default_live_b3_observability_runner(
     checkpoint gate at exact HEAD) + the B3 observer over the EXISTING B2 engine. Returns the
     technical outcome (the distinct content-safe B3 artifact is attached to
     ``outcome.report['b3_observability']``). No second scientific pipeline.
+
+    ``treatment_materialization`` (PN02D-B3P-R1 M1, default False = CONTROL) is the explicit-only
+    generation-evidence-materialization selection threaded to the governed runner; it is a
+    selection, not authorization.
     """
     import asyncio
 
@@ -452,6 +457,7 @@ def _default_live_b3_observability_runner(
             git_baseline_attestation=git_baseline,
             observed_fixture_hash=observed_fixture_hash,
             env=env,
+            treatment_materialization=treatment_materialization,
         )
     )
     return outcome
@@ -462,6 +468,7 @@ def evaluate_execute_b3_observability_live(
     manifest_path: Optional[str],
     explicit_authorize: bool,
     env: Dict[str, str],
+    treatment_materialization: bool = False,
 ) -> Tuple[int, Dict[str, object]]:
     """PUBLIC production evaluator for ``execute-b3-observability-live`` (PN02D-B3D).
 
@@ -475,11 +482,17 @@ def evaluate_execute_b3_observability_live(
     (a matching operator grant is required). It never reinterprets or overwrites the closed B2
     scientific result.
     """
+    import functools
+
+    runner = functools.partial(
+        _default_live_b3_observability_runner,
+        treatment_materialization=treatment_materialization,
+    )
     return _evaluate_execute_b1_live_composed(
         manifest_path=manifest_path,
         explicit_authorize=explicit_authorize,
         env=env,
-        live_runner=_default_live_b3_observability_runner,
+        live_runner=runner,
         command="execute-b3-observability-live",
         refusal_fn=b3b_r2_refusal_reasons,
         allowlist=B2_ALLOWED_OPERATION_VALUES,
@@ -718,6 +731,7 @@ def cmd_execute_b3_observability_live(args: argparse.Namespace) -> int:
         manifest_path=getattr(args, "manifest", None),
         explicit_authorize=bool(getattr(args, "authorize", False)),
         env=dict(os.environ),
+        treatment_materialization=bool(getattr(args, "treatment", False)),
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return exit_code
@@ -782,6 +796,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--authorize",
         action="store_true",
         help="operator intent flag (still requires the governance env token; refused otherwise)",
+    )
+    b3.add_argument(
+        "--treatment",
+        action="store_true",
+        help=(
+            "PN02D-B3P generation-evidence-materialization TREATMENT (default off = CONTROL). "
+            "Selection only — still requires the operator grant + governance gate; never authorizes."
+        ),
     )
     b3.set_defaults(func=cmd_execute_b3_observability_live)
 

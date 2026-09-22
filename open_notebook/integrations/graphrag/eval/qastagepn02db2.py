@@ -38,7 +38,14 @@ from open_notebook.integrations.graphrag.eval.budgetlivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.combinepn02 import combine_v_gd
 from open_notebook.integrations.graphrag.eval.datasetpn02 import FixturePN02, QueryPN02
-from open_notebook.integrations.graphrag.eval.live_seam_pn02 import FinalAnswerSeam
+from open_notebook.integrations.graphrag.eval.evidence_materialization_pn02d import (
+    EvidenceMaterializer,
+    EvidenceMaterializerFactory,
+)
+from open_notebook.integrations.graphrag.eval.live_seam_pn02 import (
+    FinalAnswerSeam,
+    MaterializingFinalAnswerSeam,
+)
 from open_notebook.integrations.graphrag.eval.schemaspn02 import (
     ArmId,
     GDEvidenceResult,
@@ -109,6 +116,14 @@ class B2QAStage:
     #: produced (query, arm) answer, AFTER the result is appended and counted — it
     #: never regrades, alters the answer/citations, or affects the budget/metrics.
     execution_observer: Optional[QAExecutionObserver] = None
+    #: OPTIONAL PN02D-B3P generation-evidence-materialization treatment. Default ``None``
+    #: = CONTROL (the final-answer prompt carries Source ids only — byte-identical to the
+    #: pre-B3P / B3M baseline). When set, the stage materializes the ALREADY-selected,
+    #: member-filtered arm evidence ids into bounded ``(source_id, content)`` items AFTER
+    #: ``_arm_evidence`` (arm selection FROZEN) and asks the seam's ``answer_materialized``.
+    #: It changes exactly ONE causal variable (final-answer evidence materialization); it
+    #: never alters which ids are selected, their order, membership, retrieval, or grading.
+    evidence_materializer: Optional[EvidenceMaterializer] = None
     #: COMPLETED final answers — incremented ONLY after a QAAnswerResult is successfully
     #: produced (PN02DB2-RR2-M1). Distinct from the budget's RESERVED count: the guard
     #: reserves BEFORE each provider call (to keep the 72-cap fail-closed), so on a partial
@@ -186,11 +201,36 @@ class B2QAStage:
         for item in plan:
             # Reserve BEFORE the call — the 73rd raises WorkloadCapExceeded (fail-closed).
             self.budget.reserve(BudgetClass.FINAL_ANSWER)
-            raw = await self.answer_seam.answer(
-                notebook_id=item.notebook_id,
-                question=fx.query(item.query_id).question,
-                evidence_source_ids=list(item.evidence_source_ids),
-            )
+            question = fx.query(item.query_id).question
+            if self.evidence_materializer is None:
+                # CONTROL (default): Source-ids-only prompt — byte-identical to B3M.
+                raw = await self.answer_seam.answer(
+                    notebook_id=item.notebook_id,
+                    question=question,
+                    evidence_source_ids=list(item.evidence_source_ids),
+                )
+            else:
+                # TREATMENT (PN02D-B3P): materialize the SAME selected, member-filtered
+                # evidence ids into bounded content AFTER arm selection, then ask the
+                # materializing seam. Membership is re-asserted as a defense-in-depth
+                # cross-notebook hard gate (allowed = the query's notebook members).
+                allowed = frozenset(fx.members_of(item.notebook_id))
+                evidence_items = await self.evidence_materializer.materialize(
+                    item.notebook_id,
+                    item.evidence_source_ids,
+                    allowed_source_ids=allowed,
+                )
+                seam = self.answer_seam
+                if not isinstance(seam, MaterializingFinalAnswerSeam):
+                    raise TypeError(
+                        "evidence_materializer set but answer_seam does not support "
+                        "answer_materialized (MaterializingFinalAnswerSeam)"
+                    )
+                raw = await seam.answer_materialized(
+                    item.notebook_id,
+                    question,
+                    evidence_items,
+                )
             # The seam produces answer/citations/abstained; the STAGE is authoritative
             # for (query_id, notebook_id, arm). Citations are preserved verbatim.
             results.append(
@@ -237,6 +277,35 @@ class B2QAStage:
         raise ValueError(f"unknown QA arm {arm!r}")
 
 
+def bind_treatment_materializer(
+    qa_stage_seam: object,
+    evidence_materializer_factory: Optional[EvidenceMaterializerFactory],
+    record_id_by_key: Mapping[str, str],
+) -> bool:
+    """PN02D-B3P-R1 (M1): construct + inject the generation-evidence-materialization
+    treatment into the QA stage AFTER per-run corpus provisioning.
+
+    The per-run ``record_id_by_key`` mapping does not exist until the corpus is provisioned,
+    so the governed live driver calls this exactly once (post-provision, pre-QA) with the
+    real mapping. ``evidence_materializer_factory is None`` → CONTROL (no-op, returns False;
+    the stage keeps its default Source-ids-only behaviour). Otherwise the factory builds the
+    materializer from the real mapping and it is set on the stage (returns True). Fail-closed
+    if a factory is supplied but the stage cannot accept a materializer. This never changes
+    which source ids are selected — only whether their content is materialized.
+    """
+    if evidence_materializer_factory is None:
+        return False
+    if not isinstance(qa_stage_seam, B2QAStage):
+        raise TypeError(
+            "evidence_materializer_factory supplied but qa_stage_seam is not a B2QAStage; "
+            "cannot inject the generation-evidence-materialization treatment (fail-closed)"
+        )
+    qa_stage_seam.evidence_materializer = evidence_materializer_factory(
+        dict(record_id_by_key)
+    )
+    return True
+
+
 __all__ = [
     "ARM_ORDER",
     "STAGE2_K",
@@ -244,4 +313,5 @@ __all__ = [
     "B2QAExecutionRecord",
     "QAExecutionObserver",
     "B2QAStage",
+    "bind_treatment_materializer",
 ]

@@ -65,6 +65,9 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import (
     B1RunOutcome,
     QAStageSeam,
 )
+from open_notebook.integrations.graphrag.eval.evidence_materialization_pn02d import (
+    EvidenceMaterializerFactory,
+)
 from open_notebook.integrations.graphrag.eval.gdadapterpn02d import (
     build_real_gd_backend_factory,
 )
@@ -78,6 +81,9 @@ from open_notebook.integrations.graphrag.eval.provbindpn02d import (
 )
 from open_notebook.integrations.graphrag.eval.provider_binding08 import (
     frozen_provider_binding,
+)
+from open_notebook.integrations.graphrag.eval.qastagepn02db2 import (
+    bind_treatment_materializer,
 )
 from open_notebook.integrations.graphrag.eval.runtimelivepn02d import (
     HealthProberLike,
@@ -242,11 +248,18 @@ class RealB1Driver:
         execution_kind: str = "B1",
         one_shot_enforcer: Optional[OneShotEnforcer] = None,
         oneshot_ledger_path: Optional[str] = None,
+        evidence_materializer_factory: Optional[EvidenceMaterializerFactory] = None,
     ) -> None:
         self._fx = fx
         self._seams = seams
         # OPTIONAL PN02D-B2 Stage-2 QA seam (Option A). None → byte-identical B1.
         self._qa_stage_seam = qa_stage_seam
+        # OPTIONAL PN02D-B3P-R1 (M1) generation-evidence-materialization TREATMENT factory.
+        # Default None = CONTROL (byte-identical). It is a POST-PROVISION factory (not a
+        # pre-built materializer) because the per-run ``record_id_by_key`` does not exist until
+        # corpus provisioning; ``run`` constructs + injects the materializer AFTER provisioning
+        # and BEFORE the QA stage runs (see below). Selection is NOT authorization.
+        self._evidence_materializer_factory = evidence_materializer_factory
         # The LIVE mint entry. Defaults to the B1 mint (EW8 gate + B1 caps/allowlist) →
         # byte-identical B1. A B2 run injects ``mint_live_b2_provider_run_authorization``
         # (B2 checkpoint gate + b2 caps + b2 allowlist). Both resolve their trust roots
@@ -360,6 +373,18 @@ class RealB1Driver:
                 notebook_record_ids=self._seams.notebook_record_ids,
             )
             corpus = await corpus_prov.provision(run_id=live_auth.run_id)
+
+            # -- PN02D-B3P-R1 (M1): construct + inject the generation-evidence-materialization
+            # TREATMENT now that the real per-run corpus mapping exists (post-provision,
+            # pre-QA). No-op CONTROL when no factory was supplied (default) — this is the ONLY
+            # place record_id_by_key is available, so no future code edit is needed to run
+            # treatment: an authorized turn just supplies the factory. It never alters selected
+            # source ids; membership is still enforced inside the QA stage before materializing.
+            bind_treatment_materializer(
+                self._qa_stage_seam,
+                self._evidence_materializer_factory,
+                corpus.record_id_by_key,
+            )
 
             # -- build real deps + reuse the frozen orchestrator (NO new science).
             deps = build_live_b1_driver_deps(

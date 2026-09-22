@@ -172,6 +172,7 @@ async def run_live_b3_observability_execution(
     reference_b2_run_id: str = REFERENCE_B2_RUN_ID,
     expected_pair_count: int = EXPECTED_QUERY_ARM_PAIRS,
     fx: Optional[FixturePN02] = None,
+    treatment_materialization: bool = False,
 ) -> Tuple[B1RunOutcome, Dict[str, object]]:
     """CANONICAL governed B3 OBSERVABILITY execution (PN02D-B3D). OBSERVABILITY_ONLY.
 
@@ -216,6 +217,10 @@ async def run_live_b3_observability_execution(
         # SHARED RealB1Driver one-shot claim (reused through run_live_b2_execution) — this wrapper
         # adds NO second claim, so a real B3 attempt consumes the grant exactly once.
         execution_kind="B3B",
+        # PN02D-B3P-R1 (M1): EXPLICIT-ONLY generation-evidence-materialization selection (default
+        # False = CONTROL). When True, run_live_b2_execution threads the post-provision runtime
+        # materializer factory to the driver — no code edit needed by a future authorized turn.
+        treatment_materialization=treatment_materialization,
     )
     fixture = fx if fx is not None else load_fixture()
     artifact = build_b3_observability_artifact(

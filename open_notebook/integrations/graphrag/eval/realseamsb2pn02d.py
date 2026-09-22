@@ -45,6 +45,10 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import (
     B1RunOutcome,
     QAStageSeam,
 )
+from open_notebook.integrations.graphrag.eval.evidence_materialization_pn02d import (
+    EvidenceMaterializerFactory,
+    build_runtime_evidence_materializer,
+)
 from open_notebook.integrations.graphrag.eval.qastagepn02db2 import (
     B2QAStage,
     QAExecutionObserver,
@@ -124,6 +128,13 @@ def build_b2_qa_stage(
     ``execution_observer`` (PN02D-B3B, default ``None`` = no-op) is an OPTIONAL live-
     observability hook the stage calls once per completed (query, arm); it never alters the
     answer/budget/metrics. It is threaded through unchanged for a future B3 observational run.
+
+    NOTE (PN02D-B3P-R1 M1): the generation-evidence-materialization TREATMENT is NOT injected
+    here — the per-run ``record_id_by_key`` does not exist until corpus provisioning, so the live
+    driver constructs + injects the materializer POST-provision via ``bind_treatment_materializer``
+    when an ``evidence_materializer_factory`` was supplied. This builder always returns a CONTROL
+    stage (``evidence_materializer=None``); the stage's answer seam already supports the treatment
+    method (``RealFinalAnswerSeam.answer_materialized``) once the driver sets the materializer.
     """
     fn = completion_fn if completion_fn is not None else build_real_final_answer_completion_fn()
     return B2QAStage(
@@ -160,6 +171,7 @@ def _b2_driver_kwargs(
     *,
     mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
     execution_kind: str = "B2",
+    evidence_materializer_factory: Optional[EvidenceMaterializerFactory] = None,
 ) -> dict:
     """The additive B2 ``driver_kwargs``: the QA stage + the mint SELECTOR + the one-shot
     execution kind. The mint resolves its trust roots INTERNALLY (checkpoint gate); this is a
@@ -168,11 +180,16 @@ def _b2_driver_kwargs(
     ``execution_kind`` ("B2" by default, "B3B" for a B3 observational run) is the profile bound
     into the PN02D-B3G one-shot consumption digest; the shared ``RealB1Driver`` performs the
     single atomic claim.
+
+    ``evidence_materializer_factory`` (PN02D-B3P-R1 M1, default None = CONTROL) is the
+    POST-PROVISION treatment factory the driver invokes with the run's ``record_id_by_key`` after
+    corpus provisioning; it is a selection, never authorization.
     """
     return {
         "qa_stage_seam": qa_stage_seam,
         "mint_fn": mint_fn,
         "execution_kind": execution_kind,
+        "evidence_materializer_factory": evidence_materializer_factory,
     }
 
 
@@ -185,6 +202,7 @@ async def run_live_b2_execution(
     qa_execution_observer: Optional[QAExecutionObserver] = None,
     mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
     execution_kind: str = "B2",
+    treatment_materialization: bool = False,
 ) -> B1RunOutcome:
     """PRODUCTION live B2 entrypoint (used by ``execute-b2-live``).
 
@@ -199,14 +217,27 @@ async def run_live_b2_execution(
     so authorization gates on the B3B checkpoint identity (the B2 mint still fails closed today).
     ``execution_kind`` ("B2"; a B3 observational run passes "B3B") is the profile bound into the
     PN02D-B3G one-shot consumption digest; the shared ``RealB1Driver`` performs ONE atomic claim.
+
+    ``treatment_materialization`` (PN02D-B3P-R1 M1, default ``False`` = CONTROL, byte-identical) is
+    the EXPLICIT-ONLY generation-evidence-materialization selection. When ``True`` it threads the
+    POST-PROVISION runtime factory (``build_runtime_evidence_materializer``) to the driver, which
+    builds the materializer from the run's ``ProvisionedCorpus.record_id_by_key`` AFTER provisioning
+    and injects it before QA. It never defaults on, changes NO selected ids, and is a selection —
+    NOT authorization (exact-head trust / operator grant / run-id binding / one-shot claim unchanged).
     """
     qa_stage = build_b2_qa_stage(execution_observer=qa_execution_observer)
+    evidence_materializer_factory: Optional[EvidenceMaterializerFactory] = (
+        build_runtime_evidence_materializer if treatment_materialization else None
+    )
     outcome = await _run_live_b1_execution_composed(
         operator_grant=operator_grant,
         git_baseline_attestation=git_baseline_attestation,
         observed_fixture_hash=observed_fixture_hash,
         driver_kwargs=_b2_driver_kwargs(
-            qa_stage, mint_fn=mint_fn, execution_kind=execution_kind
+            qa_stage,
+            mint_fn=mint_fn,
+            execution_kind=execution_kind,
+            evidence_materializer_factory=evidence_materializer_factory,
         ),
         model_seed=_default_b2_model_seed,
         env=env,
