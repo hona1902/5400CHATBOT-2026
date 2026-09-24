@@ -38,13 +38,17 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
 )
 from open_notebook.integrations.graphrag.eval.datasetpn02 import (
     FixturePN02,
+    QueryPN02,
     load_fixture,
 )
 from open_notebook.integrations.graphrag.eval.driver_live_pn02d import (
     GitBaselineAttestation,
 )
 from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
-from open_notebook.integrations.graphrag.eval.metricspn02 import grade_answer
+from open_notebook.integrations.graphrag.eval.metricspn02 import (
+    AnswerGrade,
+    grade_answer,
+)
 from open_notebook.integrations.graphrag.eval.p1diagpn02db3 import (
     P1QueryArmDiagnostic,
     aggregate_p1_diagnostics,
@@ -52,6 +56,9 @@ from open_notebook.integrations.graphrag.eval.p1diagpn02db3 import (
     project_p1_diagnostics,
 )
 from open_notebook.integrations.graphrag.eval.qastagepn02db2 import B2QAExecutionRecord
+from open_notebook.integrations.graphrag.eval.qavaluepn02db3 import (
+    build_qa_value_projection,
+)
 from open_notebook.integrations.graphrag.eval.schemaspn02 import ArmId
 
 #: The frozen CLOSED B2 scientific run id (PN02A). A B3 observational run must NEVER reuse
@@ -88,32 +95,71 @@ class B3ObservabilityCollector:
         self.records.append(record)
 
 
+@dataclass(frozen=True)
+class _GradedB3Record:
+    """One captured record graded EXACTLY ONCE by the frozen grader (task B3U §5/§6/§53).
+
+    Carries the canonical ``AnswerGrade`` so BOTH the existing P1 fact-recall diagnostic and
+    the additive QA-value projection are derived from the SAME grade — grade once, project
+    twice, no regrade."""
+
+    record: B2QAExecutionRecord
+    query: QueryPN02
+    grade: AnswerGrade
+
+
+def _grade_b3_records(
+    fx: FixturePN02, records: Sequence[B2QAExecutionRecord]
+) -> List[_GradedB3Record]:
+    """SINGLE grading pass: grade each captured record ONCE with the EXISTING grader
+    (``metricspn02.grade_answer``). FAILS CLOSED if a record references an unknown query or
+    cannot be graded. This is the only place ``grade_answer`` is called per (query, arm)."""
+    graded: List[_GradedB3Record] = []
+    for rec in records:
+        try:
+            query = fx.query(rec.query_id)
+            members = fx.members_of(rec.notebook_id)
+            grade = grade_answer(rec.result, query, members)  # EXISTING grader; graded ONCE
+        except Exception as exc:  # noqa: BLE001 - fail closed with a content-safe message
+            raise B3ObservabilityError(
+                f"B3 grading failed for {rec.query_id}/{rec.arm.value}: {type(exc).__name__}"
+            ) from exc
+        graded.append(_GradedB3Record(record=rec, query=query, grade=grade))
+    return graded
+
+
+def _diagnostics_from_graded(
+    fx: FixturePN02, graded: Sequence[_GradedB3Record]
+) -> List[P1QueryArmDiagnostic]:
+    """Transform already-graded records through the CHECKPOINTED P1 diagnostic (no regrade)."""
+    diagnostics: List[P1QueryArmDiagnostic] = []
+    for g in graded:
+        try:
+            diag = diagnose_query_arm(
+                fx=fx,
+                query=g.query,
+                arm=g.record.arm,
+                evidence_source_ids=g.record.evidence_source_ids,
+                grade=g.grade,
+                result=g.record.result,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed with a content-safe message
+            raise B3ObservabilityError(
+                f"B3 diagnostic failed for {g.record.query_id}/{g.record.arm.value}: "
+                f"{type(exc).__name__}"
+            ) from exc
+        diagnostics.append(diag)
+    return diagnostics
+
+
 def build_b3_diagnostics(
     fx: FixturePN02, records: Sequence[B2QAExecutionRecord]
 ) -> List[P1QueryArmDiagnostic]:
     """Grade each captured record with the EXISTING grader and transform through the
     CHECKPOINTED diagnostic. FAILS CLOSED (raises ``B3ObservabilityError``) if a record
-    references an unknown query or cannot be graded/diagnosed."""
-    diagnostics: List[P1QueryArmDiagnostic] = []
-    for rec in records:
-        try:
-            query = fx.query(rec.query_id)
-            members = fx.members_of(rec.notebook_id)
-            grade = grade_answer(rec.result, query, members)  # EXISTING grader; no regrade logic
-            diag = diagnose_query_arm(
-                fx=fx,
-                query=query,
-                arm=rec.arm,
-                evidence_source_ids=rec.evidence_source_ids,
-                grade=grade,
-                result=rec.result,
-            )
-        except Exception as exc:  # noqa: BLE001 - fail closed with a content-safe message
-            raise B3ObservabilityError(
-                f"B3 diagnostic failed for {rec.query_id}/{rec.arm.value}: {type(exc).__name__}"
-            ) from exc
-        diagnostics.append(diag)
-    return diagnostics
+    references an unknown query or cannot be graded/diagnosed. Output is byte-identical to
+    the pre-B3U behaviour (one grade per record)."""
+    return _diagnostics_from_graded(fx, _grade_b3_records(fx, records))
 
 
 def build_b3_observability_artifact(
@@ -123,13 +169,21 @@ def build_b3_observability_artifact(
     observation_run_id: str,
     reference_b2_run_id: str = REFERENCE_B2_RUN_ID,
     expected_pair_count: int = EXPECTED_QUERY_ARM_PAIRS,
+    isolation_evidenced: Optional[bool] = None,
 ) -> Dict[str, object]:
     """Build the content-safe, DISTINCT B3 observability artifact from captured records.
 
     The observation run id must be distinct from the referenced B2 scientific run id
     (task B3B §16). Completeness is reported explicitly and honestly (task B3B §25): a
     partial run yields ``completeness=PARTIAL`` with the true completed count — never a
-    fabricated complete set. All diagnostics come from the checkpointed projection."""
+    fabricated complete set. All diagnostics come from the checkpointed projection.
+
+    PN02D-B3U (GRADE ONCE / PROJECT TWICE): each record is graded ONCE; the canonical
+    ``AnswerGrade`` feeds BOTH the existing P1 fact-recall projection and, when
+    ``isolation_evidenced`` is supplied, the ADDITIVE ``qa_value_observability`` subsection
+    (end-to-end P1/P2/P3/S1/S2/S3 via the frozen aggregator + decision). When
+    ``isolation_evidenced`` is None the artifact is byte-identical to the pre-B3U shape
+    (backward compatible — no qa_value_observability key)."""
     if not observation_run_id:
         raise B3ObservabilityError("observation_run_id required")
     # M1 (PN02DB3D-ER1-M1): the security invariant is enforced against the IMMUTABLE
@@ -147,10 +201,11 @@ def build_b3_observability_artifact(
         raise B3ObservabilityError(
             "B3 observation run id must NOT reuse the frozen B2 scientific run id"
         )
-    diagnostics = build_b3_diagnostics(fx, records)  # fail-closed
+    graded = _grade_b3_records(fx, records)  # SINGLE grading pass — grade once
+    diagnostics = _diagnostics_from_graded(fx, graded)  # fail-closed; no regrade
     aggregate = aggregate_p1_diagnostics(diagnostics)
     completed = len(diagnostics)
-    return {
+    artifact: Dict[str, object] = {
         "report_kind": B3_REPORT_KIND,
         "mode": "OBSERVABILITY_ONLY",
         "observation_run_id": observation_run_id,
@@ -161,6 +216,43 @@ def build_b3_observability_artifact(
         # Content-safe projection from the checkpointed diagnostic (ids/tokens/counts only).
         "diagnostics": project_p1_diagnostics(diagnostics, aggregate),
     }
+    # PN02D-B3U: ADDITIVE end-to-end QA-value subsection from the SAME canonical grades.
+    # Only when isolation is known (a live run always supplies it); omitted otherwise so the
+    # pre-B3U artifact shape stays byte-identical for existing callers/tests.
+    if isolation_evidenced is not None:
+        artifact["qa_value_observability"] = build_qa_value_projection(
+            [(g.query, g.grade) for g in graded],
+            isolation_evidenced=isolation_evidenced,
+            expected_pair_count=expected_pair_count,
+        )
+    return artifact
+
+
+def _extract_isolation_evidenced(report: object) -> Optional[bool]:
+    """Recursively read the frozen Stage-1 ``isolation_evidenced`` verdict from the run report.
+
+    Returns True/False for "YES"/"NO" (or a bool), else None (unknown → QA-value subsection is
+    omitted rather than guessed). OBSERVABILITY-ONLY: reads the existing verdict, never recomputes."""
+    if isinstance(report, dict):
+        if "isolation_evidenced" in report:
+            value = report["isolation_evidenced"]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                if value.upper() == "YES":
+                    return True
+                if value.upper() == "NO":
+                    return False
+        for nested in report.values():
+            found = _extract_isolation_evidenced(nested)
+            if found is not None:
+                return found
+    elif isinstance(report, list):
+        for nested in report:
+            found = _extract_isolation_evidenced(nested)
+            if found is not None:
+                return found
+    return None
 
 
 async def run_live_b3_observability_execution(
@@ -229,6 +321,10 @@ async def run_live_b3_observability_execution(
         observation_run_id=operator_grant.run_id,  # DISTINCT observation id; B2 run id rejected
         reference_b2_run_id=reference_b2_run_id,
         expected_pair_count=expected_pair_count,
+        # PN02D-B3U: the isolation gate is decided by the frozen Stage-1 evaluator inside the
+        # SAME run; thread its verdict so the additive QA-value subsection reuses the frozen
+        # qa_decision (Q0 gates on isolation). Never recomputed here.
+        isolation_evidenced=_extract_isolation_evidenced(outcome.report),
     )
     if isinstance(outcome.report, dict):
         # Additive ONLY — the distinct B3 observability block never rewrites B2 report fields.
@@ -253,3 +349,8 @@ __all__ = [
     "run_live_b3_observability_execution",
     "observed_arm_coverage",
 ]
+
+# NOTE (PN02D-B3U): the end-to-end QA-value projection lives in ``qavaluepn02db3`` and is
+# attached additively by ``build_b3_observability_artifact``; this adapter grades ONCE
+# (``_grade_b3_records``) and feeds the same ``AnswerGrade`` to both the P1 diagnostic and
+# the QA-value projection — grade once, project twice.
