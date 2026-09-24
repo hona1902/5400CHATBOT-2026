@@ -12,6 +12,7 @@ ZERO provider traffic / ZERO real execution: the B2 engine is replaced by an asy
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
@@ -124,37 +125,88 @@ def test_b3_live_identity_is_b3xr2_successor_and_historical_tags_separate():
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
 
 
-def test_real_git_b3_live_profile_fails_closed_because_b3xr2_tag_absent():
-    # PN02D-B3X-R2 (real-git sync): the approved B3X-R1 runtime-wiring implementation checkpoint advanced
-    # HEAD past the B3V successor tag, so the governed B3 LIVE identity was repointed to the PREDECLARED
-    # B3X-R2 successor tag. That tag is ABSENT from real Git during implementation/review, so the B3 live
-    # profile FAILS CLOSED (tag-not-observed) — the correct, intended stale-successor state (was
-    # EXACT_HEAD_TRUST_PASS while B3V peeled to HEAD). The historical B3V tag is now an ANCESTOR and is
-    # NOT the governed live identity. Trust ALGORITHM unchanged; only real Git state / the expected
-    # identity advanced.
+# --------------------------------------------------------------------------- #
+# PN02D-B3X-R3A: tri-state real-Git live-auth lifecycle classifier (TEST-ONLY).
+#
+# The governed B3 live-auth identity moves through THREE legitimate lifecycle states relative to
+# HEAD, and a real-Git test that hard-codes any single one becomes stale at the next governed
+# transition (the B3X-R3 checkpoint proved this):
+#   TAG_ABSENT     — successor identity predeclared but its tag not yet created  -> FAIL_CLOSED
+#   EXACT_HEAD     — expected live tag peels exactly to HEAD                      -> TRUST PASS
+#   ANCESTOR_STALE — HEAD advanced past the live tag (impl checkpoint, no successor tag yet) -> FAIL_CLOSED
+# This classifier INDEPENDENTLY inspects Git (existence / peel / HEAD / ancestry) — it does NOT
+# derive the state from the production verifier result, and it does NOT reimplement the trust
+# algorithm. Any relationship that is neither exact-HEAD nor a true ancestor is an explicit failure
+# (never silently normalized). It lives in the test module only.
+# --------------------------------------------------------------------------- #
+
+
+def _git_is_ancestor(ancestor: str, descendant: str) -> bool:
+    """True iff ``ancestor`` is a real-Git ancestor of ``descendant`` (exit code 0)."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _classify_live_tag_lifecycle(reader, tag, head_commit, *, is_ancestor=_git_is_ancestor):
+    """Independently classify EXPECTED live tag vs HEAD into TAG_ABSENT / EXACT_HEAD / ANCESTOR_STALE.
+
+    Raises AssertionError for any unrecognized relationship (peel neither HEAD nor a true ancestor):
+    such states are never silently accepted.
+    """
+    obs = reader.observe(tag)
+    if not obs.observed_tag_exists:
+        return "TAG_ABSENT"
+    peel = obs.observed_tag_peel
+    if peel == obs.observed_head == head_commit:
+        return "EXACT_HEAD"
+    if peel and is_ancestor(peel, head_commit):
+        return "ANCESTOR_STALE"
+    raise AssertionError(
+        f"unrecognized live-tag/HEAD relationship for {tag!r}: peel={peel!r} head={head_commit!r}"
+    )
+
+
+def _b3_live_grant_for(tag, baseline):
+    return frozen_b3b_operator_grant_template(
+        run_id=OBS_RUN_ID,
+        implementation_checkpoint_commit=C.TEST_COMMIT,
+        implementation_checkpoint_tag=C.TEST_TAG,
+        b1_r2_checkpoint=tag,
+        approved_git_commit=baseline.head_commit,
+        approved_git_tag=baseline.head_tag,
+    )
+
+
+def test_real_git_b3_live_profile_matches_current_lifecycle_state():
+    # PN02D-B3X-R3A (tri-state lifecycle-invariant): independently classify the CURRENT landed
+    # relationship of EXPECTED_B3_LIVE_CHECKPOINT_TAG vs HEAD, then assert the SHARED production trust
+    # result matches that state. This is invariant across ALL legitimate governed transitions (a
+    # successor implementation leaves the predeclared tag ABSENT; an implementation checkpoint leaves
+    # the live tag an ANCESTOR; a successor checkpoint restores EXACT_HEAD) — no per-checkpoint test
+    # edit is ever required. Non-tautological: the state is observed from Git, the assertion depends on
+    # the production verifier's refusal set.
     baseline = cli.read_git_baseline()
     reader = authmint._build_trusted_b1_r2_reader()
-    # the predeclared B3X-R2 live tag does NOT exist in real Git yet
-    obs = reader.observe(EXPECTED_B3_LIVE_CHECKPOINT_TAG)
-    assert obs.observed_tag_exists is False
-    reasons = b3b_r2_refusal_reasons(
-        frozen_b3b_operator_grant_template(
-            run_id=OBS_RUN_ID,
-            implementation_checkpoint_commit=C.TEST_COMMIT,
-            implementation_checkpoint_tag=C.TEST_TAG,
-            b1_r2_checkpoint=EXPECTED_B3_LIVE_CHECKPOINT_TAG,
-            approved_git_commit=baseline.head_commit,
-            approved_git_tag=baseline.head_tag,
-        ),
-        baseline,
-    )
-    # absent live tag -> fail closed (tag-not-observed); no ancestor grandfathering
-    assert "b1_r2_tag_not_observed_in_git" in reasons
-    # the historical B3V tag IS present in real Git but is now an ANCESTOR (not the current HEAD) and is
-    # NOT the governed live identity -> cannot be the current live checkpoint
-    b3v_obs = reader.observe(HISTORICAL_B3V_CHECKPOINT_TAG)
-    assert b3v_obs.observed_tag_exists is True
-    assert b3v_obs.observed_tag_peel != b3v_obs.observed_head  # ancestor, not at HEAD
+    state = _classify_live_tag_lifecycle(reader, EXPECTED_B3_LIVE_CHECKPOINT_TAG, baseline.head_commit)
+    reasons = b3b_r2_refusal_reasons(_b3_live_grant_for(EXPECTED_B3_LIVE_CHECKPOINT_TAG, baseline), baseline)
+    if state == "TAG_ABSENT":
+        assert "b1_r2_tag_not_observed_in_git" in reasons  # fail closed, no grandfathering
+    elif state == "EXACT_HEAD":
+        assert "b1_r2_tag_not_observed_in_git" not in reasons
+        assert "b1_r2_tag_not_at_authorized_head" not in reasons
+        assert reasons == []  # exact-head trust PASS
+    elif state == "ANCESTOR_STALE":
+        assert "b1_r2_tag_not_at_authorized_head" in reasons  # stale successor, fail closed
+    else:  # pragma: no cover - classifier only returns the three states or raises
+        pytest.fail(f"unexpected lifecycle state {state!r}")
+    # the resolver always points at the current expected live identity, distinct from the historical tags
+    assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert current_approved_b3b_checkpoint() != HISTORICAL_B3V_CHECKPOINT_TAG
     assert current_approved_b3b_checkpoint() != HISTORICAL_B3Q_CHECKPOINT_TAG
     assert current_approved_b3b_checkpoint() != HISTORICAL_B3J_CHECKPOINT_TAG
@@ -219,33 +271,82 @@ def test_real_git_b3u_implementation_tag_is_ancestor_and_cannot_authorize_b3_liv
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
-def test_real_git_b3xr1_implementation_tag_at_head_cannot_authorize_b3_live():
-    # PN02D-B3X-R2 (§25/§32 — critical identity-separation case): the B3X-R1 QA-value runtime-wiring
-    # tag is IMPLEMENTATION-evidence, NOT the governed B3 live-auth identity (the B3X-R2 successor tag,
-    # currently absent). B3X-R1 peels EXACTLY to the current HEAD (it was created by the B3X-R1
-    # implementation checkpoint at this commit), yet a grant naming the B3X-R1 tag as its B3 live
-    # checkpoint must STILL fail closed on identity mismatch: an exact-HEAD implementation-evidence tag
-    # cannot be conflated with the live-auth identity. Trust algorithm unchanged; no grandfathering.
+def test_real_git_b3xr1_implementation_tag_is_ancestor_and_cannot_authorize_b3_live():
+    # PN02D-B3X-R3 (lifecycle-invariant, landed state): the B3X-R1 QA-value runtime-wiring tag is
+    # IMPLEMENTATION-evidence, NOT the governed B3 live-auth identity (the current B3X-R2 successor tag).
+    # After the approved B3X-R2 governance checkpoint advanced HEAD past the B3X-R1 commit, the B3X-R1 tag
+    # peels to an ANCESTOR (no longer current HEAD). A grant naming the B3X-R1 tag as its B3 live checkpoint
+    # must STILL fail closed on identity mismatch — neither an ancestor tag nor a non-live implementation
+    # tag can authorize the B3 live profile. (The phase-independent security semantic "an implementation
+    # tag sitting at EXACT HEAD cannot substitute for the expected live identity" is covered synthetically
+    # by ``test_synthetic_exact_head_implementation_tag_cannot_authorize`` below.)
     B3XR1_IMPL_TAG = "graphrag-pn02db3xr1-qa-value-runtime-wiring-approved"
     baseline = cli.read_git_baseline()
     reader = authmint._build_trusted_b1_r2_reader()
     b3xr1_obs = reader.observe(B3XR1_IMPL_TAG)
     assert b3xr1_obs.observed_tag_exists is True
-    assert b3xr1_obs.observed_tag_peel == b3xr1_obs.observed_head == baseline.head_commit  # EXACT HEAD
+    assert b3xr1_obs.observed_tag_peel != b3xr1_obs.observed_head  # ANCESTOR, not current HEAD
+    assert b3xr1_obs.observed_head == baseline.head_commit
     assert B3XR1_IMPL_TAG != current_approved_b3b_checkpoint()  # NOT the live identity
     reasons = b3b_r2_refusal_reasons(
         frozen_b3b_operator_grant_template(
             run_id=OBS_RUN_ID,
             implementation_checkpoint_commit=C.TEST_COMMIT,
             implementation_checkpoint_tag=C.TEST_TAG,
-            b1_r2_checkpoint=B3XR1_IMPL_TAG,  # try to use the exact-HEAD impl tag as the live identity
+            b1_r2_checkpoint=B3XR1_IMPL_TAG,  # try to use the ancestor impl tag as the live identity
             approved_git_commit=baseline.head_commit,
             approved_git_tag=baseline.head_tag,
         ),
         baseline,
     )
-    # exact-HEAD implementation-evidence tag is NOT the B3X-R2 live identity -> fail closed
+    # ancestor implementation-evidence tag is NOT the B3X-R2 live identity -> fail closed
     assert "b1_r2_grant_identity_mismatch" in reasons
+
+
+def test_synthetic_exact_head_implementation_tag_cannot_authorize():
+    # PN02D-B3X-R3 (§10/§11 — remediation of PN02DB3XR3-IR1-M1): FAITHFULLY model an
+    # IMPLEMENTATION-evidence tag that ACTUALLY peels to EXACT HEAD, while the separately-named expected
+    # live-auth identity (B3X-R2) is ABSENT, and prove FAIL_CLOSED through the SHARED production trust
+    # logic (b3b_r2_refusal_reasons over a RealTrustedB1R2Reader). This is the phase-independent security
+    # semantic: an implementation tag sitting at exact HEAD must NOT substitute for the expected live
+    # identity. A scripted Git boundary models BOTH tags (impl present@HEAD / B3X-R2 absent), so the
+    # assertion depends on the production refusal RESULT, not a bare constant compare. Stays true
+    # regardless of real Git history / which commit HEAD currently points at.
+    HEAD_X = C.TEST_COMMIT
+    impl_tag_at_head = "graphrag-pn02db3xr1-qa-value-runtime-wiring-approved"
+    expected_live = EXPECTED_B3B_CHECKPOINT_TAG  # the current B3X-R2 successor identity
+    assert impl_tag_at_head != expected_live
+
+    def _multi_tag_runner(args):
+        a = list(args)
+        if a[:2] == ["rev-parse", "HEAD"]:
+            return HEAD_X
+        if a[:2] == ["tag", "--list"]:
+            name = a[2] if len(a) > 2 else ""
+            # the implementation-evidence tag exists; the expected live (B3X-R2) tag is ABSENT
+            return name if name == impl_tag_at_head else ""
+        if a[:2] == ["rev-list", "-n"]:
+            ref = a[3] if len(a) > 3 else ""
+            # the implementation-evidence tag peels EXACTLY to HEAD
+            return HEAD_X if ref == f"refs/tags/{impl_tag_at_head}" else ""
+        return ""
+
+    reader = RealTrustedB1R2Reader(git_runner=_multi_tag_runner)
+    # the synthetic reader GENUINELY models the implementation tag AT exact HEAD ...
+    impl_obs = reader.observe(impl_tag_at_head)
+    assert impl_obs.observed_tag_exists is True
+    assert impl_obs.observed_tag_peel == impl_obs.observed_head == HEAD_X  # impl tag peel == HEAD
+    # ... while the expected live identity (B3X-R2) is ABSENT
+    live_obs = reader.observe(expected_live)
+    assert live_obs.observed_tag_exists is False
+    # a grant naming the (correct) expected live identity B3X-R2 fails closed because that tag is ABSENT,
+    # even though an implementation-evidence tag peels exactly to HEAD -> the impl tag does NOT substitute
+    with _patch_b3(expected_live, reader):
+        reasons = b3b_r2_refusal_reasons(
+            _b3_grant(b1_r2=expected_live, commit=HEAD_X),
+            C.clean_git_baseline(commit=HEAD_X, tag=C.TEST_TAG),
+        )
+    assert "b1_r2_tag_not_observed_in_git" in reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -743,25 +844,128 @@ def _write_b3_manifest(tmp_path, *, run_id=OBS_RUN_ID, b1_r2=EXPECTED_B3B_CHECKP
 
 
 def test_b3_manifest_identity_separation_and_no_equality_refusal(tmp_path):
-    # PN02D-B3X-R2 (real-git sync): a correctly-built B3 manifest keeps the implementation checkpoint
-    # identity (frozen B0C-B baseline) DISTINCT from the B3 live-auth identity (now the B3X-R2 successor
-    # tag). Parsing it + running the shared B3 refusal machinery must NOT raise the impl==live equality
-    # refusals (identity separation holds). Because the B3X-R2 successor tag is ABSENT during
-    # implementation/review, the checkpoint gate FAILS CLOSED (tag-not-observed) — the correct
-    # stale-successor state (was EXACT_HEAD_TRUST_PASS while B3V peeled to HEAD).
+    # PN02D-B3X-R3A (tri-state lifecycle-invariant): a correctly-built B3 manifest keeps the
+    # implementation checkpoint identity (frozen B0C-B baseline) DISTINCT from the current B3 live-auth
+    # identity (derived from EXPECTED_B3_LIVE_CHECKPOINT_TAG). The identity-separation invariant holds in
+    # EVERY lifecycle state and is asserted UNCONDITIONALLY; the trust/refusal outcome is
+    # lifecycle-DEPENDENT and is asserted per the independently-classified current state (so this test
+    # never re-stales when a governed transition moves HEAD relative to the live tag).
     manifest_path = _write_b3_manifest(tmp_path, b1_r2=EXPECTED_B3_LIVE_CHECKPOINT_TAG)
     with open(manifest_path, encoding="utf-8") as fh:
         m = json.loads(fh.read())
+    # --- ALWAYS-INVARIANT: identity separation (never lifecycle-dependent) ---
     assert m["implementation_checkpoint_tag"] == "graphrag-pn02db0cb-real-provider-wiring-approved"
     assert m["implementation_checkpoint_commit"] == "5abeaaa09b7157232b1ac5a234c9d8c50b542585"
-    assert m["b1_r2_checkpoint"] == "graphrag-pn02db3xr2-b3-live-auth-successor-approved"
+    assert m["b1_r2_checkpoint"] == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert m["implementation_checkpoint_tag"] != m["b1_r2_checkpoint"]
     assert m["implementation_checkpoint_commit"] != m["b1_r2_checkpoint"]
-    reasons = b3b_r2_refusal_reasons(cli.parse_operator_grant(m), cli.read_git_baseline())
-    # identity separation holds: neither impl==live equality refusal is raised
+    baseline = cli.read_git_baseline()
+    reasons = b3b_r2_refusal_reasons(cli.parse_operator_grant(m), baseline)
+    # identity separation holds in all states: the impl==live equality refusals are never raised
     assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
     assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
-    # but the predeclared B3X-R2 live tag is absent -> checkpoint gate fails closed
+    # --- LIFECYCLE-DEPENDENT: trust outcome per independently-classified current state ---
+    reader = authmint._build_trusted_b1_r2_reader()
+    state = _classify_live_tag_lifecycle(reader, EXPECTED_B3_LIVE_CHECKPOINT_TAG, baseline.head_commit)
+    if state == "TAG_ABSENT":
+        assert "b1_r2_tag_not_observed_in_git" in reasons
+    elif state == "EXACT_HEAD":
+        assert "b1_r2_tag_not_observed_in_git" not in reasons
+        assert "b1_r2_tag_not_at_authorized_head" not in reasons
+        assert reasons == []  # empty refusals required ONLY in exact-head state
+    elif state == "ANCESTOR_STALE":
+        assert "b1_r2_tag_not_at_authorized_head" in reasons
+    else:  # pragma: no cover
+        pytest.fail(f"unexpected lifecycle state {state!r}")
+
+
+# --------------------------------------------------------------------------- #
+# PN02D-B3X-R3A: tri-state classifier coverage + lifecycle transition/manifest matrices
+# --------------------------------------------------------------------------- #
+
+_ABSENT_LIVE_TAG = "graphrag-pn02db3xrX-DEFINITELY-ABSENT"
+
+
+def test_lifecycle_classifier_tri_state_coverage():
+    # §36: the test-only classifier maps each physical relationship to the right lifecycle state and
+    # fails EXPLICITLY on an unrecognized one (never silently normalized). Ancestry is injected so the
+    # classifier itself is exercised deterministically without depending on real Git history.
+    T = EXPECTED_B3B_CHECKPOINT_TAG
+    # missing tag -> TAG_ABSENT
+    r_absent = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=T, exists=False, peel="", head=C.TEST_COMMIT))
+    assert _classify_live_tag_lifecycle(r_absent, T, C.TEST_COMMIT, is_ancestor=lambda a, b: False) == "TAG_ABSENT"
+    # peel == HEAD -> EXACT_HEAD
+    r_exact = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=T, exists=True, peel=C.TEST_COMMIT, head=C.TEST_COMMIT))
+    assert _classify_live_tag_lifecycle(r_exact, T, C.TEST_COMMIT, is_ancestor=lambda a, b: False) == "EXACT_HEAD"
+    # peel is a (true) ancestor of HEAD -> ANCESTOR_STALE
+    r_anc = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=T, exists=True, peel=ANCESTOR, head=SUCCESSOR))
+    assert _classify_live_tag_lifecycle(r_anc, T, SUCCESSOR, is_ancestor=lambda a, b: True) == "ANCESTOR_STALE"
+    # peel neither HEAD nor ancestor -> explicit failure (no silent normalization)
+    r_bad = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=T, exists=True, peel="dead" + "0" * 36, head=C.TEST_COMMIT))
+    with pytest.raises(AssertionError):
+        _classify_live_tag_lifecycle(r_bad, T, C.TEST_COMMIT, is_ancestor=lambda a, b: False)
+
+
+def test_lifecycle_transition_matrix():
+    # §42: the full governed lifecycle — EXACT_HEAD (current / successor checkpoint), ANCESTOR_STALE
+    # (implementation checkpoint advanced HEAD), TAG_ABSENT (successor predeclared, tag not yet created)
+    # — each classified independently AND run through the shared production trust path to the expected
+    # outcome. Proves a single unedited test suite survives every legitimate transition.
+    T = EXPECTED_B3B_CHECKPOINT_TAG
+    # EXACT_HEAD -> PASS
+    r = C.b1r2_reader_ok(tag=T, peel=C.TEST_COMMIT, head=C.TEST_COMMIT)
+    with _patch_b3(T, r):
+        assert _classify_live_tag_lifecycle(r, T, C.TEST_COMMIT, is_ancestor=lambda a, b: False) == "EXACT_HEAD"
+        assert b3b_r2_refusal_reasons(_b3_grant(commit=C.TEST_COMMIT), C.clean_git_baseline(commit=C.TEST_COMMIT, tag=C.TEST_TAG)) == []
+    # ANCESTOR_STALE -> FAIL_CLOSED (stale successor)
+    r = C.b1r2_reader_ok(tag=T, peel=ANCESTOR, head=SUCCESSOR)
+    with _patch_b3(T, r):
+        assert _classify_live_tag_lifecycle(r, T, SUCCESSOR, is_ancestor=lambda a, b: True) == "ANCESTOR_STALE"
+        assert "b1_r2_tag_not_at_authorized_head" in b3b_r2_refusal_reasons(_b3_grant(commit=SUCCESSOR), C.clean_git_baseline(commit=SUCCESSOR, tag=C.TEST_TAG))
+    # TAG_ABSENT -> FAIL_CLOSED (tag not observed)
+    r = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=_ABSENT_LIVE_TAG, exists=False, peel="", head=C.TEST_COMMIT))
+    with _patch_b3(_ABSENT_LIVE_TAG, r):
+        assert _classify_live_tag_lifecycle(r, _ABSENT_LIVE_TAG, C.TEST_COMMIT, is_ancestor=lambda a, b: False) == "TAG_ABSENT"
+        assert "b1_r2_tag_not_observed_in_git" in b3b_r2_refusal_reasons(_b3_grant(b1_r2=_ABSENT_LIVE_TAG, commit=C.TEST_COMMIT), C.clean_git_baseline(commit=C.TEST_COMMIT, tag=C.TEST_TAG))
+
+
+def _manifest_grant(*, live_tag, commit):
+    # a B3 grant with the FROZEN B0C-B implementation identity + the given live-auth identity
+    return frozen_b3b_operator_grant_template(
+        run_id=OBS_RUN_ID,
+        implementation_checkpoint_commit="5abeaaa09b7157232b1ac5a234c9d8c50b542585",
+        implementation_checkpoint_tag="graphrag-pn02db0cb-real-provider-wiring-approved",
+        b1_r2_checkpoint=live_tag,
+        approved_git_commit=commit,
+        approved_git_tag=C.TEST_TAG,
+    )
+
+
+def test_manifest_lifecycle_matrix():
+    # §43: manifest identity-separation is invariant across ALL three lifecycle states (the impl==live
+    # equality refusals never fire), while the trust outcome is lifecycle-dependent. Confirms B0C-B stays
+    # the implementation identity and the current successor stays the live identity, never conflated.
+    T = EXPECTED_B3B_CHECKPOINT_TAG
+    # EXACT_HEAD
+    r = C.b1r2_reader_ok(tag=T, peel=C.TEST_COMMIT, head=C.TEST_COMMIT)
+    with _patch_b3(T, r):
+        reasons = b3b_r2_refusal_reasons(_manifest_grant(live_tag=T, commit=C.TEST_COMMIT), C.clean_git_baseline(commit=C.TEST_COMMIT, tag=C.TEST_TAG))
+    assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
+    assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
+    assert reasons == []
+    # ANCESTOR_STALE
+    r = C.b1r2_reader_ok(tag=T, peel=ANCESTOR, head=SUCCESSOR)
+    with _patch_b3(T, r):
+        reasons = b3b_r2_refusal_reasons(_manifest_grant(live_tag=T, commit=SUCCESSOR), C.clean_git_baseline(commit=SUCCESSOR, tag=C.TEST_TAG))
+    assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
+    assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
+    assert "b1_r2_tag_not_at_authorized_head" in reasons
+    # TAG_ABSENT
+    r = RealTrustedB1R2Reader(git_runner=C.b1r2_git_runner(tag=_ABSENT_LIVE_TAG, exists=False, peel="", head=C.TEST_COMMIT))
+    with _patch_b3(_ABSENT_LIVE_TAG, r):
+        reasons = b3b_r2_refusal_reasons(_manifest_grant(live_tag=_ABSENT_LIVE_TAG, commit=C.TEST_COMMIT), C.clean_git_baseline(commit=C.TEST_COMMIT, tag=C.TEST_TAG))
+    assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
+    assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
     assert "b1_r2_tag_not_observed_in_git" in reasons
 
 
