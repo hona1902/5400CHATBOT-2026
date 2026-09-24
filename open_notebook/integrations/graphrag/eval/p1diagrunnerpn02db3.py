@@ -228,21 +228,47 @@ def build_b3_observability_artifact(
     return artifact
 
 
-def _extract_isolation_evidenced(report: object) -> Optional[bool]:
-    """Recursively read the frozen Stage-1 ``isolation_evidenced`` verdict from the run report.
+#: Canonical raw-report keys that carry the frozen Stage-1 isolation verdict, in precedence order.
+#: ``isolation_evidenced`` is the CLI-projected top-level field (present only AFTER
+#: ``cli_live_pn02d._project_scientific_result`` runs); ``PER_NOTEBOOK_ISOLATION_EVIDENCED`` is the
+#: RAW evaluator field that already exists in ``outcome.report['scientific_outputs']`` at the live
+#: runner seam (PN02D-B3X-R1: the B3X defect was that only the former was searched, so the RAW report
+#: yielded None and the QA-value block was silently omitted). Both carry the SAME frozen semantics
+#: ("YES"→evidenced) used by the CLI projector, so this is one authoritative derivation.
+_ISOLATION_EVIDENCE_KEYS: Tuple[str, ...] = (
+    "isolation_evidenced",
+    "PER_NOTEBOOK_ISOLATION_EVIDENCED",
+)
 
-    Returns True/False for "YES"/"NO" (or a bool), else None (unknown → QA-value subsection is
-    omitted rather than guessed). OBSERVABILITY-ONLY: reads the existing verdict, never recomputes."""
+
+def _coerce_isolation_value(value: object) -> Optional[bool]:
+    """Frozen isolation semantics (shared with the CLI projector): bool as-is; "YES"→True; "NO"→False;
+    anything else (e.g. "NOT_EVALUATED") → None (undecidable)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.upper() == "YES":
+            return True
+        if value.upper() == "NO":
+            return False
+    return None
+
+
+def _extract_isolation_evidenced(report: object) -> Optional[bool]:
+    """Recursively read the frozen Stage-1 isolation verdict from the run report — SINGLE
+    authoritative derivation (PN02D-B3X-R1).
+
+    At each dict, tries the canonical isolation keys in precedence order
+    (``isolation_evidenced`` then the RAW ``PER_NOTEBOOK_ISOLATION_EVIDENCED``) and coerces with the
+    frozen "YES"/"NO"/bool semantics reused from the CLI projector. Returns True/False when the
+    verdict is present and decidable, else None (unknown). OBSERVABILITY-ONLY: reads the existing
+    evaluator verdict, never recomputes and never depends on the CLI projection layer."""
     if isinstance(report, dict):
-        if "isolation_evidenced" in report:
-            value = report["isolation_evidenced"]
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                if value.upper() == "YES":
-                    return True
-                if value.upper() == "NO":
-                    return False
+        for key in _ISOLATION_EVIDENCE_KEYS:
+            if key in report:
+                coerced = _coerce_isolation_value(report[key])
+                if coerced is not None:
+                    return coerced
         for nested in report.values():
             found = _extract_isolation_evidenced(nested)
             if found is not None:
@@ -315,17 +341,36 @@ async def run_live_b3_observability_execution(
         treatment_materialization=treatment_materialization,
     )
     fixture = fx if fx is not None else load_fixture()
+    # PN02D-B3U: the isolation gate is decided by the frozen Stage-1 evaluator inside the SAME run;
+    # thread its verdict so the additive QA-value subsection reuses the frozen qa_decision (Q0 gates
+    # on isolation). Never recomputed here — derived from the RAW report via the single authoritative
+    # derivation (PN02D-B3X-R1 reads PER_NOTEBOOK_ISOLATION_EVIDENCED, present at this seam).
+    isolation_evidenced = _extract_isolation_evidenced(outcome.report)
+    # PN02D-B3X-R1 (§17/§19): the GOVERNED LIVE QA-value run REQUIRES the QA-value subsection — it
+    # must NEVER be silently omitted (the B3X objective failure). If the frozen isolation verdict
+    # cannot be derived from the run report, FAIL CLOSED rather than emit a misleadingly "COMPLETE"
+    # fact-recall artifact with no QA-value block. (The generic ``build_b3_observability_artifact``
+    # stays backward-compatible for non-governed callers that pass isolation_evidenced=None.)
+    if isolation_evidenced is None:
+        raise B3ObservabilityError(
+            "governed B3 live QA-value run could not derive the Stage-1 isolation verdict from the "
+            "run report (no isolation_evidenced / PER_NOTEBOOK_ISOLATION_EVIDENCED); refusing to "
+            "emit a QA-value-less artifact — fail closed (PN02DB3X-R1)"
+        )
     artifact = build_b3_observability_artifact(
         fixture,
         collector.records,
         observation_run_id=operator_grant.run_id,  # DISTINCT observation id; B2 run id rejected
         reference_b2_run_id=reference_b2_run_id,
         expected_pair_count=expected_pair_count,
-        # PN02D-B3U: the isolation gate is decided by the frozen Stage-1 evaluator inside the
-        # SAME run; thread its verdict so the additive QA-value subsection reuses the frozen
-        # qa_decision (Q0 gates on isolation). Never recomputed here.
-        isolation_evidenced=_extract_isolation_evidenced(outcome.report),
+        isolation_evidenced=isolation_evidenced,
     )
+    # PN02D-B3X-R1: defense-in-depth — the governed live artifact MUST carry the QA-value block.
+    if "qa_value_observability" not in artifact:
+        raise B3ObservabilityError(
+            "governed B3 live QA-value run produced an artifact without qa_value_observability "
+            "(fail closed; PN02DB3X-R1)"
+        )
     if isinstance(outcome.report, dict):
         # Additive ONLY — the distinct B3 observability block never rewrites B2 report fields.
         outcome.report["b3_observability"] = artifact

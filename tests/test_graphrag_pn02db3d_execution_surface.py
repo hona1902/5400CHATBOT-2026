@@ -44,6 +44,9 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     mint_live_b3_provider_run_authorization,
 )
 from open_notebook.integrations.graphrag.eval.datasetpn02 import load_fixture
+from open_notebook.integrations.graphrag.eval.qavaluepn02db3 import (
+    QAValueObservabilityError,
+)
 from open_notebook.integrations.graphrag.eval.schemaspn02 import ArmId, QAAnswerResult
 
 OBS_RUN_ID = "pn02db3-obs-aaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -113,18 +116,20 @@ def test_b3_live_identity_is_b3v_successor_and_historical_tags_separate():
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
 
 
-def test_real_git_b3_live_profile_fails_closed_because_b3v_tag_absent():
-    # PN02D-B3V: the approved B3U implementation checkpoint advanced HEAD beyond the historical B3Q tag,
-    # so the governed B3 LIVE identity is now the PREDECLARED B3V successor tag, which does NOT exist yet.
-    # The REAL trusted git reader observes it absent and the profile FAILS CLOSED (tag-not-observed) —
-    # the correct, intended state during B3V implementation/review. The historical B3Q tag is now an
-    # ANCESTOR (as B3J already was) and NEITHER is the governed live identity (no ancestor grandfathering).
-    # Trust ALGORITHM unchanged; only real Git state advanced.
+def test_real_git_b3_live_profile_exact_head_trust_pass_b3v_tag_present():
+    # PN02D-B3X-R1 (real-git sync): the approved B3V governance checkpoint CREATED the predeclared B3V
+    # successor tag at the new HEAD, so the governed B3 LIVE identity now exists in real Git and peels
+    # EXACTLY to HEAD -> EXACT_HEAD_TRUST_PASS (checkpoint-identity refusals empty). This is the current
+    # approved state (was fail-closed tag-absent during B3V implementation/review). The historical B3Q
+    # tag is now an ANCESTOR and is NOT the governed live identity. Trust ALGORITHM unchanged; only real
+    # Git state advanced. (A valid checkpoint identity still needs an operator grant + real preflight to
+    # MINT — see the synthetic mint tests below and the CLI-auth test.)
     baseline = cli.read_git_baseline()
     reader = authmint._build_trusted_b1_r2_reader()
-    # the B3V live tag is ABSENT from real Git -> fail closed on tag-not-observed
+    # the B3V live tag now EXISTS in real Git and peels exactly to HEAD
     obs = reader.observe(EXPECTED_B3_LIVE_CHECKPOINT_TAG)
-    assert obs.observed_tag_exists is False
+    assert obs.observed_tag_exists is True
+    assert obs.observed_tag_peel == obs.observed_head == baseline.head_commit  # at exact HEAD
     reasons = b3b_r2_refusal_reasons(
         frozen_b3b_operator_grant_template(
             run_id=OBS_RUN_ID,
@@ -136,9 +141,12 @@ def test_real_git_b3_live_profile_fails_closed_because_b3v_tag_absent():
         ),
         baseline,
     )
-    assert "b1_r2_tag_not_observed_in_git" in reasons
+    # exact-head trust PASS: neither tag-not-observed nor tag-not-at-authorized-head is raised
+    assert "b1_r2_tag_not_observed_in_git" not in reasons
+    assert "b1_r2_tag_not_at_authorized_head" not in reasons
+    assert reasons == []
     # the historical B3Q tag IS present in real Git but is now an ANCESTOR (not the current HEAD) and
-    # is NOT the governed live identity -> cannot authorize
+    # is NOT the governed live identity -> cannot be the current live checkpoint
     b3q_obs = reader.observe(HISTORICAL_B3Q_CHECKPOINT_TAG)
     assert b3q_obs.observed_tag_exists is True
     assert b3q_obs.observed_tag_peel != b3q_obs.observed_head  # ancestor, not at HEAD
@@ -176,17 +184,19 @@ def test_real_git_b3p_implementation_tag_is_ancestor_and_cannot_authorize_b3_liv
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
-def test_real_git_b3u_implementation_tag_at_head_cannot_authorize_b3_live():
-    # PN02D-B3V (§17/§24): the B3U implementation tag peels EXACTLY to the current HEAD, but it is an
-    # IMPLEMENTATION-evidence tag, NOT the governed B3 live-auth identity (the absent B3V successor tag).
-    # An exact-HEAD tag alone must never authorize the B3 live profile: a grant naming B3U as its B3
-    # live checkpoint fails closed on identity mismatch (and the real B3V tag is absent regardless).
+def test_real_git_b3u_implementation_tag_is_ancestor_and_cannot_authorize_b3_live():
+    # PN02D-B3X-R1 (real-git sync): the B3U implementation tag is IMPLEMENTATION-evidence, NOT the
+    # governed B3 live-auth identity (the B3V successor tag, now at HEAD). After the B3V checkpoint
+    # advanced HEAD past the B3U commit, the B3U tag peels to an ANCESTOR (no longer current HEAD). A
+    # grant naming the B3U tag as its B3 live checkpoint must STILL fail closed on identity mismatch —
+    # neither an ancestor tag nor a non-live implementation tag can authorize the B3 live profile.
     B3U_IMPL_TAG = "graphrag-pn02db3u-qa-value-observability-approved"
     baseline = cli.read_git_baseline()
     reader = authmint._build_trusted_b1_r2_reader()
     b3u_obs = reader.observe(B3U_IMPL_TAG)
     assert b3u_obs.observed_tag_exists is True
-    assert b3u_obs.observed_tag_peel == b3u_obs.observed_head == baseline.head_commit  # at exact HEAD
+    assert b3u_obs.observed_tag_peel != b3u_obs.observed_head  # ANCESTOR, not current HEAD
+    assert b3u_obs.observed_head == baseline.head_commit
     assert B3U_IMPL_TAG != current_approved_b3b_checkpoint()  # NOT the live identity
     reasons = b3b_r2_refusal_reasons(
         frozen_b3b_operator_grant_template(
@@ -299,26 +309,53 @@ def _first_positive(fx):
                   key=lambda q: q.query_id)[0]
 
 
+def _good_record(fx, q, arm):
+    """A member-filtered, correctly-answered (positive) / abstaining (negative) execution record."""
+    members = fx.members_of(q.notebook_id)
+    ev = tuple(s for s in q.required_source_ids if s in members)
+    if q.is_negative:
+        result = QAAnswerResult(
+            query_id=q.query_id, notebook_id=q.notebook_id, arm=arm,
+            abstained=True, answer_text=None, citation_source_ids=())
+    else:
+        result = QAAnswerResult(
+            query_id=q.query_id, notebook_id=q.notebook_id, arm=arm, abstained=False,
+            answer_text=" ".join(q.expected_answer_facts),
+            citation_source_ids=q.required_citation_source_ids)
+    return runner.B2QAExecutionRecord(
+        query_id=q.query_id, notebook_id=q.notebook_id, arm=arm,
+        evidence_source_ids=ev, result=result)
+
+
+def _drive_all_72(observer, fx):
+    """Drive the observer over all 24 queries x 3 arms = 72 records, as the real stage would."""
+    for q in sorted(fx.queries, key=lambda x: x.query_id):
+        for arm in (ArmId.QA_V, ArmId.QA_GD, ArmId.QA_VGD):
+            observer(_good_record(fx, q, arm))
+
+
+# PN02D-B3X-R1: a REALISTIC raw pre-CLI runtime report. Isolation lives ONLY under the raw
+# evaluator field ``scientific_outputs.PER_NOTEBOOK_ISOLATION_EVIDENCED`` — NOT the CLI-projected
+# top-level ``isolation_evidenced`` (which does not exist at the live runner seam). This is the
+# exact shape that caused the B3X qa_value_observability omission.
+def _raw_report_with_isolation(verdict="YES"):
+    return {"scientific_outputs": {"PER_NOTEBOOK_ISOLATION_EVIDENCED": verdict}}
+
+
 def test_governed_run_injects_b3b_mint_and_observer_and_builds_distinct_artifact(monkeypatch):
+    # PN02D-B3X-R1 (§21-§26/§31): realistic governed run — the fake engine returns a RAW report
+    # whose isolation lives under PER_NOTEBOOK_ISOLATION_EVIDENCED (no synthetic top-level shortcut),
+    # and the observer is driven over the full 72 query-arm records. Proves the governed live path
+    # now emits the qa_value_observability block (the B3X defect is fixed).
     fx = load_fixture()
-    q = _first_positive(fx)
     captured = {}
 
     async def _fake_engine(**kwargs):
-        # record the injected mint + observer, then drive the observer like the real stage would
         captured["mint_fn"] = kwargs.get("mint_fn")
         observer = kwargs["qa_execution_observer"]
         captured["observer"] = observer
-        for arm in (ArmId.QA_V, ArmId.QA_GD, ArmId.QA_VGD):
-            observer(runner.B2QAExecutionRecord(
-                query_id=q.query_id, notebook_id=q.notebook_id, arm=arm,
-                evidence_source_ids=tuple(q.required_source_ids),
-                result=QAAnswerResult(
-                    query_id=q.query_id, notebook_id=q.notebook_id, arm=arm,
-                    abstained=False, answer_text=" ".join(q.expected_answer_facts),
-                    citation_source_ids=()),
-            ))
-        return SimpleNamespace(report={})
+        _drive_all_72(observer, fx)
+        return SimpleNamespace(report=_raw_report_with_isolation("YES"))
 
     monkeypatch.setattr(realseams, "run_live_b2_execution", _fake_engine)
 
@@ -331,15 +368,85 @@ def test_governed_run_injects_b3b_mint_and_observer_and_builds_distinct_artifact
     # B3B mint selected (not the B2 mint); observer is the B3 collector
     assert captured["mint_fn"] is mint_live_b3_provider_run_authorization
     assert isinstance(captured["observer"], runner.B3ObservabilityCollector)
-    # distinct, content-safe artifact
+    # distinct, content-safe fact-recall artifact
     assert artifact["report_kind"] == "PN02DB3_FACT_RECALL_OBSERVABILITY"
     assert artifact["mode"] == "OBSERVABILITY_ONLY"
     assert artifact["observation_run_id"] == OBS_RUN_ID
     assert artifact["reference_b2_run_id"] == runner.REFERENCE_B2_RUN_ID
     assert "SECRET" not in json.dumps(artifact) and "answer_text" not in json.dumps(artifact)
+    # B3X-R1: the QA-value block IS emitted, complete, six dimensions + frozen decision present
+    qv = cast(Any, artifact["qa_value_observability"])
+    assert qv["version"] == 1
+    assert qv["observed_pair_count"] == 72
+    assert qv["observed_positive_count"] == 63
+    assert qv["observed_negative_count"] == 9
+    assert qv["qa_value_observability_complete"] is True
+    arms = {m["arm"] for m in qv["arm_metrics"]}
+    assert arms == {"QA-V", "QA-GD", "QA-V+GD"}  # per-arm QAArmMetrics (P1..S3)
+    assert "qa_decision" in qv and "verdict" in qv["qa_decision"]  # frozen qa_decision reached
+    assert "forbidden_fact_count" in qv and "forbidden_citation_count" not in qv
     # additively attached to the outcome report (distinct key)
     report = cast(Any, outcome.report)
     assert report["b3_observability"]["report_kind"] == "PN02DB3_FACT_RECALL_OBSERVABILITY"
+    assert "qa_value_observability" in report["b3_observability"]
+
+
+def test_governed_run_fails_closed_when_isolation_evidence_absent(monkeypatch):
+    # PN02D-B3X-R1 (§19/§27): the governed live QA-value path must FAIL CLOSED (never silently omit
+    # the QA-value block) when the raw report carries NO derivable isolation verdict.
+    fx = load_fixture()
+
+    async def _fake_engine(**kwargs):
+        _drive_all_72(kwargs["qa_execution_observer"], fx)
+        return SimpleNamespace(report={})  # no isolation evidence anywhere
+
+    monkeypatch.setattr(realseams, "run_live_b2_execution", _fake_engine)
+    import asyncio
+    with pytest.raises(runner.B3ObservabilityError):
+        asyncio.run(runner.run_live_b3_observability_execution(
+            operator_grant=_b3_grant(), git_baseline_attestation=C.clean_git_baseline(), fx=fx))
+
+
+def test_runner_isolation_derivation_from_raw_per_notebook_field():
+    # PN02D-B3X-R1 (§41): the SOURCE-LEVEL defect — a raw report with ONLY
+    # PER_NOTEBOOK_ISOLATION_EVIDENCED (the exact B3X shape, no top-level isolation_evidenced) must
+    # now yield a non-None isolation bool so build_b3_observability_artifact emits the QA-value block.
+    raw = _raw_report_with_isolation("YES")
+    assert "isolation_evidenced" not in raw  # the field the B3X code searched for is ABSENT
+    assert runner._extract_isolation_evidenced(raw) is True
+    assert runner._extract_isolation_evidenced(_raw_report_with_isolation("NO")) is False
+    assert runner._extract_isolation_evidenced(_raw_report_with_isolation("NOT_EVALUATED")) is None
+    assert runner._extract_isolation_evidenced({}) is None
+
+
+def test_runner_vs_cli_isolation_parity():
+    # PN02D-B3X-R1 (§29): the runner-derived isolation must agree with the CLI projector's isolation
+    # for the same raw report (both use PER_NOTEBOOK_ISOLATION_EVIDENCED == "YES").
+    raw = _raw_report_with_isolation("YES")
+    runner_bool = runner._extract_isolation_evidenced(raw)
+    cli_val = cli._project_scientific_result(raw).get("isolation_evidenced")
+    assert runner_bool is True and cli_val == "YES"  # same source, consistent semantics
+    raw_no = _raw_report_with_isolation("NO")
+    assert runner._extract_isolation_evidenced(raw_no) is False
+    assert cli._project_scientific_result(raw_no).get("isolation_evidenced") == "NO"
+
+
+def test_generic_builder_backward_compatible_without_isolation():
+    # PN02D-B3X-R1 (§18/§43): the GENERIC builder stays backward-compatible — with no isolation
+    # supplied it omits the optional QA-value block (does not fail). Only the governed live path is strict.
+    fx = load_fixture()
+    recs = [_good_record(fx, q, arm)
+            for q in sorted(fx.queries, key=lambda x: x.query_id)
+            for arm in (ArmId.QA_V, ArmId.QA_GD, ArmId.QA_VGD)]
+    art = runner.build_b3_observability_artifact(
+        fx, recs, observation_run_id="pn02db3-generic-compat")
+    assert art["completeness"] == "COMPLETE"
+    assert "qa_value_observability" not in art  # optional block omitted, backward-compatible
+    # and when isolation IS supplied, the block appears
+    art2 = runner.build_b3_observability_artifact(
+        fx, recs, observation_run_id="pn02db3-generic-compat", isolation_evidenced=True)
+    qv2 = cast(Any, art2["qa_value_observability"])
+    assert qv2["qa_value_observability_complete"] is True
 
 
 def test_governed_run_rejects_b2_run_id(monkeypatch):
@@ -357,7 +464,29 @@ def test_governed_run_rejects_b2_run_id(monkeypatch):
         ))
 
 
-def test_governed_run_partial_completeness(monkeypatch):
+def test_generic_builder_partial_completeness_no_qa_value_block():
+    # PN02D-B3X-R1 (§18/§43): the GENERIC builder still reports PARTIAL completeness for a partial
+    # fact-recall capture (backward-compatible) and, with no isolation supplied, omits the optional
+    # QA-value block — it does NOT crash. Only the GOVERNED live path is strict.
+    fx = load_fixture()
+    q = _first_positive(fx)
+    rec = runner.B2QAExecutionRecord(
+        query_id=q.query_id, notebook_id=q.notebook_id, arm=ArmId.QA_V,
+        evidence_source_ids=(), result=QAAnswerResult(
+            query_id=q.query_id, notebook_id=q.notebook_id, arm=ArmId.QA_V,
+            abstained=True, answer_text="", citation_source_ids=()))
+    artifact = runner.build_b3_observability_artifact(
+        fx, [rec], observation_run_id="pn02db3-partial-generic")
+    assert artifact["expected_pair_count"] == 72
+    assert artifact["completed_diagnostic_pair_count"] == 1
+    assert artifact["completeness"] == "PARTIAL"
+    assert "qa_value_observability" not in artifact  # optional block omitted (no isolation)
+
+
+def test_governed_run_fails_closed_on_partial_even_with_isolation(monkeypatch):
+    # PN02D-B3X-R1 (§20): the governed live path must NOT emit a QA-value-complete artifact for a
+    # partial run. Even WITH isolation evidence, a partial capture (<72) fails closed — the QA-value
+    # projection requires the full 72 records, so no misleadingly-complete artifact can be produced.
     fx = load_fixture()
     q = _first_positive(fx)
 
@@ -367,15 +496,13 @@ def test_governed_run_partial_completeness(monkeypatch):
             evidence_source_ids=(), result=QAAnswerResult(
                 query_id=q.query_id, notebook_id=q.notebook_id, arm=ArmId.QA_V,
                 abstained=True, answer_text="", citation_source_ids=())))
-        return SimpleNamespace(report={})
+        return SimpleNamespace(report=_raw_report_with_isolation("YES"))  # isolation present, but partial
 
     monkeypatch.setattr(realseams, "run_live_b2_execution", _fake_engine)
     import asyncio
-    _outcome, artifact = asyncio.run(runner.run_live_b3_observability_execution(
-        operator_grant=_b3_grant(), git_baseline_attestation=C.clean_git_baseline(), fx=fx))
-    assert artifact["expected_pair_count"] == 72
-    assert artifact["completed_diagnostic_pair_count"] == 1
-    assert artifact["completeness"] == "PARTIAL"
+    with pytest.raises((runner.B3ObservabilityError, QAValueObservabilityError)):
+        asyncio.run(runner.run_live_b3_observability_execution(
+            operator_grant=_b3_grant(), git_baseline_attestation=C.clean_git_baseline(), fx=fx))
 
 
 # --------------------------------------------------------------------------- #
@@ -581,12 +708,12 @@ def _write_b3_manifest(tmp_path, *, run_id=OBS_RUN_ID, b1_r2=EXPECTED_B3B_CHECKP
 
 
 def test_b3_manifest_identity_separation_and_no_equality_refusal(tmp_path):
-    # PN02D-B3V (IR1-L1 invariant, re-synced): a correctly-built B3 manifest keeps the implementation
-    # checkpoint identity (frozen B0C-B baseline) DISTINCT from the B3 live-auth identity (now B3V).
-    # Parsing it + running the shared B3 refusal machinery must NOT raise the impl==live equality
-    # refusals; the run still fails closed only because the predeclared B3V live tag is ABSENT from
-    # real Git — i.e. a well-formed identity-separated manifest alone (without the tag + operator grant)
-    # cannot mint.
+    # PN02D-B3X-R1 (real-git sync): a correctly-built B3 manifest keeps the implementation checkpoint
+    # identity (frozen B0C-B baseline) DISTINCT from the B3 live-auth identity (B3V). Parsing it +
+    # running the shared B3 refusal machinery must NOT raise the impl==live equality refusals. Now that
+    # the B3V governance checkpoint created the B3V tag at exact HEAD, this identity-separated grant is
+    # an EXACT_HEAD_TRUST_PASS (checkpoint refusals empty). A valid checkpoint identity alone STILL
+    # cannot mint without an operator grant + real preflight (covered by the mint / CLI-auth tests).
     manifest_path = _write_b3_manifest(tmp_path, b1_r2=EXPECTED_B3_LIVE_CHECKPOINT_TAG)
     with open(manifest_path, encoding="utf-8") as fh:
         m = json.loads(fh.read())
@@ -598,8 +725,10 @@ def test_b3_manifest_identity_separation_and_no_equality_refusal(tmp_path):
     reasons = b3b_r2_refusal_reasons(cli.parse_operator_grant(m), cli.read_git_baseline())
     assert "b1_r2_identity_equals_implementation_checkpoint_tag" not in reasons
     assert "b1_r2_identity_equals_implementation_checkpoint_commit" not in reasons
-    # distinct identities do NOT authorize on their own: the B3V tag is absent -> fail closed
-    assert "b1_r2_tag_not_observed_in_git" in reasons
+    # identity separation holds AND the B3V tag now peels to exact HEAD -> no checkpoint refusals
+    assert "b1_r2_tag_not_observed_in_git" not in reasons
+    assert "b1_r2_tag_not_at_authorized_head" not in reasons
+    assert reasons == []
 
 
 def test_cli_b3_without_operator_auth_fails_closed_before_boot(tmp_path):
