@@ -51,6 +51,9 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
 from open_notebook.integrations.graphrag.eval.provider_binding08 import (
     frozen_provider_binding,
 )
+from open_notebook.integrations.graphrag.eval.runtime_import_readiness_pn02d import (
+    LiveRuntimeImportReadinessError,
+)
 from open_notebook.utils.provider_errors import safe_provider_error_fields
 
 #: Governance env token that would (with an explicit flag) open the authorization gate.
@@ -661,10 +664,30 @@ def _evaluate_execute_b1_live_composed(
             observed_fixture_hash=observed_fixture_hash,
             env=env,
         )
+    except LiveRuntimeImportReadinessError as exc:
+        # PN02D-B3Y: the pre-claim runtime import-readiness guard failed — a LOCAL launch/import
+        # environment problem (e.g. the repo root absent from sys.path so the first-party
+        # ``commands`` package is unresolvable, the B3Y root cause). The guard runs AFTER mint and
+        # BEFORE the one-shot claim, so NO grant was consumed and NO provider was contacted. This is
+        # explicitly NOT a provider failure and must never be classified as one; the content-safe
+        # readiness report (module/symbol names only) is surfaced for the operator.
+        payload["result"] = "FAILED"
+        payload["reasons"] = ["local_runtime_import_unresolvable"]
+        payload["failure_classification"] = "LOCAL_RUNTIME_IMPORT_UNRESOLVABLE"
+        payload["error_type"] = type(exc).__name__
+        payload["import_readiness"] = exc.as_safe_dict()
+        payload["provider_bound"] = False
+        payload["runtime_booted"] = False
+        return 4, payload
     except Exception as exc:  # noqa: BLE001 - fail-closed; content-safe type name only
         payload["result"] = "FAILED"
         payload["reasons"] = ["live_execution_error"]
         payload["error_type"] = type(exc).__name__
+        if isinstance(exc, ModuleNotFoundError):
+            # PN02D-B3Y defense-in-depth: the missing module NAME is content-safe (no source
+            # text, prompt, answer or secret) and lets an operator distinguish a local import
+            # gap from a provider failure without leaking anything.
+            payload["missing_module_name"] = exc.name
         payload["provider_bound"] = False
         # PN02D-B1-EW5: attach the sanitized, safe-by-construction provider-error diagnostic
         # (fixed vocabulary; no raw message/body/headers/secret) so an operator can tell a

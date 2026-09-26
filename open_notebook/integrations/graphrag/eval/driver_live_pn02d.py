@@ -85,6 +85,9 @@ from open_notebook.integrations.graphrag.eval.provider_binding08 import (
 from open_notebook.integrations.graphrag.eval.qastagepn02db2 import (
     bind_treatment_materializer,
 )
+from open_notebook.integrations.graphrag.eval.runtime_import_readiness_pn02d import (
+    assert_live_runtime_import_readiness,
+)
 from open_notebook.integrations.graphrag.eval.runtimelivepn02d import (
     HealthProberLike,
     PortAllocator,
@@ -325,6 +328,16 @@ class RealB1Driver:
                 git_baseline_attestation=git_baseline_attestation,
                 observed_fixture_hash=observed_fixture_hash,
             )
+
+            # -- PN02D-B3Y preclaim runtime import-readiness guard. Provider-free; runs AFTER
+            #    the mint validation PASS and BEFORE the irreversible one-shot claim below, so a
+            #    broken launch import environment (e.g. repo root absent from sys.path → the
+            #    first-party ``commands`` package unresolvable, the B3Y root cause) FAILS CLOSED
+            #    here and NEVER consumes the grant or contacts a provider. It resolves an
+            #    explicit, reviewable set of live-path imports (no recursive whole-app import);
+            #    it performs no ledger mutation and no provider I/O. A failure is a LOCAL runtime
+            #    import problem (LiveRuntimeImportReadinessError), never a provider failure.
+            assert_live_runtime_import_readiness()
 
             # -- PN02D-B3G ONE-SHOT consumption (PN02DB3D-ER1-H1 closure). AFTER mint
             #    validation PASS, BEFORE the first provider-bound action (materialize binding /
