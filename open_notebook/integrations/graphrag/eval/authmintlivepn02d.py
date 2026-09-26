@@ -441,34 +441,42 @@ HISTORICAL_B3V_CHECKPOINT_TAG = "graphrag-pn02db3v-b3-live-auth-successor-approv
 #: condition, no grandfathering — as PN02D-B3X-R3A's post-checkpoint probe confirmed).
 HISTORICAL_B3XR2_CHECKPOINT_TAG = "graphrag-pn02db3xr2-b3-live-auth-successor-approved"
 
-#: PN02D-B3X-R4: the PREDECLARED successor trust anchor for a governed real B3 LIVE authorization at the
-#: CURRENT (B3X-R3A-checkpointed) HEAD. This annotated tag does NOT exist yet — it is created ONLY by a
-#: future, separately-authorized B3X-R4 checkpoint (after independent review) pointing at that new commit,
-#: so its peel then equals the new HEAD and exact-HEAD trust is satisfiable WITHOUT advancing HEAD past
-#: its own identity (the recurring drift the B3B→B3J→B3Q→B3V→B3X-R2→B3X-R4 chain fixes; the
-#: B3X-R3A/B3X-R1/B3U/B3P implementation tags must NOT be reused as the live identity — B3X-R3A peels to
-#: the current HEAD but is lifecycle-invariance test-governance EVIDENCE, not a live-auth identity, so it
-#: must be rejected). While this tag is ABSENT from real Git the B3 live mint FAILS CLOSED
-#: (tag-not-observed) — the correct, intended state during implementation/review. Only the tag NAME is
-#: depended on here; no future commit/tag object SHA is hardcoded. Predecessors (all IMMUTABLE, now
-#: ancestors, NEVER the live identity): ``HISTORICAL_B3B_CHECKPOINT_TAG``, ``HISTORICAL_B3J_CHECKPOINT_TAG``,
-#: ``HISTORICAL_B3Q_CHECKPOINT_TAG``, ``HISTORICAL_B3V_CHECKPOINT_TAG``, ``HISTORICAL_B3XR2_CHECKPOINT_TAG``.
-EXPECTED_B3_LIVE_CHECKPOINT_TAG = "graphrag-pn02db3xr4-b3-live-auth-successor-approved"
+#: HISTORICAL evidence of the B3X-R4 live-auth successor checkpoint. IMMUTABLE (tag object ffdcfc6,
+#: peel bafb8fb); it peeled to HEAD while B3X-R4 was the current live identity. The approved PN02D-B3Y
+#: root-cause remediation checkpoint (the pre-claim runtime import-readiness guard) then advanced HEAD to
+#: dd06917, so this tag is now an ANCESTOR and is retained ONLY as historical provenance — it is NEVER the
+#: current governed B3 LIVE authorization identity (using it now fails closed under exact-HEAD trust, the
+#: stale-successor condition, no grandfathering — as PN02D-B3Y's post-checkpoint probe confirmed).
+HISTORICAL_B3XR4_CHECKPOINT_TAG = "graphrag-pn02db3xr4-b3-live-auth-successor-approved"
 
-#: Backward-compatible alias. The governed B3 LIVE authorization identity is now the B3X-R4 successor
+#: PN02D-B3Y-R1: the PREDECLARED successor trust anchor for a governed real B3 LIVE authorization at the
+#: CURRENT (B3Y-remediation-checkpointed) HEAD. This annotated tag does NOT exist yet — it is created ONLY
+#: by a future, separately-authorized B3Y-R1 checkpoint (after independent review) pointing at that new
+#: commit, so its peel then equals the new HEAD and exact-HEAD trust is satisfiable WITHOUT advancing HEAD
+#: past its own identity (the recurring drift the B3B→B3J→B3Q→B3V→B3X-R2→B3X-R4→B3Y-R1 chain fixes; the
+#: B3X-R3A/B3X-R1/B3U/B3P implementation tags must NOT be reused as the live identity, and the B3Y
+#: remediation commit dd06917 is a robustness checkpoint — a commit SHA is NEVER a live-auth identity).
+#: While this tag is ABSENT from real Git the B3 live mint FAILS CLOSED (tag-not-observed) — the correct,
+#: intended state during implementation/review. Only the tag NAME is depended on here; no future commit/tag
+#: object SHA is hardcoded. Predecessors (all IMMUTABLE, now ancestors, NEVER the live identity):
+#: ``HISTORICAL_B3B_CHECKPOINT_TAG``, ``HISTORICAL_B3J_CHECKPOINT_TAG``, ``HISTORICAL_B3Q_CHECKPOINT_TAG``,
+#: ``HISTORICAL_B3V_CHECKPOINT_TAG``, ``HISTORICAL_B3XR2_CHECKPOINT_TAG``, ``HISTORICAL_B3XR4_CHECKPOINT_TAG``.
+EXPECTED_B3_LIVE_CHECKPOINT_TAG = "graphrag-pn02db3yr1-b3-live-auth-successor-approved"
+
+#: Backward-compatible alias. The governed B3 LIVE authorization identity is now the B3Y-R1 successor
 #: tag (``EXPECTED_B3_LIVE_CHECKPOINT_TAG``); the historical wiring/successor tags are
 #: ``HISTORICAL_B3B_CHECKPOINT_TAG`` / ``HISTORICAL_B3J_CHECKPOINT_TAG`` / ``HISTORICAL_B3Q_CHECKPOINT_TAG``
-#: / ``HISTORICAL_B3V_CHECKPOINT_TAG`` / ``HISTORICAL_B3XR2_CHECKPOINT_TAG``. This alias is retained so
-#: existing importers/tests that refer to "the expected B3 live identity" continue to resolve it — it is
-#: NOT any historical tag.
+#: / ``HISTORICAL_B3V_CHECKPOINT_TAG`` / ``HISTORICAL_B3XR2_CHECKPOINT_TAG`` /
+#: ``HISTORICAL_B3XR4_CHECKPOINT_TAG``. This alias is retained so existing importers/tests that refer to
+#: "the expected B3 live identity" continue to resolve it — it is NOT any historical tag.
 EXPECTED_B3B_CHECKPOINT_TAG = EXPECTED_B3_LIVE_CHECKPOINT_TAG
 
 #: Governance state for the B3 LIVE provider-authorization checkpoint. FROZEN to the predeclared
 #: ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` (SOLE source of the approved-EXPECTED B3 live identity).
 #: Non-None, but not mintable until the trusted reader observes that EXACT tag in real Git at the
-#: authorized HEAD; else fails closed. B1/EW8, the B2 tag, the historical B3B/B3J/B3Q/B3V/B3X-R2 tags (now
-#: ancestors), and the B3P/B3U/B3X-R1/B3X-R3A implementation tags can never substitute — exact-identity +
-#: exact-HEAD, no grandfathering.
+#: authorized HEAD; else fails closed. B1/EW8, the B2 tag, the historical B3B/B3J/B3Q/B3V/B3X-R2/B3X-R4 tags
+#: (now ancestors), and the B3P/B3U/B3X-R1/B3X-R3A implementation tags can never substitute — exact-identity
+#: + exact-HEAD, no grandfathering.
 _APPROVED_B3B_CHECKPOINT: Optional[str] = EXPECTED_B3_LIVE_CHECKPOINT_TAG
 
 #: Module-private capability key — only a trusted reader can mint a TrustedB1R2Observation.
@@ -733,13 +741,13 @@ def b2_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List[
 
 def current_approved_b3b_checkpoint() -> Optional[str]:
     """The operator/governance-approved checkpoint identity for a governed real B3 live
-    OBSERVABILITY run (PN02D-B3D/B3J/B3Q/B3V/B3X-R2/B3X-R4). Returns the predeclared successor
-    ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` (``graphrag-pn02db3xr4-b3-live-auth-successor-approved``) — a
+    OBSERVABILITY run (PN02D-B3D/B3J/B3Q/B3V/B3X-R2/B3X-R4/B3Y-R1). Returns the predeclared successor
+    ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` (``graphrag-pn02db3yr1-b3-live-auth-successor-approved``) — a
     SEPARATE identity from ``current_approved_b1_r2_checkpoint()`` (EW8),
     ``current_approved_b2_checkpoint()`` (the B2 tag), the historical B3B wiring tag
-    (``HISTORICAL_B3B_CHECKPOINT_TAG``), the historical B3J/B3Q/B3V/B3X-R2 successor tags
+    (``HISTORICAL_B3B_CHECKPOINT_TAG``), the historical B3J/B3Q/B3V/B3X-R2/B3X-R4 successor tags
     (``HISTORICAL_B3J_CHECKPOINT_TAG`` / ``HISTORICAL_B3Q_CHECKPOINT_TAG`` / ``HISTORICAL_B3V_CHECKPOINT_TAG``
-    / ``HISTORICAL_B3XR2_CHECKPOINT_TAG``)
+    / ``HISTORICAL_B3XR2_CHECKPOINT_TAG`` / ``HISTORICAL_B3XR4_CHECKPOINT_TAG``)
     — all now ancestors — the B3H governance tag, and the B3P/B3U/B3X-R1/B3X-R3A implementation tags. Non-None, but a B3 live authorization is
     NOT mintable until the trusted reader observes that EXACT annotated tag at the authorized HEAD;
     else it fails closed (PN02D-B3I / the
@@ -758,7 +766,7 @@ def b3b_r2_refusal_reasons(operator_grant: object, git_baseline: object) -> List
     the SAME hardened :func:`verify_b1_r2_checkpoint` verifier and the SAME internal
     ``_build_trusted_b1_r2_reader`` (no duplicated verifier, no weakened checks) — but the
     approved-EXPECTED identity is ``current_approved_b3b_checkpoint()`` (the current governed B3
-    LIVE identity, i.e. the ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` B3X-R4 successor tag — NOT the
+    LIVE identity, i.e. the ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` B3Y-R1 successor tag — NOT the
     historical B3B wiring tag, and NOT the B1/EW8 or B2 identity). Takes NO reader/identity
     parameter. Exact-HEAD is required: a checkpoint tag that peels to an ancestor of HEAD (or any
     non-HEAD commit) fails closed (``b1_r2_tag_not_at_authorized_head``); no ancestor
@@ -813,7 +821,7 @@ _B2_AUTH_PROFILE = _AuthProfile(
 
 #: The B3 OBSERVABILITY auth profile (PN02D-B3D; the ``name`` retains the historical "B3B"
 #: label). Its checkpoint gate is ``current_approved_b3b_checkpoint()`` = the current governed B3
-#: LIVE identity (``EXPECTED_B3_LIVE_CHECKPOINT_TAG``, the B3X-R4 successor tag) — it FAILS CLOSED
+#: LIVE identity (``EXPECTED_B3_LIVE_CHECKPOINT_TAG``, the B3Y-R1 successor tag) — it FAILS CLOSED
 #: until that tag exists AT HEAD. Reuses the B2-style caps (FINAL_ANSWER=72) and the B2 QA
 #: allowlist (B1 + QA-V/QA-GD/QA-V+GD) because a B3 observability run is a DIAGNOSTIC replay of the
 #: same QA envelope. Used ONLY by the public ``mint_live_b3_provider_run_authorization`` entry; the
@@ -1188,7 +1196,7 @@ def mint_live_b3_provider_run_authorization(
 
     Same hardened core as B1/B2 but with the fixed private ``_B3B_AUTH_PROFILE``: the B3 live
     checkpoint gate (``current_approved_b3b_checkpoint`` → the current governed B3 live identity
-    ``EXPECTED_B3_LIVE_CHECKPOINT_TAG``, the B3X-R4 successor tag) plus the B2-style caps
+    ``EXPECTED_B3_LIVE_CHECKPOINT_TAG``, the B3Y-R1 successor tag) plus the B2-style caps
     (FINAL_ANSWER=72) and QA allowlist. Because that tag must be observed at the EXACT authorized
     HEAD, this fails closed unless that holds; the B2 tag (an ancestor at HEAD) can NEVER authorize
     a B3 run, and a valid B3 live tag alone still cannot mint without a matching operator grant.
@@ -1305,7 +1313,7 @@ def frozen_b3b_operator_grant_template(
     B3 observability run replays the same QA envelope. The caller supplies the current governed B3
     live checkpoint identity as ``b1_r2_checkpoint`` (the grant's single checkpoint field); the B3
     mint verifies it against ``current_approved_b3b_checkpoint()`` (the current B3 live identity,
-    i.e. the ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` B3X-R4 successor tag — not the historical B3B tag),
+    i.e. the ``EXPECTED_B3_LIVE_CHECKPOINT_TAG`` B3Y-R1 successor tag — not the historical B3B tag),
     so a B2 grant (B2 tag) can never authorize a B3 run and vice-versa. ``run_id`` here is the
     DISTINCT B3 observation run id and must not be the frozen B2 scientific run id.
     """
@@ -1355,6 +1363,7 @@ __all__ = [
     "HISTORICAL_B3Q_CHECKPOINT_TAG",
     "HISTORICAL_B3V_CHECKPOINT_TAG",
     "HISTORICAL_B3XR2_CHECKPOINT_TAG",
+    "HISTORICAL_B3XR4_CHECKPOINT_TAG",
     "HISTORICAL_B2_CHECKPOINT_TAG",
     "HISTORICAL_B2_LIFECYCLE_CHECKPOINT_TAG",
     "EXPECTED_EW8_CHECKPOINT_TAG",
