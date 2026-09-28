@@ -50,3 +50,23 @@ def _isolate_oneshot_ledger(tmp_path, monkeypatch):
         return  # ledger module not importable in this environment -> nothing to isolate
     _isolated = str(tmp_path / "oneshot_ledger_isolated.sqlite")
     monkeypatch.setattr(_ledger, "default_ledger_path", lambda: _isolated)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_result_artifact_dir(tmp_path, monkeypatch):
+    """PN02D POST-B3Y-R3: isolate the durable result-artifact root per test, mirroring the
+    one-shot ledger isolation above. The preclaim retention-readiness guard (wired into
+    ``RealB1Driver.run`` before the one-shot claim) and the CLI durable finalization both
+    resolve their base directory from ``result_artifact_pn02d.default_result_artifact_dir``.
+    Patching that internal seam to a unique per-test temp dir keeps every test's artifact /
+    readiness-probe I/O out of the real ``~/.open-notebook/eval_results`` root (no pollution,
+    no cross-test collision). The real default is intentionally NOT changed for production, and
+    tests that need explicit control pass an explicit ``base_dir=`` which takes precedence."""
+    try:
+        from open_notebook.integrations.graphrag.eval import (
+            result_artifact_pn02d as _ra,
+        )
+    except Exception:
+        return  # module not importable in this environment -> nothing to isolate
+    _isolated = tmp_path / "eval_results_isolated"
+    monkeypatch.setattr(_ra, "default_result_artifact_dir", lambda: _isolated)

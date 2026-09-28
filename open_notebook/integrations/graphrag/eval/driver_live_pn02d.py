@@ -109,6 +109,15 @@ class LiveDriverError(RuntimeError):
     """The live driver could not assemble/run the real path (fail-closed, content-free)."""
 
 
+def _noop_retention_readiness(run_id: str) -> None:
+    """PN02D-RH-IR1-M1 default: result-retention readiness is OPT-IN and B3-only. B1/B2 construct
+    ``RealB1Driver`` WITHOUT supplying a retention guard, so they get this no-op and acquire NO new
+    filesystem dependency on the result-artifact store (byte-identical to pre-retention behavior).
+    The governed B3 path (``run_live_b3_observability_execution`` → ``run_live_b2_execution``)
+    explicitly injects the real ``assert_result_retention_readiness`` guard."""
+    return None
+
+
 #: PN02D-B3G: the shared one-shot consumption enforcer type. Injected only in provider-free
 #: tests (backed by a temporary ledger / spy); production leaves it ``None`` so the driver uses
 #: the real durable ledger. Takes the operator grant + execution kind + optional ledger path.
@@ -252,6 +261,7 @@ class RealB1Driver:
         one_shot_enforcer: Optional[OneShotEnforcer] = None,
         oneshot_ledger_path: Optional[str] = None,
         evidence_materializer_factory: Optional[EvidenceMaterializerFactory] = None,
+        retention_readiness_fn: Callable[[str], object] = _noop_retention_readiness,
     ) -> None:
         self._fx = fx
         self._seams = seams
@@ -275,6 +285,9 @@ class RealB1Driver:
         self._execution_kind = execution_kind
         self._one_shot_enforcer = one_shot_enforcer
         self._oneshot_ledger_path = oneshot_ledger_path
+        # PN02D POST-B3Y-R3 result-retention readiness guard. Defaults to the real durable
+        # storage probe; tests inject a fake to assert ordering / fail-closed behavior.
+        self._retention_readiness_fn = retention_readiness_fn
         self._cleaned = False
         rt_kwargs: Dict[str, object] = dict(
             fx=fx,
@@ -338,6 +351,20 @@ class RealB1Driver:
             #    it performs no ledger mutation and no provider I/O. A failure is a LOCAL runtime
             #    import problem (LiveRuntimeImportReadinessError), never a provider failure.
             assert_live_runtime_import_readiness()
+
+            # -- PN02D POST-B3Y-R3 preclaim RESULT-RETENTION readiness guard (OPT-IN, B3-only per
+            #    PN02D-RH-IR1-M1). Runs AFTER the import-readiness guard and BEFORE the irreversible
+            #    one-shot claim below (task §12 ordering). DEFAULT is a NO-OP: B1/B2 construct this
+            #    driver without a retention guard, so they acquire no new filesystem dependency. The
+            #    governed B3 path explicitly injects the REAL storage probe
+            #    (``assert_result_retention_readiness``): resolve root → run-id validation +
+            #    collision check → dir creation → temp write/flush/fsync → read-back → atomic
+            #    create-if-absent (os.link) compatibility → cleanup. When injected, an unusable
+            #    result store FAILS CLOSED here (LiveResultRetentionReadinessError) so the grant is
+            #    never burnt on a run whose scientific result could not be durably retained — the
+            #    exact failure that lost the B3Y-R3 aggregates. No ledger mutation, no provider I/O,
+            #    no secret read. A failure is a LOCAL storage problem, never a provider failure.
+            self._retention_readiness_fn(operator_grant.run_id)
 
             # -- PN02D-B3G ONE-SHOT consumption (PN02DB3D-ER1-H1 closure). AFTER mint
             #    validation PASS, BEFORE the first provider-bound action (materialize binding /

@@ -27,6 +27,7 @@ Guarantees:
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -58,6 +59,9 @@ from open_notebook.integrations.graphrag.eval.p1diagpn02db3 import (
 from open_notebook.integrations.graphrag.eval.qastagepn02db2 import B2QAExecutionRecord
 from open_notebook.integrations.graphrag.eval.qavaluepn02db3 import (
     build_qa_value_projection,
+)
+from open_notebook.integrations.graphrag.eval.result_artifact_pn02d import (
+    assert_result_retention_readiness,
 )
 from open_notebook.integrations.graphrag.eval.schemaspn02 import ArmId
 
@@ -291,6 +295,7 @@ async def run_live_b3_observability_execution(
     expected_pair_count: int = EXPECTED_QUERY_ARM_PAIRS,
     fx: Optional[FixturePN02] = None,
     treatment_materialization: bool = False,
+    result_artifact_dir: Optional[str] = None,
 ) -> Tuple[B1RunOutcome, Dict[str, object]]:
     """CANONICAL governed B3 OBSERVABILITY execution (PN02D-B3D). OBSERVABILITY_ONLY.
 
@@ -339,6 +344,15 @@ async def run_live_b3_observability_execution(
         # False = CONTROL). When True, run_live_b2_execution threads the post-provision runtime
         # materializer factory to the driver — no code edit needed by a future authorized turn.
         treatment_materialization=treatment_materialization,
+        # PN02D-RH-IR1-M1 + IR2-H1: the governed B3 result-retention path OPTS IN to the preclaim
+        # result-retention readiness guard here (B1/B2 leave it None → no-op, byte-unchanged). It
+        # runs after import-readiness and before the one-shot claim, so an unusable durable result
+        # store fails closed before the grant is burnt. IR2-H1: the guard is bound to the EXACT
+        # ``result_artifact_dir`` the CLI will finalize into (default when None), so the preclaim
+        # probe checks the SAME root as finalization — no default-vs-override split-brain.
+        retention_readiness_fn=functools.partial(
+            assert_result_retention_readiness, base_dir=result_artifact_dir
+        ),
     )
     fixture = fx if fx is not None else load_fixture()
     # PN02D-B3U: the isolation gate is decided by the frozen Stage-1 evaluator inside the SAME run;

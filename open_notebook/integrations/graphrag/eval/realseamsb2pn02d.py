@@ -172,6 +172,7 @@ def _b2_driver_kwargs(
     mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
     execution_kind: str = "B2",
     evidence_materializer_factory: Optional[EvidenceMaterializerFactory] = None,
+    retention_readiness_fn: Optional[Callable[[str], object]] = None,
 ) -> dict:
     """The additive B2 ``driver_kwargs``: the QA stage + the mint SELECTOR + the one-shot
     execution kind. The mint resolves its trust roots INTERNALLY (checkpoint gate); this is a
@@ -184,13 +185,21 @@ def _b2_driver_kwargs(
     ``evidence_materializer_factory`` (PN02D-B3P-R1 M1, default None = CONTROL) is the
     POST-PROVISION treatment factory the driver invokes with the run's ``record_id_by_key`` after
     corpus provisioning; it is a selection, never authorization.
+
+    ``retention_readiness_fn`` (PN02D-RH-IR1-M1, default None) is the OPT-IN preclaim
+    result-retention readiness guard. It is included ONLY when explicitly provided (the governed
+    B3 path passes the real guard); left None it is omitted so ``RealB1Driver`` uses its no-op
+    default and B1/B2 acquire NO new filesystem dependency on the result-artifact store.
     """
-    return {
+    kwargs: dict = {
         "qa_stage_seam": qa_stage_seam,
         "mint_fn": mint_fn,
         "execution_kind": execution_kind,
         "evidence_materializer_factory": evidence_materializer_factory,
     }
+    if retention_readiness_fn is not None:
+        kwargs["retention_readiness_fn"] = retention_readiness_fn
+    return kwargs
 
 
 async def run_live_b2_execution(
@@ -203,6 +212,7 @@ async def run_live_b2_execution(
     mint_fn: Callable[..., object] = mint_live_b2_provider_run_authorization,
     execution_kind: str = "B2",
     treatment_materialization: bool = False,
+    retention_readiness_fn: Optional[Callable[[str], object]] = None,
 ) -> B1RunOutcome:
     """PRODUCTION live B2 entrypoint (used by ``execute-b2-live``).
 
@@ -238,6 +248,7 @@ async def run_live_b2_execution(
             mint_fn=mint_fn,
             execution_kind=execution_kind,
             evidence_materializer_factory=evidence_materializer_factory,
+            retention_readiness_fn=retention_readiness_fn,
         ),
         model_seed=_default_b2_model_seed,
         env=env,

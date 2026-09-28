@@ -51,6 +51,17 @@ from open_notebook.integrations.graphrag.eval.driverpn02d import B1RunOutcome
 from open_notebook.integrations.graphrag.eval.provider_binding08 import (
     frozen_provider_binding,
 )
+from open_notebook.integrations.graphrag.eval.result_artifact_pn02d import (
+    STATUS_COMPLETED,
+    STATUS_POSTCLAIM_FAILURE,
+    STATUS_PRECLAIM_FAILURE,
+    LiveResultRetentionReadinessError,
+    ResultArtifactIdentity,
+    ResultRetentionConfig,
+    ResultRetentionError,
+    finalize_result_artifact,
+    write_failure_artifact,
+)
 from open_notebook.integrations.graphrag.eval.runtime_import_readiness_pn02d import (
     LiveRuntimeImportReadinessError,
 )
@@ -436,6 +447,7 @@ def _default_live_b3_observability_runner(
     observed_fixture_hash: str,
     env: Dict[str, str],
     treatment_materialization: bool = False,
+    result_artifact_dir: Optional[str] = None,
 ) -> B1RunOutcome:
     """Run the real in-process two-boot governed B3 OBSERVABILITY execution (lazy import).
 
@@ -447,6 +459,10 @@ def _default_live_b3_observability_runner(
     ``treatment_materialization`` (PN02D-B3P-R1 M1, default False = CONTROL) is the explicit-only
     generation-evidence-materialization selection threaded to the governed runner; it is a
     selection, not authorization.
+
+    ``result_artifact_dir`` (PN02D-RH-IR2-H1) is the EXACT durable-artifact root the CLI will
+    finalize into; it is threaded to the governed runner so the preclaim retention-readiness guard
+    probes the SAME root that finalization uses (no split-brain default-vs-override root).
     """
     import asyncio
 
@@ -461,6 +477,7 @@ def _default_live_b3_observability_runner(
             observed_fixture_hash=observed_fixture_hash,
             env=env,
             treatment_materialization=treatment_materialization,
+            result_artifact_dir=result_artifact_dir,
         )
     )
     return outcome
@@ -472,6 +489,7 @@ def evaluate_execute_b3_observability_live(
     explicit_authorize: bool,
     env: Dict[str, str],
     treatment_materialization: bool = False,
+    result_artifact_dir: Optional[str] = None,
 ) -> Tuple[int, Dict[str, object]]:
     """PUBLIC production evaluator for ``execute-b3-observability-live`` (PN02D-B3D).
 
@@ -490,6 +508,16 @@ def evaluate_execute_b3_observability_live(
     runner = functools.partial(
         _default_live_b3_observability_runner,
         treatment_materialization=treatment_materialization,
+        result_artifact_dir=result_artifact_dir,
+    )
+    # PN02D POST-B3Y-R3: durable content-safe result retention is scoped to the governed B3
+    # QA-value run (the execution that lost B3Y-R3's aggregates to stdout truncation). The
+    # artifact becomes the system of record; stdout is presentation only.
+    retention = ResultRetentionConfig(
+        enabled=True,
+        execution_kind="B3",
+        treatment=treatment_materialization,
+        base_dir=result_artifact_dir,
     )
     return _evaluate_execute_b1_live_composed(
         manifest_path=manifest_path,
@@ -501,6 +529,7 @@ def evaluate_execute_b3_observability_live(
         allowlist=B2_ALLOWED_OPERATION_VALUES,
         expected_caps_dict=b2_caps_dict,
         projector=_project_b3_observability_result,
+        result_retention=retention,
     )
 
 
@@ -557,6 +586,57 @@ def evaluate_execute_b2_live(
     )
 
 
+def _build_artifact_identity(
+    *,
+    grant: OperatorRunGrant,
+    git_baseline: GitBaselineAttestation,
+    observed_fixture_hash: str,
+    retention: ResultRetentionConfig,
+) -> ResultArtifactIdentity:
+    """Content-safe identity binding an artifact to exactly one governed run (task §11)."""
+    return ResultArtifactIdentity(
+        run_id=grant.run_id,
+        head_commit=git_baseline.head_commit,
+        live_auth_tag=grant.approved_git_tag,
+        implementation_checkpoint_commit=grant.implementation_checkpoint_commit,
+        implementation_checkpoint_tag=grant.implementation_checkpoint_tag,
+        fixture_hash=observed_fixture_hash,
+        treatment=retention.treatment,
+        execution_kind=retention.execution_kind,
+    )
+
+
+def _best_effort_failure_artifact(
+    *,
+    retention: Optional[ResultRetentionConfig],
+    identity: Optional[ResultArtifactIdentity],
+    command: str,
+    payload: Dict[str, object],
+    status: str,
+    claimed: bool,
+) -> None:
+    """Durably capture a content-safe failure artifact WITHOUT ever masking the original
+    failure classification (task §33/§34). Any retention error is swallowed and only recorded
+    as a safe note; the payload's failure fields are left intact.
+    """
+    if retention is None or not retention.enabled or identity is None:
+        return
+    try:
+        written = write_failure_artifact(
+            status=status,
+            command=command,
+            identity=identity,
+            payload=payload,
+            claimed=claimed,
+            base_dir=retention.base_dir,
+        )
+        payload["result_artifact_path"] = str(written.path)
+        payload["result_artifact_sha256"] = written.sha256
+        payload["result_artifact_status"] = written.status
+    except Exception as exc:  # noqa: BLE001 - retention must never mask the real failure
+        payload["result_artifact_retention_note"] = type(exc).__name__
+
+
 def _evaluate_execute_b1_live_composed(
     *,
     manifest_path: Optional[str],
@@ -570,6 +650,7 @@ def _evaluate_execute_b1_live_composed(
     allowlist: FrozenSet[str] = B1_ALLOWED_OPERATION_VALUES,
     expected_caps_dict: Callable[[], Dict[str, int]] = b1_caps_dict,
     projector: Callable[[Dict[str, object]], Dict[str, object]] = _project_scientific_result,
+    result_retention: Optional[ResultRetentionConfig] = None,
 ) -> Tuple[int, Dict[str, object]]:
     """PRIVATE, NON-LIVE composition evaluator (PN02D-B1-EW2 §17). NOT a production entrypoint.
 
@@ -657,6 +738,19 @@ def _evaluate_execute_b1_live_composed(
     #    execute → cleanup); this function neither re-mints nor bypasses it. Any failure is
     #    normalized to a content-safe FAILED payload (type name only, never a secret).
     payload["pn02_provider_run_authorized"] = True
+    # PN02D POST-B3Y-R3: content-safe identity binding for durable retention (None for
+    # B1/B2, which pass no retention config). Built here (grant + trusted git baseline +
+    # observed fixture hash all resolved) so every downstream artifact path has it.
+    identity = (
+        _build_artifact_identity(
+            grant=grant,
+            git_baseline=git_baseline,
+            observed_fixture_hash=observed_fixture_hash,
+            retention=result_retention,
+        )
+        if (result_retention is not None and result_retention.enabled)
+        else None
+    )
     try:
         outcome = live_runner(
             operator_grant=grant,
@@ -664,6 +758,20 @@ def _evaluate_execute_b1_live_composed(
             observed_fixture_hash=observed_fixture_hash,
             env=env,
         )
+    except LiveResultRetentionReadinessError as exc:
+        # PN02D POST-B3Y-R3: the PRECLAIM result-retention readiness guard failed — a LOCAL
+        # storage problem (unwritable/colliding artifact store). It runs AFTER mint and BEFORE
+        # the one-shot claim, so NO grant was consumed and NO provider was contacted. This is a
+        # local storage failure, NEVER a provider failure. No durable artifact is written (the
+        # store just failed its readiness probe); the content-safe readiness report is surfaced.
+        payload["result"] = "FAILED"
+        payload["reasons"] = ["local_result_retention_unready"]
+        payload["failure_classification"] = "LOCAL_RESULT_RETENTION_UNREADY"
+        payload["error_type"] = type(exc).__name__
+        payload["retention_readiness"] = exc.as_safe_dict()
+        payload["provider_bound"] = False
+        payload["runtime_booted"] = False
+        return 4, payload
     except LiveRuntimeImportReadinessError as exc:
         # PN02D-B3Y: the pre-claim runtime import-readiness guard failed — a LOCAL launch/import
         # environment problem (e.g. the repo root absent from sys.path so the first-party
@@ -678,6 +786,17 @@ def _evaluate_execute_b1_live_composed(
         payload["import_readiness"] = exc.as_safe_dict()
         payload["provider_bound"] = False
         payload["runtime_booted"] = False
+        # Import-readiness is PRECLAIM (the guard runs before the claim) and the artifact store
+        # is usable here, so durably capture a content-safe PRECLAIM failure artifact
+        # (claimed=False, provider_traffic 0) — the exact context the B3Y postclaim failure lost.
+        _best_effort_failure_artifact(
+            retention=result_retention,
+            identity=identity,
+            command=command,
+            payload=payload,
+            status=STATUS_PRECLAIM_FAILURE,
+            claimed=False,
+        )
         return 4, payload
     except Exception as exc:  # noqa: BLE001 - fail-closed; content-safe type name only
         payload["result"] = "FAILED"
@@ -720,6 +839,53 @@ def _evaluate_execute_b1_live_composed(
     # the leakage/retrieval/multihop/isolation verdicts (the evaluator stays authoritative), and
     # ``state="COMPLETE"``/``technical_status`` stay TECHNICAL-only (never a scientific PASS).
     payload["scientific_result"] = projector(outcome.report)
+
+    # PN02D POST-B3Y-R3 DURABLE FINALIZATION. The one-shot claim already happened inside the
+    # driver before execution, so a returned outcome is POST-CLAIM. When retention is enabled
+    # (B3), the durable artifact becomes the SYSTEM OF RECORD before this returns, so stdout
+    # truncation can never lose the result.
+    if identity is not None and result_retention is not None and result_retention.enabled:
+        if outcome.state == "COMPLETE":
+            try:
+                written = finalize_result_artifact(
+                    status=STATUS_COMPLETED,
+                    command=command,
+                    identity=identity,
+                    payload=payload,
+                    base_dir=result_retention.base_dir,
+                    mandatory_completed_paths=result_retention.mandatory_completed_paths,
+                )
+            except ResultRetentionError as exc:
+                # Task §35: an in-memory COMPLETE result whose durable persistence cannot be
+                # verified (incomplete/hash/identity mismatch, duplicate, unwritable store, or an
+                # invalid run_id) must NOT be reported as a normal COMPLETE, and there is NO
+                # automatic retry. Reclassify as a postclaim persistence failure (the claim is
+                # already consumed — non-reusable). ResultRetentionError is the base of
+                # ResultArtifactPersistenceError / ResultArtifactAlreadyExistsError.
+                payload["result"] = "FAILED"
+                payload["failure_classification"] = "POSTCLAIM_RESULT_PERSISTENCE_FAILURE"
+                payload["reasons"] = ["result_artifact_persistence_failed"]
+                as_safe = getattr(exc, "as_safe_dict", None)
+                payload["result_persistence_error"] = (
+                    as_safe()
+                    if callable(as_safe)
+                    else {"classification": "POSTCLAIM_RESULT_PERSISTENCE_FAILURE"}
+                )
+                return 4, payload
+            payload["result_artifact_path"] = str(written.path)
+            payload["result_artifact_sha256"] = written.sha256
+            payload["result_artifact_status"] = written.status
+        else:
+            # A controlled post-claim FAILED run: durably capture a content-safe postclaim
+            # failure artifact (best-effort — a retention hiccup never blocks reporting).
+            _best_effort_failure_artifact(
+                retention=result_retention,
+                identity=identity,
+                command=command,
+                payload=payload,
+                status=STATUS_POSTCLAIM_FAILURE,
+                claimed=True,
+            )
     return (0 if outcome.state == "COMPLETE" else 4), payload
 
 
@@ -749,13 +915,25 @@ def cmd_execute_b2_live(args: argparse.Namespace) -> int:
 
 def cmd_execute_b3_observability_live(args: argparse.Namespace) -> int:
     import os
+    import sys
 
     exit_code, payload = evaluate_execute_b3_observability_live(
         manifest_path=getattr(args, "manifest", None),
         explicit_authorize=bool(getattr(args, "authorize", False)),
         env=dict(os.environ),
         treatment_materialization=bool(getattr(args, "treatment", False)),
+        result_artifact_dir=getattr(args, "result_artifact_dir", None),
     )
+    # PN02D POST-B3Y-R3: the durable artifact is the SYSTEM OF RECORD; stdout is a mirror. Report
+    # the artifact path + hash on STDERR (path/hash only — never secrets) so an operator always
+    # learns where the durable copy lives even if stdout is piped, tailed or truncated.
+    artifact_path = payload.get("result_artifact_path")
+    if isinstance(artifact_path, str) and artifact_path:
+        sha = payload.get("result_artifact_sha256")
+        print(
+            f"[PN02D] durable result artifact: {artifact_path} sha256={sha}",
+            file=sys.stderr,
+        )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return exit_code
 
@@ -826,6 +1004,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "PN02D-B3P generation-evidence-materialization TREATMENT (default off = CONTROL). "
             "Selection only — still requires the operator grant + governance gate; never authorizes."
+        ),
+    )
+    b3.add_argument(
+        "--result-artifact-dir",
+        default=None,
+        help=(
+            "PN02D POST-B3Y-R3 override for the durable result-artifact root (default "
+            "~/.open-notebook/eval_results). The artifact is the system of record; stdout is a mirror."
         ),
     )
     b3.set_defaults(func=cmd_execute_b3_observability_live)
