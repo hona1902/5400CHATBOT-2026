@@ -44,7 +44,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 #: Durable result-artifact schema version — SEPARATE from the QA-value observability version
 #: (``qavaluepn02db3``) so the two can evolve independently.
@@ -206,13 +206,17 @@ _FORBIDDEN_CONTENT_KEYS: frozenset = frozenset(
 #: the ``scientific_outputs`` verdicts, the ``b3_observability`` wrapper, and the evaluator
 #: retrieval/multihop/membership metric blocks.
 
-#: scientific_outputs — the four per-notebook verdicts ONLY.
+#: scientific_outputs — the four per-notebook verdicts + the content-safe ``notes`` list
+#: (``scientific_outputs_report`` emits ``notes = list(outputs.notes)``, e.g.
+#: ``["qa_positive_arms=QA-GD,QA-V+GD"]``). ``notes`` is validated as list[str] by
+#: :data:`_BLOCK_KEY_TYPES` (PN02D-RASD: real-B3 persisted field, forensic field #5).
 _SCIENTIFIC_OUTPUTS_SCHEMA: frozenset = frozenset(
     {
         "PER_NOTEBOOK_GRAPH_QA_VALUE_EVIDENCED",
         "PER_NOTEBOOK_GRAPH_RETRIEVAL_VALUE_EVIDENCED",
         "PER_NOTEBOOK_ISOLATION_EVIDENCED",
         "PER_NOTEBOOK_MULTIHOP_INCREMENTAL_VALUE_EVIDENCED",
+        "notes",
     }
 )
 
@@ -233,6 +237,9 @@ _B3_OBSERVABILITY_SCHEMA: frozenset = frozenset(
 #: forbidden_fact_count / arm_metrics (those are qa_value-only) → cross-block relocation rejected.
 _DIAGNOSTICS_SCHEMA: frozenset = frozenset(
     {
+        # PN02D-RASD (forensic field #1): ``project_p1_diagnostics`` emits ``b3_mode``
+        # (e.g. "OBSERVABILITY_ONLY") as a diagnostics key; validated str by _BLOCK_KEY_TYPES.
+        "b3_mode",
         "aggregate", "answer_contained_fact_ids", "answer_contained_shares_grader_matcher",
         "arm", "evidence_contained_fact_ids", "evidence_source_ids",
         "generation_missing_after_evidence_count", "grader_recognized_count",
@@ -290,6 +297,15 @@ _METRICS_SCHEMA: frozenset = frozenset(
     }
 )
 
+#: PN02D-RASD PATH-SPECIFIC metric schemas. The shared :data:`_METRICS_SCHEMA` base stays the
+#: membership_removal vocabulary and is NOT broadened (so ``neg_return_v5`` can never be legal in
+#: multihop / membership_removal). ``retrieval_report`` emits ``rule`` + ``neg_return_v5`` (forensic
+#: fields #4/#3); ``multihop_report`` emits ``rule`` only (forensic field #2, NO ``neg_return_v5``);
+#: ``removal_report`` emits neither. ``rule`` is str and ``neg_return_v5`` is bool-excluding int per
+#: :data:`_BLOCK_KEY_TYPES`.
+_RETRIEVAL_SCHEMA: frozenset = _METRICS_SCHEMA | {"rule", "neg_return_v5"}
+_MULTIHOP_SCHEMA: frozenset = _METRICS_SCHEMA | {"rule"}
+
 #: The path-sensitive dispatch table: a governed block NAME → the allowed keys within that block's
 #: own subtree. When the validator recurses into a value stored under one of these names, it
 #: switches to that block's schema (see :func:`_assert_block`). ``scientific_result`` root uses
@@ -302,8 +318,8 @@ _BLOCK_SCHEMAS: Dict[str, frozenset] = {
     "qa_value_observability": _QA_VALUE_SCHEMA,
     "qa_decision": _QA_DECISION_SCHEMA,
     "scientific_outputs": _SCIENTIFIC_OUTPUTS_SCHEMA,
-    "retrieval": _METRICS_SCHEMA,
-    "multihop": _METRICS_SCHEMA,
+    "retrieval": _RETRIEVAL_SCHEMA,
+    "multihop": _MULTIHOP_SCHEMA,
     "membership_removal": _METRICS_SCHEMA,
 }
 
@@ -318,7 +334,45 @@ ALLOWED_NESTED_KEYS: frozenset = frozenset().union(
     _DIAGNOSTICS_SCHEMA,
     _QA_VALUE_SCHEMA,
     _METRICS_SCHEMA,
+    _RETRIEVAL_SCHEMA,
+    _MULTIHOP_SCHEMA,
 )
+
+
+# --------------------------------------------------------------------------------------
+# PN02D-RASD PATH-SPECIFIC VALUE-TYPE constraints (narrow, additive). The path-sensitive
+# key allowlist (:data:`_BLOCK_SCHEMAS`) governs WHICH keys may appear in a block; these
+# predicates additionally govern the VALUE TYPE of exactly the remediated leaf keys at their
+# legitimate block path (no other existing field's semantics change). Each predicate returns
+# ``(ok, content_safe_detail)`` — the detail carries only a type NAME, never a value.
+# --------------------------------------------------------------------------------------
+def _vt_str(value: object) -> Tuple[bool, str]:
+    return isinstance(value, str), f"type={type(value).__name__}"
+
+
+def _vt_int_excluding_bool(value: object) -> Tuple[bool, str]:
+    # PN02D-RASD-IR1-M2: Python ``bool`` is a subclass of ``int``; a count field must reject
+    # True/False. isinstance(int) alone would accept them.
+    return (isinstance(value, int) and not isinstance(value, bool)), f"type={type(value).__name__}"
+
+
+def _vt_list_of_str(value: object) -> Tuple[bool, str]:
+    if not isinstance(value, list):
+        return False, f"type={type(value).__name__}"
+    for idx, item in enumerate(value):
+        if not isinstance(item, str):
+            return False, f"element[{idx}]_type={type(item).__name__}"
+    return True, ""
+
+
+#: Per-block leaf-key value-type contracts. Keyed by the governed block NAME then the leaf key,
+#: so a type is enforced ONLY at the legitimate path (path-specific, mirrors _BLOCK_SCHEMAS).
+_BLOCK_KEY_TYPES: Dict[str, Dict[str, Callable[[object], Tuple[bool, str]]]] = {
+    "diagnostics": {"b3_mode": _vt_str},
+    "retrieval": {"rule": _vt_str, "neg_return_v5": _vt_int_excluding_bool},
+    "multihop": {"rule": _vt_str},
+    "scientific_outputs": {"notes": _vt_list_of_str},
+}
 
 #: PN02D-RH-IR2-M1 — normalized forms of forbidden content-bearing names (separators stripped,
 #: lowercased) so ADVERSARIAL variants collapse to the same token (``rawAnswer``/``raw-answer``/
@@ -656,7 +710,9 @@ def _assert_content_safe(
     )
 
 
-def _assert_block(obj: object, *, allowed: frozenset, path: str) -> None:
+def _assert_block(
+    obj: object, *, allowed: frozenset, path: str, block_name: str = "scientific_result"
+) -> None:
     """PN02D-RH-IR3-M1 PATH-SENSITIVE structural validator (fail-closed) for the
     ``scientific_result`` tree. At each dict node EVERY key must be in ``allowed`` — the schema of
     the block we are currently inside — so a governed key valid in one block cannot be relocated
@@ -665,6 +721,11 @@ def _assert_block(obj: object, *, allowed: frozenset, path: str) -> None:
     name is validated per the block it appears in, task §22); otherwise nested dicts keep the
     current block's vocabulary. Also enforces normalized-forbidden key rejection, the oversized
     tripwire, list-element validation, and JSON-native-only values at every depth.
+
+    ``block_name`` names the governed block whose schema is currently ``allowed`` (root =
+    ``scientific_result``); it selects the PN02D-RASD per-key value-type contracts in
+    :data:`_BLOCK_KEY_TYPES`, so a remediated leaf key's TYPE is enforced ONLY at its legitimate
+    block path (path-specific, exactly like the key allowlist).
     """
     if obj is None or isinstance(obj, (bool, int, float)):
         return
@@ -690,6 +751,15 @@ def _assert_block(obj: object, *, allowed: frozenset, path: str) -> None:
                 raise ResultArtifactPersistenceError(
                     "wrong_block_or_unknown_key", f"at {path}.{key}"
                 )
+            # PN02D-RASD PATH-SPECIFIC value-type contract for a remediated leaf key at its
+            # legitimate block path (content-safe: detail is a type NAME, never a value).
+            _key_type_check = _BLOCK_KEY_TYPES.get(block_name, {}).get(key)
+            if _key_type_check is not None:
+                _ok, _detail = _key_type_check(value)
+                if not _ok:
+                    raise ResultArtifactPersistenceError(
+                        "wrong_value_type_for_key", f"at {path}.{key} ({_detail})"
+                    )
             # Path-sensitive switch: entering a nested named block uses ITS schema.
             if key in _BLOCK_SCHEMAS:
                 # PN02D-RH-IR4-H1: a named governed block MUST be a dict (or None = legitimately
@@ -701,13 +771,19 @@ def _assert_block(obj: object, *, allowed: frozenset, path: str) -> None:
                         f"at {path}.{key} (type={type(value).__name__})",
                     )
                 child_allowed = _BLOCK_SCHEMAS[key]
+                child_block = key
             else:
                 child_allowed = allowed
-            _assert_block(value, allowed=child_allowed, path=f"{path}.{key}")
+                child_block = block_name
+            _assert_block(
+                value, allowed=child_allowed, path=f"{path}.{key}", block_name=child_block
+            )
         return
     if isinstance(obj, (list, tuple)):
         for idx, value in enumerate(obj):
-            _assert_block(value, allowed=allowed, path=f"{path}[{idx}]")
+            _assert_block(
+                value, allowed=allowed, path=f"{path}[{idx}]", block_name=block_name
+            )
         return
     raise ResultArtifactPersistenceError(
         "non_content_safe_value_type", f"at {path} (type={type(obj).__name__})"
@@ -786,6 +862,7 @@ def build_content_safe_artifact(
                 value,
                 allowed=_BLOCK_SCHEMAS["scientific_result"],
                 path="result.scientific_result",
+                block_name="scientific_result",
             )
         else:
             _assert_content_safe(value, path=f"result.{key}", allowed_keys=None)

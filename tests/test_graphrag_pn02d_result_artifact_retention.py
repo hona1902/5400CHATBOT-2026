@@ -1298,3 +1298,207 @@ def test_safe_artifact_still_finalizes_after_ir4(tmp_path):
     art: Any = R.read_result_artifact(written.path)
     R.verify_artifact(art, expected_identity=_identity("rid-ir4-safe"))
     assert R._success_marker_path("rid-ir4-safe", str(tmp_path)).exists()
+
+
+# --------------------------------------------------------------------------- #
+# PN02D-RASD — schema remediation for the 5 real-B3 persisted fields
+#   (retrieval.rule/neg_return_v5, multihop.rule, scientific_outputs.notes,
+#    b3_observability.diagnostics.b3_mode). Origin A: REAL producers + the REAL
+#    persisted projector cli_live_pn02d._project_b3_observability_result, then the
+#    REAL finalizer -- the exact boundary that broke real Run #2. No Run #2 payload
+#    is copied; the fixture is regenerated from producers on synthetic inputs.
+# --------------------------------------------------------------------------- #
+def _realistic_projected_scientific_result() -> dict:
+    """Build the persisted scientific_result through the REAL producers and the REAL
+    persisted projector (PN02D-RASD-IR1-M1 drift guard boundary)."""
+    from open_notebook.integrations.graphrag.eval import cli_live_pn02d as cli
+    from open_notebook.integrations.graphrag.eval import reportpn02
+    from open_notebook.integrations.graphrag.eval.decisionspn02 import (
+        MultihopDecision,
+        RetrievalDecision,
+    )
+    from open_notebook.integrations.graphrag.eval.p1diagpn02db3 import (
+        project_p1_diagnostics,
+    )
+    from open_notebook.integrations.graphrag.eval.schemaspn02 import (
+        ScienceVerdict,
+        ScientificOutputs,
+    )
+
+    retrieval = reportpn02.retrieval_report(
+        RetrievalDecision(
+            verdict=ScienceVerdict.INCONCLUSIVE, rule="R4", new_req=24, new_fp=136,
+            n_gain_notebooks_d=1, neg_return_gd=3, neg_return_v5=0,
+        )
+    )
+    multihop = reportpn02.multihop_report(
+        MultihopDecision(verdict=ScienceVerdict.NO, rule="M2", mh=0)
+    )
+    scientific_outputs = reportpn02.scientific_outputs_report(
+        ScientificOutputs(
+            per_notebook_isolation_evidenced=ScienceVerdict.YES,
+            per_notebook_graph_retrieval_value_evidenced=ScienceVerdict.INCONCLUSIVE,
+            per_notebook_graph_qa_value_evidenced=ScienceVerdict.YES,
+            per_notebook_multihop_incremental_value_evidenced=ScienceVerdict.NO,
+            notes=("qa_positive_arms=QA-GD,QA-V+GD",),
+        )
+    )
+    diagnostics = project_p1_diagnostics([])  # real diagnostics incl. b3_mode
+    report = {
+        "report_kind": "graphrag_pn02_offline_report",
+        # stage1 + driver ledger snapshot are the sources the projector reads for the
+        # isolation gate and the QUERY_EMBEDDING/GD_QUERY/VECTOR_QUERY spent counts.
+        "stage1": {
+            "stage1_status": "PASS",
+            "stage2_authorized_by_result": True,
+            "violations": [],
+            "metrics": {
+                "cross_notebook_leak_query_count": 0,
+                "cross_notebook_leakage_rate": 0.0,
+            },
+        },
+        "driver": {
+            "workload_ledger_snapshot": {
+                "QUERY_EMBEDDING": {"spent": 26},
+                "GD_QUERY": {"spent": 26},
+                "VECTOR_QUERY": {"spent": 26},
+            }
+        },
+        "retrieval": retrieval,
+        "retrieval_verdict": retrieval["verdict"],
+        "multihop": multihop,
+        "multihop_verdict": multihop["verdict"],
+        "scientific_outputs": scientific_outputs,
+        "b3_observability": {
+            "report_kind": "PN02_B3_FACT_RECALL_OBSERVABILITY",
+            "mode": "OBSERVABILITY_ONLY",
+            "completeness": "COMPLETE",
+            "diagnostics": diagnostics,
+            "qa_value_observability": {
+                "qa_value_observability_complete": True,
+                "qa_decision": {"rule": "Q1", "verdict": "YES"},
+            },
+        },
+    }
+    return cast(dict, cli._project_b3_observability_result(report))
+
+
+def _realistic_complete_payload() -> dict:
+    """A COMPLETE B3 payload whose scientific_result is the real projected shape."""
+    return {
+        "result": "COMPLETE",
+        "provider_traffic": 158,
+        "technical_status": "COMPLETED",
+        "index_metrics": {"indexed": 24, "expected": 24},
+        "scientific_result": _realistic_projected_scientific_result(),
+    }
+
+
+def test_rasd_realistic_projected_b3_finalizes(tmp_path):
+    """TEST_PROJECTED_REALISTIC_B3_FINALIZES + producer/projector drift guard: the real
+    projected B3 result (all 5 remediated fields) persists durably and verifies."""
+    sr = _realistic_projected_scientific_result()
+    assert sr["retrieval"]["rule"] == "R4"
+    assert sr["retrieval"]["neg_return_v5"] == 0
+    assert sr["multihop"]["rule"] == "M2"
+    assert sr["scientific_outputs"]["notes"] == ["qa_positive_arms=QA-GD,QA-V+GD"]
+    assert sr["b3_observability"]["diagnostics"]["b3_mode"] == "OBSERVABILITY_ONLY"
+    for k in (
+        "b3_report_kind", "b3_mode", "b3_observation_run_id", "b3_reference_b2_run_id",
+        "b3_expected_pair_count", "b3_completed_diagnostic_pair_count", "b3_completeness",
+        "b3_observability",
+    ):
+        assert k in sr
+    ident = _identity("rid-rasd-real")
+    written = R.finalize_result_artifact(
+        status=R.STATUS_COMPLETED, command="execute-b3-observability-live",
+        identity=ident, payload=_realistic_complete_payload(), base_dir=str(tmp_path),
+    )
+    art: Any = R.read_result_artifact(written.path)
+    R.verify_artifact(art, expected_identity=ident)
+    assert written.success_marker is not None and written.success_marker.exists()
+    got = art["result"]["scientific_result"]
+    assert got["retrieval"]["neg_return_v5"] == 0
+    assert got["b3_observability"]["diagnostics"]["b3_mode"] == "OBSERVABILITY_ONLY"
+
+
+def test_rasd_neg_return_v5_bool_rejects(tmp_path):
+    for i, bad in enumerate((True, False)):
+        p = _realistic_complete_payload()
+        p["scientific_result"]["retrieval"]["neg_return_v5"] = bad
+        _finalize_expect_rejected(tmp_path, f"rid-rasd-v5bool-{i}", p)
+
+
+def test_rasd_neg_return_v5_wrong_types(tmp_path):
+    for i, bad in enumerate(("0", 0.0, None)):
+        p = _realistic_complete_payload()
+        p["scientific_result"]["retrieval"]["neg_return_v5"] = bad
+        _finalize_expect_rejected(tmp_path, f"rid-rasd-v5type-{i}", p)
+
+
+def test_rasd_neg_return_v5_int_accepts(tmp_path):
+    p = _realistic_complete_payload()
+    p["scientific_result"]["retrieval"]["neg_return_v5"] = 7
+    written = R.finalize_result_artifact(
+        status=R.STATUS_COMPLETED, command="execute-b3-observability-live",
+        identity=_identity("rid-rasd-v5int"), payload=p, base_dir=str(tmp_path),
+    )
+    art: Any = R.read_result_artifact(written.path)
+    assert art["result"]["scientific_result"]["retrieval"]["neg_return_v5"] == 7
+
+
+def test_rasd_rule_wrong_type_rejects(tmp_path):
+    p = _realistic_complete_payload()
+    p["scientific_result"]["retrieval"]["rule"] = 1
+    _finalize_expect_rejected(tmp_path, "rid-rasd-rruleint", p)
+    p2 = _realistic_complete_payload()
+    p2["scientific_result"]["multihop"]["rule"] = 1
+    _finalize_expect_rejected(tmp_path, "rid-rasd-mruleint", p2)
+
+
+def test_rasd_notes_type_strictness(tmp_path):
+    for i, bad in enumerate(("text", [1], [{}], [True], [None])):
+        p = _realistic_complete_payload()
+        p["scientific_result"]["scientific_outputs"]["notes"] = bad
+        _finalize_expect_rejected(tmp_path, f"rid-rasd-notes-{i}", p)
+
+
+def test_rasd_b3_mode_strictness(tmp_path):
+    p = _realistic_complete_payload()
+    p["scientific_result"]["b3_observability"]["diagnostics"]["b3_mode"] = 123
+    _finalize_expect_rejected(tmp_path, "rid-rasd-b3modeint", p)
+
+
+def test_rasd_wrong_block_relocation_rejected(tmp_path):
+    # neg_return_v5 is retrieval-only: rejected under multihop (path-specific schema)
+    p = _realistic_complete_payload()
+    p["scientific_result"]["multihop"]["neg_return_v5"] = 3
+    _finalize_expect_rejected(tmp_path, "rid-rasd-v5-mh", p)
+    # b3_mode under scientific_outputs
+    p2 = _realistic_complete_payload()
+    p2["scientific_result"]["scientific_outputs"]["b3_mode"] = "X"
+    _finalize_expect_rejected(tmp_path, "rid-rasd-b3mode-so", p2)
+    # notes under retrieval
+    p3 = _realistic_complete_payload()
+    p3["scientific_result"]["retrieval"]["notes"] = ["x"]
+    _finalize_expect_rejected(tmp_path, "rid-rasd-notes-retr", p3)
+    # rule under membership_removal (removal metric block has no rule)
+    p4 = _realistic_complete_payload()
+    p4["scientific_result"]["membership_removal"] = {"shared_source": "SH", "rule": "R4"}
+    _finalize_expect_rejected(tmp_path, "rid-rasd-rule-removal", p4)
+
+
+def test_rasd_unknown_sibling_rejected(tmp_path):
+    blocks = [
+        ("retrieval",),
+        ("multihop",),
+        ("scientific_outputs",),
+        ("b3_observability", "diagnostics"),
+    ]
+    for i, path in enumerate(blocks):
+        p = _realistic_complete_payload()
+        node = p["scientific_result"]
+        for seg in path:
+            node = node[seg]
+        node["totally_unknown_sibling_key"] = 1
+        _finalize_expect_rejected(tmp_path, f"rid-rasd-sib-{i}", p)
