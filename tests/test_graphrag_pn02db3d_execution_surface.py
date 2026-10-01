@@ -40,6 +40,7 @@ from open_notebook.integrations.graphrag.eval.authmintlivepn02d import (
     HISTORICAL_B3XR2_CHECKPOINT_TAG,
     HISTORICAL_B3XR4_CHECKPOINT_TAG,
     HISTORICAL_B3YR1_CHECKPOINT_TAG,
+    HISTORICAL_B3YRH1_CHECKPOINT_TAG,
     RealTrustedB1R2Reader,
     b2_r2_refusal_reasons,
     b3b_r2_refusal_reasons,
@@ -102,20 +103,22 @@ class _MultiPatch:
 # --------------------------------------------------------------------------- #
 
 
-def test_b3_live_identity_is_b3yrh1_successor_and_historical_tags_separate():
-    # PN02D-B3Y-RH1 (post-retention-hardening): the governed B3 LIVE authorization identity is the
-    # predeclared B3Y-RH1 successor tag, DISTINCT from the historical B3B wiring tag AND the historical
-    # B3J/B3Q/B3V/B3X-R2/B3X-R4/B3Y-R1 successor tags (all now ancestors / immutable evidence, NEVER the
-    # current live identity — B3Y-R1 became historical when the retention-hardening checkpoint advanced HEAD).
-    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG == "graphrag-pn02db3yrh1-b3-live-auth-successor-approved"
+def test_b3_live_identity_is_b3yrh2_successor_and_historical_tags_separate():
+    # PN02D-B3Y-RH2 (post-schema-remediation): the governed B3 LIVE authorization identity is the
+    # predeclared B3Y-RH2 successor tag, DISTINCT from the historical B3B wiring tag AND the historical
+    # B3J/B3Q/B3V/B3X-R2/B3X-R4/B3Y-R1/B3Y-RH1 successor tags (all now ancestors / immutable evidence,
+    # NEVER the current live identity — B3Y-RH1 became historical when the schema-remediation checkpoint
+    # advanced HEAD past its peel).
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG == "graphrag-pn02db3yrh2-b3-live-auth-successor-approved"
     assert HISTORICAL_B3B_CHECKPOINT_TAG == "graphrag-pn02db3b-live-observability-wiring-approved"
     assert HISTORICAL_B3J_CHECKPOINT_TAG == "graphrag-pn02db3j-b3-live-auth-successor-approved"
     assert HISTORICAL_B3Q_CHECKPOINT_TAG == "graphrag-pn02db3q-b3-live-auth-successor-approved"
     assert HISTORICAL_B3V_CHECKPOINT_TAG == "graphrag-pn02db3v-b3-live-auth-successor-approved"
     assert HISTORICAL_B3XR2_CHECKPOINT_TAG == "graphrag-pn02db3xr2-b3-live-auth-successor-approved"
     assert HISTORICAL_B3XR4_CHECKPOINT_TAG == "graphrag-pn02db3xr4-b3-live-auth-successor-approved"
-    # PN02D-B3Y-RH1: B3Y-R1 is now retained as a historical predecessor (not the current live identity).
+    # PN02D-B3Y-R1 and B3Y-RH1 are both retained as historical predecessors (not the current live identity).
     assert HISTORICAL_B3YR1_CHECKPOINT_TAG == "graphrag-pn02db3yr1-b3-live-auth-successor-approved"
+    assert HISTORICAL_B3YRH1_CHECKPOINT_TAG == "graphrag-pn02db3yrh1-b3-live-auth-successor-approved"
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3B_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3J_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3Q_CHECKPOINT_TAG
@@ -123,7 +126,8 @@ def test_b3_live_identity_is_b3yrh1_successor_and_historical_tags_separate():
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3XR2_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3XR4_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3YR1_CHECKPOINT_TAG
-    # the seven historical successor/wiring tags are mutually distinct
+    assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != HISTORICAL_B3YRH1_CHECKPOINT_TAG
+    # the eight historical successor/wiring tags are mutually distinct
     assert len({
         HISTORICAL_B3B_CHECKPOINT_TAG,
         HISTORICAL_B3J_CHECKPOINT_TAG,
@@ -132,8 +136,9 @@ def test_b3_live_identity_is_b3yrh1_successor_and_historical_tags_separate():
         HISTORICAL_B3XR2_CHECKPOINT_TAG,
         HISTORICAL_B3XR4_CHECKPOINT_TAG,
         HISTORICAL_B3YR1_CHECKPOINT_TAG,
-    }) == 7
-    # resolver + backward-compat alias both point at the LIVE (B3Y-RH1) identity, distinct from B2
+        HISTORICAL_B3YRH1_CHECKPOINT_TAG,
+    }) == 8
+    # resolver + backward-compat alias both point at the LIVE (B3Y-RH2) identity, distinct from B2
     assert current_approved_b3b_checkpoint() == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert EXPECTED_B3B_CHECKPOINT_TAG == EXPECTED_B3_LIVE_CHECKPOINT_TAG
     assert EXPECTED_B3_LIVE_CHECKPOINT_TAG != EXPECTED_B2_CHECKPOINT_TAG
@@ -229,8 +234,8 @@ def test_real_git_b3_live_profile_matches_current_lifecycle_state():
 
 def test_real_git_b3p_implementation_tag_is_ancestor_and_cannot_authorize_b3_live():
     # PN02D-B3X-R2 (§9/§12): the B3P implementation checkpoint tag is an IMPLEMENTATION tag, NOT the
-    # governed B3 live-auth identity (the current B3Y-RH1 successor tag, currently absent; B3Y-R1 is the
-    # historical predecessor). The B3P tag peels to an
+    # governed B3 live-auth identity (the current B3Y-RH2 successor tag, currently absent; B3Y-RH1 and
+    # B3Y-R1 are historical predecessors). The B3P tag peels to an
     # ANCESTOR (no longer current HEAD). A grant naming the B3P tag as its B3 live checkpoint must STILL
     # fail closed on identity mismatch — neither an ancestor tag nor a non-live implementation tag can
     # authorize the B3 live profile.
@@ -253,14 +258,14 @@ def test_real_git_b3p_implementation_tag_is_ancestor_and_cannot_authorize_b3_liv
         ),
         baseline,
     )
-    # the grant's B3-live identity does not match the approved B3Y-RH1 identity -> fail closed
+    # the grant's B3-live identity does not match the approved B3Y-RH2 identity -> fail closed
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
 def test_real_git_b3u_implementation_tag_is_ancestor_and_cannot_authorize_b3_live():
     # PN02D-B3X-R2 (real-git sync): the B3U implementation tag is IMPLEMENTATION-evidence, NOT the
-    # governed B3 live-auth identity (the current B3Y-RH1 successor tag, currently absent; B3Y-R1 is the
-    # historical predecessor). The B3U tag peels to an
+    # governed B3 live-auth identity (the current B3Y-RH2 successor tag, currently absent; B3Y-RH1 and
+    # B3Y-R1 are historical predecessors). The B3U tag peels to an
     # ANCESTOR (no longer current HEAD — HEAD advanced past it at the B3V and B3X-R1 checkpoints). A
     # grant naming the B3U tag as its B3 live checkpoint must STILL fail closed on identity mismatch —
     # neither an ancestor tag nor a non-live implementation tag can authorize the B3 live profile.
@@ -283,14 +288,14 @@ def test_real_git_b3u_implementation_tag_is_ancestor_and_cannot_authorize_b3_liv
         ),
         baseline,
     )
-    # exact-HEAD impl tag is NOT the B3Y-RH1 live identity -> fail closed on identity mismatch
+    # exact-HEAD impl tag is NOT the B3Y-RH2 live identity -> fail closed on identity mismatch
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
 def test_real_git_b3xr1_implementation_tag_is_ancestor_and_cannot_authorize_b3_live():
     # PN02D-B3X-R3 (lifecycle-invariant, landed state): the B3X-R1 QA-value runtime-wiring tag is
-    # IMPLEMENTATION-evidence, NOT the governed B3 live-auth identity (the current B3Y-RH1 successor tag;
-    # B3Y-R1 is the historical predecessor).
+    # IMPLEMENTATION-evidence, NOT the governed B3 live-auth identity (the current B3Y-RH2 successor tag;
+    # B3Y-RH1 and B3Y-R1 are historical predecessors).
     # After the approved B3X-R2 governance checkpoint advanced HEAD past the B3X-R1 commit, the B3X-R1 tag
     # peels to an ANCESTOR (no longer current HEAD). A grant naming the B3X-R1 tag as its B3 live checkpoint
     # must STILL fail closed on identity mismatch — neither an ancestor tag nor a non-live implementation
@@ -316,22 +321,22 @@ def test_real_git_b3xr1_implementation_tag_is_ancestor_and_cannot_authorize_b3_l
         ),
         baseline,
     )
-    # ancestor implementation-evidence tag is NOT the B3Y-RH1 live identity -> fail closed
+    # ancestor implementation-evidence tag is NOT the B3Y-RH2 live identity -> fail closed
     assert "b1_r2_grant_identity_mismatch" in reasons
 
 
 def test_synthetic_exact_head_implementation_tag_cannot_authorize():
     # PN02D-B3X-R3 (§10/§11 — remediation of PN02DB3XR3-IR1-M1): FAITHFULLY model an
     # IMPLEMENTATION-evidence tag that ACTUALLY peels to EXACT HEAD, while the separately-named expected
-    # live-auth identity (B3Y-RH1) is ABSENT, and prove FAIL_CLOSED through the SHARED production trust
+    # live-auth identity (B3Y-RH2) is ABSENT, and prove FAIL_CLOSED through the SHARED production trust
     # logic (b3b_r2_refusal_reasons over a RealTrustedB1R2Reader). This is the phase-independent security
     # semantic: an implementation tag sitting at exact HEAD must NOT substitute for the expected live
-    # identity. A scripted Git boundary models BOTH tags (impl present@HEAD / B3Y-RH1 absent), so the
+    # identity. A scripted Git boundary models BOTH tags (impl present@HEAD / B3Y-RH2 absent), so the
     # assertion depends on the production refusal RESULT, not a bare constant compare. Stays true
     # regardless of real Git history / which commit HEAD currently points at.
     HEAD_X = C.TEST_COMMIT
     impl_tag_at_head = "graphrag-pn02db3xr1-qa-value-runtime-wiring-approved"
-    expected_live = EXPECTED_B3B_CHECKPOINT_TAG  # the current B3Y-RH1 (YRH1) successor identity
+    expected_live = EXPECTED_B3B_CHECKPOINT_TAG  # the current B3Y-RH2 (YRH2) successor identity
     assert impl_tag_at_head != expected_live
 
     def _multi_tag_runner(args):
@@ -340,7 +345,7 @@ def test_synthetic_exact_head_implementation_tag_cannot_authorize():
             return HEAD_X
         if a[:2] == ["tag", "--list"]:
             name = a[2] if len(a) > 2 else ""
-            # the implementation-evidence tag exists; the expected live (B3Y-RH1) tag is ABSENT
+            # the implementation-evidence tag exists; the expected live (B3Y-RH2) tag is ABSENT
             return name if name == impl_tag_at_head else ""
         if a[:2] == ["rev-list", "-n"]:
             ref = a[3] if len(a) > 3 else ""
@@ -353,10 +358,10 @@ def test_synthetic_exact_head_implementation_tag_cannot_authorize():
     impl_obs = reader.observe(impl_tag_at_head)
     assert impl_obs.observed_tag_exists is True
     assert impl_obs.observed_tag_peel == impl_obs.observed_head == HEAD_X  # impl tag peel == HEAD
-    # ... while the expected live identity (B3Y-RH1) is ABSENT
+    # ... while the expected live identity (B3Y-RH2) is ABSENT
     live_obs = reader.observe(expected_live)
     assert live_obs.observed_tag_exists is False
-    # a grant naming the (correct) expected live identity B3Y-RH1 fails closed because that tag is ABSENT,
+    # a grant naming the (correct) expected live identity B3Y-RH2 fails closed because that tag is ABSENT,
     # even though an implementation-evidence tag peels exactly to HEAD -> the impl tag does NOT substitute
     with _patch_b3(expected_live, reader):
         reasons = b3b_r2_refusal_reasons(
