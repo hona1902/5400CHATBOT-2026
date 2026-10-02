@@ -136,6 +136,101 @@ class TestFeatureDisabled:
         assert "BASE_URL" in result.detail
 
 
+# ----------------------------------- 1b. GraphRAG-09B production-boundary proofs
+
+
+class TestFlagOffAndPocIsolation:
+    """GraphRAG-09B exit-gate regression proofs (provider-free, network-free).
+
+    Locks two invariants the 09B production-boundary forensic relies on:
+    FLAG_OFF_EQUALS_BASELINE (the disabled user path builds/uses no client and
+    issues no request) and POC_CONFIG_DOES_NOT_LEAK_TO_PRODUCT (the eval-only
+    GRAPHRAG_POC_* names never feed the product GraphRAGConfig, which reads only
+    OPEN_NOTEBOOK_GRAPHRAG_* at the single config.py chokepoint). All values below
+    are inert test literals, never real secrets, and the tests never touch the
+    network or a developer .env.
+    """
+
+    _PRODUCT_VARS = (
+        "OPEN_NOTEBOOK_GRAPHRAG_ENABLED",
+        "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL",
+        "OPEN_NOTEBOOK_GRAPHRAG_TIMEOUT",
+        "OPEN_NOTEBOOK_GRAPHRAG_API_KEY",
+    )
+    # Representative eval-only names (see deploy/graphrag-poc/docker-compose.graphrag.yml).
+    _POC_VARS = {
+        "GRAPHRAG_POC_API_KEY": "poc-inert-test-literal",
+        "GRAPHRAG_POC_LLM_MODEL": "poc/model",
+        "GRAPHRAG_POC_LLM_BINDING": "openai",
+        "GRAPHRAG_POC_LLM_HOST": "http://poc.invalid",
+        "GRAPHRAG_POC_LLM_API_KEY": "poc-inert-test-literal-2",
+    }
+
+    def test_poc_env_vars_do_not_leak_into_product_config(self, monkeypatch):
+        """With no product vars set, PoC vars leave GraphRAGConfig at its disabled
+        default: PoC configuration cannot enable GraphRAG or populate any field."""
+        for key in self._PRODUCT_VARS:
+            monkeypatch.delenv(key, raising=False)
+        for key, value in self._POC_VARS.items():
+            monkeypatch.setenv(key, value)
+
+        config = load_config()
+
+        assert config.enabled is False
+        assert config.configured is False
+        assert config.base_url == ""
+        assert config.api_key is None
+        assert config.timeout == DEFAULT_TIMEOUT_SECONDS
+
+    def test_poc_env_cannot_override_product_config(self, monkeypatch):
+        """When BOTH namespaces are set, only OPEN_NOTEBOOK_GRAPHRAG_* is read; the
+        PoC values are ignored (disjoint namespaces, single config reader)."""
+        monkeypatch.setenv("OPEN_NOTEBOOK_GRAPHRAG_ENABLED", "true")
+        monkeypatch.setenv("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL", BASE_URL)
+        monkeypatch.setenv("OPEN_NOTEBOOK_GRAPHRAG_TIMEOUT", "12")
+        monkeypatch.setenv(
+            "OPEN_NOTEBOOK_GRAPHRAG_API_KEY", "product-only-inert-test-literal"
+        )
+        for key, value in self._POC_VARS.items():
+            monkeypatch.setenv(key, value)
+
+        config = load_config()
+
+        assert config.enabled is True
+        assert config.base_url == BASE_URL
+        assert config.timeout == 12.0
+        assert config.api_key == "product-only-inert-test-literal"
+        # No PoC literal ever appears in the resolved product config.
+        for value in self._POC_VARS.values():
+            assert value != config.base_url
+            assert value != config.api_key
+
+    @pytest.mark.asyncio
+    async def test_disabled_user_path_never_uses_client_or_network(self):
+        """FLAG_OFF: query / query_strict / index_synthetic_document on the disabled
+        user path must never reach an injected fail-on-call client, proving no
+        client use and no outbound request. Extends the health-only no-network
+        proof to the remaining user-path service methods."""
+
+        def handler(request):  # pragma: no cover - must never be called
+            raise AssertionError("disabled user path must not make a request")
+
+        failing_client = GraphRAGClient(
+            _config(enabled=False), transport=httpx.MockTransport(handler)
+        )
+        service = GraphRAGService(
+            config=_config(enabled=False), client=failing_client
+        )
+
+        assert await service.query("anything") is None
+        with pytest.raises(GraphRAGDisabledError):
+            await service.query_strict("anything")
+        with pytest.raises(GraphRAGDisabledError):
+            await service.index_synthetic_document(
+                source_id="source:abc", canonical_text="synthetic"
+            )
+
+
 # ------------------------------------------------------------ 2. healthy path
 
 
