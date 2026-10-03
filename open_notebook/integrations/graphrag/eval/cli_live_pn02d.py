@@ -65,7 +65,9 @@ from open_notebook.integrations.graphrag.eval.result_artifact_pn02d import (
 from open_notebook.integrations.graphrag.eval.runtime_import_readiness_pn02d import (
     LiveRuntimeImportReadinessError,
 )
-from open_notebook.utils.provider_errors import safe_provider_error_fields
+from open_notebook.integrations.graphrag.failure_classification import (
+    classify_graphrag_failure,
+)
 
 #: Governance env token that would (with an explicit flag) open the authorization gate.
 #: NEVER set in B0C-B; the verb refuses without it (PN02_PROVIDER_RUN_AUTHORIZED = NO).
@@ -807,15 +809,16 @@ def _evaluate_execute_b1_live_composed(
             # text, prompt, answer or secret) and lets an operator distinguish a local import
             # gap from a provider failure without leaking anything.
             payload["missing_module_name"] = exc.name
-        payload["provider_bound"] = False
-        # PN02D-B1-EW5: attach the sanitized, safe-by-construction provider-error diagnostic
-        # (fixed vocabulary; no raw message/body/headers/secret) so an operator can tell a
-        # provider failure family apart (e.g. auth vs endpoint) without leaking credentials.
-        # Prefers a diagnostic attached at the failure source (operation-accurate); otherwise
-        # classifies the caught exception generically.
-        payload["provider_error"] = safe_provider_error_fields(
-            exc, operation="live_provider_execution"
-        )
+        # GraphRAG-09C: classify by DOMAIN first so a non-provider failure (SurrealDB/local
+        # dependency, GraphRAG sidecar/config) is never mislabeled unknown_provider_error.
+        # The sanitized provider diagnostic is attached ONLY when the failure is genuinely
+        # provider-bound (fixed vocabulary; no raw message/body/headers/secret); it prefers a
+        # diagnostic attached at the provider boundary.
+        _failure = classify_graphrag_failure(exc, operation="live_provider_execution")
+        payload["failure_classification"] = _failure.classification
+        payload["provider_bound"] = _failure.is_provider
+        if _failure.provider_error is not None:
+            payload["provider_error"] = _failure.provider_error
         return 4, payload
 
     payload["result"] = outcome.state  # COMPLETE | FAILED

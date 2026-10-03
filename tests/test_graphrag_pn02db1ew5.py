@@ -357,7 +357,11 @@ def test_cli_non_provider_error_still_safe(tmp_path):
     path = _write_manifest(tmp_path, grant)
 
     def _raising_runner(**_kw):
-        raise RuntimeError("some non-provider internal failure")
+        # GraphRAG-09C: opaque NON-provider failure. The synthetic sentinel must never reach
+        # the content-safe payload.
+        raise RuntimeError(
+            "some non-provider internal failure sk-or-SENTINELNONPROVIDER0123456789"
+        )
 
     with C.approved_b1r2_governance():
         code, payload = cli._evaluate_execute_b1_live_composed(
@@ -369,11 +373,16 @@ def test_cli_non_provider_error_still_safe(tmp_path):
             live_runner=_raising_runner,
         )
     assert code == 4
-    perr = payload["provider_error"]
-    # No structured signal -> unknown, null status; still a well-formed safe payload.
-    assert perr["provider_error_class"] == pe.UNKNOWN_PROVIDER_ERROR
-    assert perr["provider_http_status"] is None
+    # GraphRAG-09C domain-first contract: a non-provider opaque failure is classified
+    # domain-neutrally and is NOT labeled a provider error (the pre-09C unknown_provider_error
+    # masking at this harness call site is gone). The provider classifier itself is unchanged.
+    assert payload["failure_classification"] == "unknown_error"
+    assert payload["provider_bound"] is False
+    assert "provider_error" not in payload
+    # content safety preserved/strengthened: neither a credential form nor the synthetic
+    # sentinel reaches the emitted payload.
     _no_secret(payload)
+    assert "SENTINELNONPROVIDER" not in json.dumps(payload)
 
 
 # --------------------------------------------------------------------------- #

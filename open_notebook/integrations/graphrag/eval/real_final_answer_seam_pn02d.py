@@ -39,6 +39,9 @@ from open_notebook.integrations.graphrag.eval.schemaspn02 import (
     QAAnswerResult,
     TechnicalOutcome,
 )
+from open_notebook.integrations.graphrag.failure_classification import (
+    is_non_provider_domain,
+)
 from open_notebook.utils.provider_errors import (
     ProviderErrorDiagnostic,
     classify_provider_error,
@@ -189,6 +192,13 @@ class RealFinalAnswerSeam:
         try:
             completion = await self.completion_fn(prompt)  # EXACTLY once; no retry.
         except Exception as exc:  # noqa: BLE001 - classify to a content-safe diagnostic
+            # GraphRAG-09C: the completion call IS the provider boundary, so an opaque or
+            # status-bearing failure is classified as a provider error (preserving the EW5
+            # content-safe diagnostic). But a CLEARLY non-provider typed failure (a GraphRAG
+            # sidecar/config/validation error, or a local SurrealDB/dependency error) must NOT
+            # be forced through provider vocabulary — it propagates with its own domain.
+            if is_non_provider_domain(exc):
+                raise
             diagnostic = classify_provider_error(exc, operation=self.operation)
             raise FinalAnswerProviderError(diagnostic) from None
         answer_text, citations, abstained = parse_final_answer(completion)
