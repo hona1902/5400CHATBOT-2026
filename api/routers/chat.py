@@ -7,6 +7,7 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from api.models import GraphProvenanceMetadata
 from api.routers._chat_shared import (
     ChatMessage,
     SuccessResponse,
@@ -20,6 +21,9 @@ from open_notebook.exceptions import (
     OpenNotebookError,
 )
 from open_notebook.graphs.chat import graph as chat_graph
+from open_notebook.integrations.graphrag.product_provenance import (
+    build_chat_graph_provenance,
+)
 from open_notebook.utils import token_count
 from open_notebook.utils.context_builder import build_notebook_context
 from open_notebook.utils.graph_utils import get_session_message_count
@@ -77,6 +81,12 @@ class ExecuteChatRequest(BaseModel):
 class ExecuteChatResponse(BaseModel):
     session_id: str = Field(..., description="Session ID")
     messages: List[ChatMessage] = Field(..., description="Updated message list")
+    # GraphRAG-09F: optional, additive, default-absent provenance marker. Null in the normal case
+    # (feature off, graph unavailable, or no validated intersection). Never a citation or evidence.
+    graph_provenance: Optional[GraphProvenanceMetadata] = Field(
+        None,
+        description="Optional content-free GraphRAG provenance marker for this answer (additive)",
+    )
 
 
 class BuildContextRequest(BaseModel):
@@ -301,6 +311,25 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting session: {str(e)}")
 
 
+def _canonical_answer_context_source_ids(context: Any) -> List[str]:
+    """Read canonical source ids from the chat answer context, order-preserving.
+
+    Reads only ``context["sources"][*]["id"]`` (the exact set handed to the chat graph as answer
+    evidence); malformed / id-less entries are skipped. Pure read: never mutates the context, and a
+    parse failure here never affects the canonical chat response (GraphRAG-09F).
+    """
+    ids: List[str] = []
+    if isinstance(context, dict):
+        sources = context.get("sources")
+        if isinstance(sources, list):
+            for source in sources:
+                if isinstance(source, dict):
+                    source_id = source.get("id")
+                    if isinstance(source_id, str) and source_id.strip():
+                        ids.append(source_id)
+    return ids
+
+
 @router.post("/chat/execute", response_model=ExecuteChatResponse)
 async def execute_chat(request: ExecuteChatRequest):
     """Execute a chat request and get AI response."""
@@ -370,7 +399,33 @@ async def execute_chat(request: ExecuteChatRequest):
         # Convert messages to response format
         messages = extract_chat_messages(result.get("messages", []))
 
-        return ExecuteChatResponse(session_id=request.session_id, messages=messages)
+        # GraphRAG-09F: post-answer, provenance-only, additive metadata. Runs strictly AFTER the
+        # canonical chat answer is complete, so it cannot change the prompt, the model calls, the
+        # evidence set, the order, or the answer. Feature-gated (OPEN_NOTEBOOK_GRAPHRAG_ENABLED,
+        # default off) with zero work when disabled; the notebook scope is the server-resolved
+        # session notebook (never the graph), the candidate set is the existing answer context
+        # (no second retrieval), and the helper isolates expected typed GraphRAG failures to None
+        # so a graph problem can never break the canonical chat response.
+        product_provenance = await build_chat_graph_provenance(
+            question=request.message,
+            notebook_id=str(notebook.id) if notebook is not None else None,
+            canonical_source_ids=_canonical_answer_context_source_ids(request.context),
+        )
+        graph_provenance = (
+            GraphProvenanceMetadata(
+                has_validated_graph_provenance=product_provenance.has_validated_graph_provenance,
+                source_ids=list(product_provenance.source_ids),
+                count=product_provenance.count,
+            )
+            if product_provenance is not None
+            else None
+        )
+
+        return ExecuteChatResponse(
+            session_id=request.session_id,
+            messages=messages,
+            graph_provenance=graph_provenance,
+        )
     except NotFoundError:
         raise HTTPException(status_code=404, detail="Session not found")
     except HTTPException:

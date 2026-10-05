@@ -125,6 +125,10 @@ class TestImportAndStartupIndependence:
             "open_notebook/graphs/source.py",  # GraphRAG-03A fail-open enqueue seam
             "api/main.py",  # GraphRAG-03C lifespan drain wake-up
             "open_notebook/domain/notebook.py",  # 03C best-effort drain wake-up on delete
+            # GraphRAG-09F: reviewed product-integration seam. Chat imports only the bounded
+            # product-provenance helper; feature-gated (default off); provenance is post-answer,
+            # additive, and NOT retrieval/citation-authoritative.
+            "api/routers/chat.py",
         }
         referencing = set()
         for base in ("open_notebook", "api", "commands"):

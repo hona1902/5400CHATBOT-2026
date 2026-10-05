@@ -65,6 +65,29 @@ class AskResponse(BaseModel):
     question: str = Field(..., description="Original question")
 
 
+class GraphProvenanceMetadata(BaseModel):
+    """Optional, content-free GraphRAG provenance marker for a chat answer (GraphRAG-09F).
+
+    PROVENANCE-ONLY: additive metadata, never a citation and never answer evidence. ``source_ids``
+    is the intersection of the chat answer-context canonical source ids with the sources the graph
+    referenced AND that canonical Open Notebook authority re-validated (live source + current
+    notebook membership). It therefore only ever names sources already present in the chat answer
+    context, in canonical context order, and carries no graph answer text, excerpts,
+    relationship/entity labels, scores, or raw content. A null field is the normal case (feature
+    off, graph unavailable, or no validated intersection).
+    """
+
+    has_validated_graph_provenance: bool = Field(
+        ...,
+        description="True when at least one answer-context source was graph-validated",
+    )
+    source_ids: List[str] = Field(
+        default_factory=list,
+        description="Canonical answer-context source ids with validated graph provenance, in context order",
+    )
+    count: int = Field(..., description="Number of validated answer-context source ids")
+
+
 # Models API models
 class ModelCreate(BaseModel):
     name: str = Field(..., description="Model name (e.g., gpt-5-mini, claude, gemini)")
