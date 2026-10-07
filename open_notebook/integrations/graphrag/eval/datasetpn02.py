@@ -848,6 +848,93 @@ def verify_fixture_hash(fixture_dir: Optional[Path] = None) -> Tuple[bool, str]:
     return True, str(live_hash)
 
 
+# --------------------------------------------------------------------------- #
+# pn02_slice_v1 — canonical hash of the NB_A / A1,A2,A3 index slice
+# (GraphRAG-09H). EVALUATION/EVIDENCE ONLY — not imported by any production,
+# runtime, GraphRAG, indexing or provider path. Reuses the SAME canonicalization
+# as compute_fixture_hash (sorted-key compact JSON, ensure_ascii, UTF-8, SHA-256)
+# and binds the parent fixture hash so the slice cannot drift from its parent.
+# This makes the historically-approved slice hash derivation durable in code:
+#   PN02_SLICE_V1_SHA256 = 0d57df2188126f4a4dfefa51c98af5455e55a81e04a36af68f459a6c1bc3142c
+# The query (PN02Q01) is intentionally NOT part of this descriptor; it is bound
+# independently by the execution manifest. No runtime/derived fields (doc ids,
+# workspace, provider/model/session state, timestamps, notebook theme).
+# --------------------------------------------------------------------------- #
+
+PN02_SLICE_V1_ALGORITHM_ID: str = "pn02_slice_v1"
+PN02_SLICE_V1_NOTEBOOK_ID: str = "NB_A"
+PN02_SLICE_V1_SOURCE_KEYS: Tuple[str, ...] = ("A1", "A2", "A3")
+#: Golden canonical byte length over the frozen fixture — a serialization-drift guard.
+PN02_SLICE_V1_CANONICAL_BYTE_LENGTH: int = 754
+
+
+def pn02_slice_v1_descriptor(
+    fx: FixturePN02,
+    parent_fixture_sha256: str,
+    *,
+    notebook_id: str = PN02_SLICE_V1_NOTEBOOK_ID,
+    source_keys: Tuple[str, ...] = PN02_SLICE_V1_SOURCE_KEYS,
+) -> Dict[str, object]:
+    """The deterministic pn02_slice_v1 logical descriptor.
+
+    Production callers use the frozen defaults (NB_A over A1,A2,A3). The keyword
+    overrides exist ONLY so provider-free sensitivity tests can construct alternate
+    descriptors; no production call site passes them.
+    """
+    nb = next((n for n in fx.notebooks if n.notebook_id == notebook_id), None)
+    if nb is None:
+        raise FixturePN02Error(f"slice notebook {notebook_id!r} not present in fixture")
+    by_key = {s.key: s for s in fx.sources}
+    try:
+        sources = [
+            {"key": k, "title": by_key[k].title, "text": by_key[k].text}
+            for k in source_keys
+        ]
+    except KeyError as exc:
+        raise FixturePN02Error(f"slice source {exc.args[0]!r} not present in fixture")
+    return {
+        "fixture": fx.fixture_version,
+        "namespace_tag": fx.namespace_tag,
+        "parent_fixture_sha256": parent_fixture_sha256,
+        "notebook": {"notebook_id": nb.notebook_id, "record_id": nb.record_id},
+        "sources": sources,
+        "memberships": [[k, notebook_id] for k in source_keys],
+    }
+
+
+def pn02_slice_v1_canonical_bytes(
+    fx: FixturePN02, parent_fixture_sha256: Optional[str] = None
+) -> bytes:
+    """Canonical UTF-8 bytes of the pn02_slice_v1 descriptor for the NB_A slice.
+
+    The parent hash binds the slice to its fixture; when not supplied it is
+    computed from the same fixture via the authoritative ``compute_fixture_hash``.
+    """
+    parent = (
+        parent_fixture_sha256
+        if parent_fixture_sha256 is not None
+        else compute_fixture_hash(fx)
+    )
+    descriptor = pn02_slice_v1_descriptor(fx, parent)
+    return json.dumps(
+        descriptor, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def compute_slice_hash(
+    fixture_dir: Optional[Path] = None, parent_fixture_sha256: Optional[str] = None
+) -> str:
+    """SHA-256 of the pn02_slice_v1 canonical bytes (NB_A / A1,A2,A3 09H index slice).
+
+    EVALUATION/EVIDENCE ONLY. Over the frozen fixture this returns
+    ``0d57df2188126f4a4dfefa51c98af5455e55a81e04a36af68f459a6c1bc3142c``.
+    """
+    fx = load_fixture(fixture_dir)
+    return hashlib.sha256(
+        pn02_slice_v1_canonical_bytes(fx, parent_fixture_sha256)
+    ).hexdigest()
+
+
 __all__ = [
     "FIXTURE_NAME",
     "NAMESPACE_TAG",
@@ -883,4 +970,11 @@ __all__ = [
     "compute_integrity",
     "load_freeze",
     "verify_fixture_hash",
+    "PN02_SLICE_V1_ALGORITHM_ID",
+    "PN02_SLICE_V1_NOTEBOOK_ID",
+    "PN02_SLICE_V1_SOURCE_KEYS",
+    "PN02_SLICE_V1_CANONICAL_BYTE_LENGTH",
+    "pn02_slice_v1_descriptor",
+    "pn02_slice_v1_canonical_bytes",
+    "compute_slice_hash",
 ]
