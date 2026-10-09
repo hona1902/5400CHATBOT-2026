@@ -49,8 +49,6 @@ MINPUTS = plo.ManifestInputs(
     tag_09h_bounds_peel="7e815f6d53a5a3180422d02b435ab9c2394f4d43",
     tag_09h_slice_object="6e871cc7a7fe83df0593110afe4178890bc0c1b1",
     tag_09h_slice_peel=HEAD,
-    proxy_sidecar_gateway_endpoint="http://127.0.0.1:PORT",
-    proxy_provider_internal_endpoint="http://proxy:PORT/v1",
     product_live_evidence=PRODUCT_LIVE_EVIDENCE,
     current_head_capture_evidence=CURRENT_HEAD_EVIDENCE,
 )
@@ -970,8 +968,6 @@ def _minputs_kwargs():
         tag_09h_bounds_peel="7e815f6d53a5a3180422d02b435ab9c2394f4d43",
         tag_09h_slice_object="6e871cc7a7fe83df0593110afe4178890bc0c1b1",
         tag_09h_slice_peel=HEAD,
-        proxy_sidecar_gateway_endpoint="http://127.0.0.1:PORT",
-        proxy_provider_internal_endpoint="http://proxy:PORT/v1",
         product_live_evidence=PRODUCT_LIVE_EVIDENCE,
         current_head_capture_evidence=CURRENT_HEAD_EVIDENCE,
     )
@@ -1146,3 +1142,86 @@ def test_manifest_independent_recomputation():  # §30
     assert prod_bytes == indep_bytes
     assert _hl.sha256(prod_bytes).hexdigest() == plo.manifest_sha256(m)
     assert not prod_bytes.endswith(b"\n")  # no trailing newline / no BOM
+
+
+# ========================= canonical proxy-endpoint removal (09H governance A)
+_REMOVED_ENDPOINT_FIELDS = ("proxy_sidecar_gateway_endpoint", "proxy_provider_internal_endpoint")
+# Removed canonical manifest value keys (ephemeral endpoint addresses).
+_REMOVED_MANIFEST_VALUE_KEYS = (
+    "sidecar_gateway_endpoint",
+    "provider_internal_endpoint",
+    "llm_binding_host",
+    "embedding_binding_host",
+)
+
+
+def test_manifest_inputs_has_no_endpoint_fields():  # §4
+    fields = {f.name for f in dataclasses.fields(plo.ManifestInputs)}
+    for name in _REMOVED_ENDPOINT_FIELDS:
+        assert name not in fields
+
+
+def test_manifest_has_no_proxy_endpoint_values():  # §5
+    m = plo.build_manifest_v2(MINPUTS)
+    # sidecar block keeps image/digest/version only; no binding-host endpoint.
+    assert set(m["sidecar"].keys()) == {"image", "image_digest", "version"}  # type: ignore[attr-defined]
+    # budget_proxy block must not carry concrete endpoint addresses.
+    bp = m["budget_proxy"]
+    for k in _REMOVED_MANIFEST_VALUE_KEYS:
+        assert k not in bp  # type: ignore[operator]
+
+
+def test_no_null_or_empty_deprecated_endpoint_fields():  # §19
+    text = plo.canonical_manifest_bytes(plo.build_manifest_v2(MINPUTS)).decode("utf-8")
+    for k in _REMOVED_MANIFEST_VALUE_KEYS + _REMOVED_ENDPOINT_FIELDS:
+        assert f'"{k}"' not in text  # absent, not null/empty
+
+
+def test_manifest_built_without_runtime_and_sha_endpoint_independent():  # §11, §13
+    # ManifestInputs needs only durable identities; no runtime port/container/DNS.
+    # Since endpoints are not inputs, no runtime endpoint variation can change the SHA.
+    m = plo.build_manifest_v2(MINPUTS)
+    text = plo.canonical_manifest_bytes(m).decode("utf-8")
+    for ephemeral in ("pbp-proxy-", "pbp-sidecar-", "pbp-net-int-", "pbp-net-egr-",
+                      "127.0.0.1", "pbp-store-", ":PORT", "http://proxy"):
+        assert ephemeral not in text
+
+
+def test_durable_policy_present_in_canonical_bytes():  # §7, §8, §14
+    m = plo.build_manifest_v2(MINPUTS)
+    text = plo.canonical_manifest_bytes(m).decode("utf-8")
+    assert bp.OPENROUTER_UPSTREAM in text                      # upstream pin
+    assert "RUN_OWNED_BUDGET_PROXY" in text                        # egress policy
+    assert "ENFORCED_SINGLE_GATEWAY_WINDOWS" in text               # topology policy
+    assert bp.OPERATION_COUNT_SEMANTIC_ID in text              # operation semantic
+    assert m["budget_proxy"]["upstream_pinned_host"] == bp.OPENROUTER_UPSTREAM  # type: ignore[index]
+    assert m["budget_proxy"]["index_llm_operation_budget"] == bp.INDEX_LLM_BUDGET  # type: ignore[index]
+    assert m["budget_proxy"]["index_embedding_operation_budget"] == bp.INDEX_EMBEDDING_BUDGET  # type: ignore[index]
+    assert m["sidecar_direct_provider_bypass_prevention"] == "ENFORCED_SINGLE_GATEWAY_WINDOWS"
+
+
+def test_durable_policy_sha_sensitive_via_inputs():  # §14 (input-variable durable items)
+    base = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    # HEAD change (+ matching current-head peel) changes SHA.
+    nh = "1" * 40
+    other_head = dataclasses.replace(
+        MINPUTS, head_commit=nh,
+        current_head_capture_evidence=dataclasses.replace(CURRENT_HEAD_EVIDENCE, peel_sha=nh),
+    )
+    assert plo.manifest_sha256(plo.build_manifest_v2(other_head)) != base
+    # evidence binding change changes SHA.
+    other_ev = dataclasses.replace(MINPUTS, tag_09g_object="e" * 40)
+    assert plo.manifest_sha256(plo.build_manifest_v2(other_ev)) != base
+
+
+def test_evidence_set_still_five_after_endpoint_removal():  # §15
+    et = plo.build_manifest_v2(MINPUTS)["evidence_tags"]
+    assert set(et) == _ALL_EVIDENCE_KEYS  # type: ignore[arg-type]
+
+
+def test_old_candidates_not_authorizing_after_schema_change():  # §20
+    sha = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    assert sha != plo.HISTORICAL_PRE_PROXY_MANIFEST_SHA
+    assert sha != INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE
+    # the implementation/review informational probes are also not golden
+    assert sha != "9020cc6d22c454c3e8dd9b3a124d2885f67b0fbb702dc69188ac68d3d8efea17"

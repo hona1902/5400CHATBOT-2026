@@ -163,13 +163,16 @@ class ManifestInputs:
     tag_09h_bounds_peel: str
     tag_09h_slice_object: str
     tag_09h_slice_peel: str
-    proxy_sidecar_gateway_endpoint: str  # host-published Surface A endpoint
-    proxy_provider_internal_endpoint: str  # Surface B endpoint the sidecar binds to
     # Required first-class evidence bindings (no defaults => omission fails closed
     # at construction). product_live is the governed immutable capture identity;
     # current_head is GENERIC (any tag) but MUST peel to head_commit.
     product_live_evidence: EvidenceTagBinding
     current_head_capture_evidence: EvidenceTagBinding
+    # NOTE: run-scoped proxy/sidecar endpoint addresses (container name, run id,
+    # host port) are EPHEMERAL execution-state and are deliberately NOT canonical
+    # Manifest inputs — they must not influence Manifest bytes/SHA. The durable
+    # egress/topology policy + pinned upstream below bind the security identity;
+    # concrete endpoints live only in runtime topology + ObservedTopologyFacts.
 
 
 def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, object]:
@@ -268,8 +271,9 @@ def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, obj
             "image": SIDECAR_IMAGE,
             "image_digest": SIDECAR_DIGEST,
             "version": SIDECAR_VERSION,
-            "llm_binding_host": inp.proxy_provider_internal_endpoint,
-            "embedding_binding_host": inp.proxy_provider_internal_endpoint,
+            # LLM/embedding binding hosts are the run-scoped proxy address (ephemeral);
+            # the durable fact that egress is via the run-owned proxy is bound by
+            # lightrag_openrouter.egress_via below, so no concrete host is emitted here.
         },
         "budget_proxy": {
             "topology": "ENFORCED_SINGLE_GATEWAY_WINDOWS",
@@ -286,8 +290,10 @@ def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, obj
             "counters_run_scoped": True,
             "counters_monotonic": True,
             "readiness_provider_calls": 0,
-            "sidecar_gateway_endpoint": inp.proxy_sidecar_gateway_endpoint,
-            "provider_internal_endpoint": inp.proxy_provider_internal_endpoint,
+            # Surface A/B concrete endpoints are run-scoped ephemeral execution state
+            # (bound at runtime + attested via ObservedTopologyFacts), not canonical
+            # policy — the topology/enforcement/upstream-pin fields above are the
+            # durable security identity, so no endpoint address is emitted here.
             "evidence_schema": [
                 "llm_forwarded",
                 "embedding_forwarded",
