@@ -481,7 +481,11 @@ class RunDeps:
     poll_interval_s: float = 2.0
     poll_max_polls: int = 150
     enforce_host_instrumentation: bool = True  # F3 canonical-chat + non-chat guards
-    run_scoped_env: Optional[Mapping[str, str]] = None  # F2 process-local env (applied after topology verify)
+    run_scoped_env: Optional[Mapping[str, str]] = None  # F2 static env (tests inject a mapping)
+    # 09H: preferred self-contained default path — derive the run-scoped env from the
+    # VERIFIED post-boot ObservedTopologyFacts (actual loopback gateway), never from a
+    # pre-boot/static ephemeral endpoint. Applied only after verify_single_gateway_topology.
+    run_scoped_env_factory: Optional[Callable[["ObservedTopologyFacts"], Mapping[str, str]]] = None
 
 
 @dataclass
@@ -567,11 +571,21 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         topology_built = True
         verify_single_gateway_topology(facts)
 
-        # F2: activate run-scoped process-local env ONLY after topology verify
+        # F2/09H: activate run-scoped process-local env ONLY after topology verify
         # (so provider-capable product config is never exposed before the enforced
-        # single-gateway topology has passed). Restored in finally on any unwind.
-        if deps.run_scoped_env is not None:
-            env_mgr = RunScopedEnv(deps.run_scoped_env).apply()
+        # single-gateway topology has passed). The DEFAULT self-contained path derives
+        # the env from the VERIFIED post-boot observed facts via run_scoped_env_factory
+        # (fail-closed inside); a statically-injected mapping is the test fallback.
+        # Restored in finally on any unwind.
+        env_values: Optional[Mapping[str, str]] = None
+        if deps.run_scoped_env_factory is not None:
+            # boot_topology yields the concrete post-boot facts; the factory consumes
+            # the observed facts (loopback gateway + loopback attestation).
+            env_values = deps.run_scoped_env_factory(cast("ObservedTopologyFacts", facts))
+        elif deps.run_scoped_env is not None:
+            env_values = deps.run_scoped_env
+        if env_values is not None:
+            env_mgr = RunScopedEnv(env_values).apply()
 
         # INDEX phase
         await deps.controller.enter_index(deps.control_token)
@@ -1223,11 +1237,44 @@ class DockerTopologyController:
 _SIDECAR_SMOKE_PORT = 9621
 
 
+#: A product GraphRAG gateway must be an EXACT loopback-published proxy endpoint.
+#: Derived from the actual observed facts (never a hardcoded/guessed port); non-
+#: loopback (e.g. 0.0.0.0), empty, malformed or ambiguous values fail closed.
+_LOOPBACK_GATEWAY_RE = re.compile(r"http://127\.0\.0\.1:([0-9]{1,5})$")
+
+
+def _derive_graphrag_gateway(facts: "ObservedTopologyFacts") -> str:
+    """Fail-closed: return the single verified loopback gateway from observed facts.
+
+    Rejects missing/empty, non-loopback (0.0.0.0 or other host), malformed/extra
+    (ambiguous) values, or a port outside 1..65535. The facts model carries exactly
+    one graphrag_base_url, so a unique governed selection exists by construction.
+    """
+    base = (facts.graphrag_base_url or "").strip()
+    if not base:
+        raise LiveAbort("run_scoped_env", "observed graphrag gateway missing")
+    if not facts.proxy_bind_loopback:
+        raise LiveAbort("run_scoped_env", "proxy not attested loopback-bound")
+    m = _LOOPBACK_GATEWAY_RE.fullmatch(base)
+    if not m:
+        raise LiveAbort("run_scoped_env", "observed graphrag gateway not an exact loopback endpoint")
+    port = int(m.group(1))
+    if not (0 < port <= 65535):
+        raise LiveAbort("run_scoped_env", "observed graphrag gateway port out of range")
+    return base
+
+
 def run_scoped_env_values(facts: "ObservedTopologyFacts", *, sidecar_api_token: str) -> Dict[str, str]:
-    """The exact process-local env a live run activates AFTER topology verify."""
+    """The exact process-local env a live run activates AFTER topology verify.
+
+    The GraphRAG base URL is derived (fail-closed) from the VERIFIED observed facts,
+    and OPEN_NOTEBOOK_GRAPHRAG_API_KEY carries the run-local proxy/sidecar token (never
+    the real OpenRouter key). Canonical-Chat retry/timeout bounds are pinned here.
+    """
+    gateway = _derive_graphrag_gateway(facts)
     return {
         "OPEN_NOTEBOOK_GRAPHRAG_ENABLED": "true",
-        "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL": facts.graphrag_base_url,
+        "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL": gateway,
         "OPEN_NOTEBOOK_GRAPHRAG_API_KEY": sidecar_api_token,
         "OPEN_NOTEBOOK_LLM_MAX_RETRIES": "0",
         "OPEN_NOTEBOOK_LLM_REQUEST_TIMEOUT_SECONDS": "60",
@@ -1450,6 +1497,12 @@ def default_run_deps(
         r = DockerCLI().run(["docker", "image", "inspect", "-f", "{{.Id}}", SIDECAR_IMAGE])
         return r.stdout.strip() if r.returncode == 0 else ""
 
+    def _env_factory(facts: "ObservedTopologyFacts") -> Mapping[str, str]:
+        # Self-contained default path: derive the run-scoped env from the VERIFIED
+        # post-boot observed facts (actual loopback gateway), using the run-local
+        # proxy/sidecar token — never a hardcoded port or the real OpenRouter key.
+        return run_scoped_env_values(facts, sidecar_api_token=sidecar_api_token)
+
     return RunDeps(
         git=_SubprocessGit(),
         manifest_inputs=manifest_inputs,
@@ -1469,4 +1522,5 @@ def default_run_deps(
         controller=controller,
         control_token=control_token,
         credential_present=lambda: bool(os.environ.get(provider_key_env, "").strip()),
+        run_scoped_env_factory=_env_factory,
     )

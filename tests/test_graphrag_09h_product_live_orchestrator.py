@@ -180,6 +180,7 @@ class _Facts:
     sidecar_embedding_binding_host: str
     proxy_provider_internal_endpoint: str
     egressguard_initialized: bool
+    proxy_bind_loopback: bool = True  # real ObservedTopologyFacts carries this; env factory reads it
 
 
 def _good_facts():
@@ -1225,3 +1226,189 @@ def test_old_candidates_not_authorizing_after_schema_change():  # §20
     assert sha != INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE
     # the implementation/review informational probes are also not golden
     assert sha != "9020cc6d22c454c3e8dd9b3a124d2885f67b0fbb702dc69188ac68d3d8efea17"
+
+
+# ================== 09H post-boot RunScopedEnv factory wiring (provider-free)
+import os as _os_env  # noqa: E402
+
+
+def _env_facts(base_url="http://127.0.0.1:8900", loopback=True):
+    return dataclasses.replace(_good_facts(), graphrag_base_url=base_url, proxy_bind_loopback=loopback)
+
+
+def test_default_run_deps_provides_runscoped_env_factory():  # 5/19/27
+    # Provide a FAKE (non-real) provider key so the proxy controller constructs; no
+    # provider call occurs at construction. Restored in finally.
+    key_env = "GRAPHRAG_09H_FAKE_KEY_ENV"
+    _prior = _os_env.environ.get(key_env, None)
+    _os_env.environ[key_env] = "sk-FAKE-not-real"
+    try:
+        deps = plo.default_run_deps(
+            MINPUTS,
+            sidecar_api_token="sk-side-FAKE",
+            local_provider_token="lp-FAKE",
+            control_token="ct-FAKE",
+            provider_key_env=key_env,
+            host_port=8900,
+            run_id="revtest",
+        )
+    finally:
+        if _prior is None:
+            _os_env.environ.pop(key_env, None)
+        else:
+            _os_env.environ[key_env] = _prior
+    assert deps.run_scoped_env_factory is not None and callable(deps.run_scoped_env_factory)
+    env = deps.run_scoped_env_factory(_env_facts(base_url="http://127.0.0.1:8900"))
+    assert env["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] == "true"
+    assert env["OPEN_NOTEBOOK_GRAPHRAG_BASE_URL"] == "http://127.0.0.1:8900"
+    assert env["OPEN_NOTEBOOK_GRAPHRAG_API_KEY"] == "sk-side-FAKE"  # run-local proxy token
+    assert env["OPEN_NOTEBOOK_LLM_MAX_RETRIES"] == "0"
+    assert env["OPEN_NOTEBOOK_LLM_REQUEST_TIMEOUT_SECONDS"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_runscoped_env_flow_order_and_active_at_index():  # 7/28
+    deps, _ctrl = _make_deps(facts=_env_facts())
+    events = []
+    _prior_base = _os_env.environ.get("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL", None)  # restore-to-prior check
+    orig_boot, orig_index, orig_chat = deps.boot_topology, deps.index_source, deps.execute_one_chat
+
+    def boot():
+        events.append("boot")
+        return orig_boot()
+
+    def factory(facts):
+        events.append("derive")
+        return plo.run_scoped_env_values(facts, sidecar_api_token="lp-FAKE")
+
+    async def idx(sid, text):
+        events.append("index")
+        assert _os_env.environ.get("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL") == "http://127.0.0.1:8900"
+        assert _os_env.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED") == "true"
+        return await orig_index(sid, text)
+
+    async def chat():
+        events.append("chat")
+        return await orig_chat()
+
+    deps = dataclasses.replace(deps, boot_topology=boot, run_scoped_env_factory=factory, index_source=idx, execute_one_chat=chat)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING
+    assert events.index("boot") < events.index("derive") < events.index("index") < events.index("chat")
+    assert res.evidence.get("run_scoped_env_restored") is True
+    # env restored to whatever it was before the run (present or absent)
+    assert _os_env.environ.get("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL", None) == _prior_base
+
+
+def test_runscoped_env_observed_port_sensitivity():  # 29/30
+    a = plo.run_scoped_env_values(_env_facts(base_url="http://127.0.0.1:11111"), sidecar_api_token="s")
+    b = plo.run_scoped_env_values(_env_facts(base_url="http://127.0.0.1:22222"), sidecar_api_token="s")
+    assert a["OPEN_NOTEBOOK_GRAPHRAG_BASE_URL"] == "http://127.0.0.1:11111"
+    assert b["OPEN_NOTEBOOK_GRAPHRAG_BASE_URL"] == "http://127.0.0.1:22222"
+    assert a != b  # derived from OBSERVED facts, not a hardcoded/intended port
+
+
+@pytest.mark.parametrize(
+    "base_url,loopback",
+    [
+        ("http://0.0.0.0:8900", True),                       # 31 non-loopback host
+        ("http://10.0.0.5:8900", True),                      # 31 non-loopback host
+        ("http://127.0.0.1:8900 http://0.0.0.0:9", True),    # 32 ambiguous/extra
+        ("http://127.0.0.1:8900/extra", True),               # 32 malformed/extra path
+        ("", True),                                          # 33 missing
+        ("http://127.0.0.1:8900", False),                    # proxy not loopback-attested
+        ("http://127.0.0.1:99999", True),                    # port out of range
+    ],
+)
+def test_runscoped_env_gateway_fail_closed(base_url, loopback):  # 9/31/32/33
+    with pytest.raises(plo.LiveAbort):
+        plo.run_scoped_env_values(_env_facts(base_url=base_url, loopback=loopback), sidecar_api_token="s")
+
+
+def test_runscoped_env_uses_run_local_proxy_token_not_real_key():  # 10/34
+    env = plo.run_scoped_env_values(_env_facts(), sidecar_api_token=LOCAL_TOKEN)
+    assert env["OPEN_NOTEBOOK_GRAPHRAG_API_KEY"] == LOCAL_TOKEN
+    assert env["OPEN_NOTEBOOK_GRAPHRAG_API_KEY"] != REAL_KEY
+
+
+def test_runscoped_env_canonical_chat_bounds():  # 12/35
+    env = plo.run_scoped_env_values(_env_facts(), sidecar_api_token="s")
+    assert env["OPEN_NOTEBOOK_LLM_MAX_RETRIES"] == "0"
+    assert env["OPEN_NOTEBOOK_LLM_REQUEST_TIMEOUT_SECONDS"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_runscoped_env_factory_restoration_and_absent_restore():  # 14/15/36
+    keys = ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED", "OPEN_NOTEBOOK_LLM_MAX_RETRIES", "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL"]
+    saved = {k: _os_env.environ.get(k, None) for k in keys}
+    try:
+        _os_env.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] = "sentinel-enabled"
+        _os_env.environ["OPEN_NOTEBOOK_LLM_MAX_RETRIES"] = "7"
+        _os_env.environ.pop("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL", None)  # absent before
+        deps, _ = _make_deps(facts=_env_facts())
+        deps = dataclasses.replace(
+            deps, run_scoped_env_factory=lambda f: plo.run_scoped_env_values(f, sidecar_api_token=LOCAL_TOKEN)
+        )
+        res = await plo.run_live_validation(deps, head_expected=HEAD)
+        assert res.verdict == plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING
+        assert res.evidence.get("run_scoped_env_restored") is True
+        assert _os_env.environ["OPEN_NOTEBOOK_GRAPHRAG_ENABLED"] == "sentinel-enabled"  # restored
+        assert _os_env.environ["OPEN_NOTEBOOK_LLM_MAX_RETRIES"] == "7"                   # restored
+        assert "OPEN_NOTEBOOK_GRAPHRAG_BASE_URL" not in _os_env.environ                  # absent -> absent
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                _os_env.environ.pop(k, None)
+            else:
+                _os_env.environ[k] = v
+
+
+@pytest.mark.asyncio
+async def test_runscoped_env_factory_failure_fails_closed():  # 18
+    deps, _ = _make_deps(facts=_env_facts())
+    cleaned = {"n": 0}
+
+    def boom_factory(facts):
+        raise plo.LiveAbort("run_scoped_env", "boom")
+
+    def cl():
+        cleaned["n"] += 1
+        return plo.CleanupReport(True, True, True, True, True, True)
+
+    deps = dataclasses.replace(deps, run_scoped_env_factory=boom_factory, cleanup=cl)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert cleaned["n"] == 1  # topology booted+verified, so cleanup runs; no index/chat
+
+
+@pytest.mark.asyncio
+async def test_topology_verify_failure_does_not_call_env_factory():  # 16
+    called = {"n": 0}
+    deps, _ = _make_deps(facts=_env_facts(base_url=""))  # verify will reject (no gateway)
+
+    def factory(facts):
+        called["n"] += 1
+        return {}
+
+    deps = dataclasses.replace(deps, run_scoped_env_factory=factory)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert called["n"] == 0  # env factory never ran: topology verify failed first
+
+
+@pytest.mark.asyncio
+async def test_boot_failure_does_not_call_env_factory():  # 17
+    called = {"n": 0}
+    deps, _ = _make_deps(facts=_env_facts())
+
+    def boom():
+        raise plo.LiveAbort("topology", "boot boom")
+
+    def factory(facts):
+        called["n"] += 1
+        return {}
+
+    deps = dataclasses.replace(deps, boot_topology=boom, run_scoped_env_factory=factory)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert called["n"] == 0  # boot failed -> no facts -> env factory never ran
