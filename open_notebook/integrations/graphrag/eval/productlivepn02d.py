@@ -33,6 +33,7 @@ import enum
 import hashlib
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +110,47 @@ class LiveVerdict(str, enum.Enum):
 
 
 # --------------------------------------------------------------------------- #
+# Evidence binding (reusable, immutable, full-SHA validated)
+# --------------------------------------------------------------------------- #
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+# Governed, immutable product-live capture evidence identity. This tag NEVER_
+# REPOINTs: at the current HEAD it peels to the capture commit; after this
+# amendment is itself captured it becomes a pure ancestor evidence entry but its
+# identity (tag/object/peel) is unchanged and MUST remain bound in the Manifest.
+PRODUCT_LIVE_CAPTURE_TAG = "graphrag-09h-product-live-orchestrator-budget-proxy-approved"
+PRODUCT_LIVE_CAPTURE_OBJECT_SHA = "79e4085c04d94ebe0347ec28bdca3f6e199bd44d"
+PRODUCT_LIVE_CAPTURE_PEEL_SHA = "1b4dd7916783443065ddfdfc1e9b7ebcd2080651"
+
+
+@dataclass(frozen=True)
+class EvidenceTagBinding:
+    """An immutable (tag, annotated-object-sha, peeled-commit-sha) evidence anchor.
+
+    Both SHAs must be full 40-hex git object ids; abbreviated or malformed forms
+    fail closed at construction. Reusable for historical, product-live, and the
+    GENERIC current-HEAD evidence so the builder needs no code edit when a future
+    capture tag (not yet existing when these bytes were committed) must be bound.
+    """
+
+    tag: str
+    object_sha: str
+    peel_sha: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tag, str) or not self.tag.strip():
+            raise LiveAbort("evidence", "evidence tag name must be a non-empty string")
+        for label, value in (("object_sha", self.object_sha), ("peel_sha", self.peel_sha)):
+            if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
+                raise LiveAbort(
+                    "evidence", f"evidence {label} must be a full 40-hex git sha (abbreviated/malformed rejected)"
+                )
+
+    def as_entry(self) -> Dict[str, str]:
+        return {"tag": self.tag, "object_sha": self.object_sha, "peel_sha": self.peel_sha}
+
+
+# --------------------------------------------------------------------------- #
 # Canonical Manifest V2 builder (machine-reconstructable; emits proxy amendment)
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
@@ -123,6 +165,11 @@ class ManifestInputs:
     tag_09h_slice_peel: str
     proxy_sidecar_gateway_endpoint: str  # host-published Surface A endpoint
     proxy_provider_internal_endpoint: str  # Surface B endpoint the sidecar binds to
+    # Required first-class evidence bindings (no defaults => omission fails closed
+    # at construction). product_live is the governed immutable capture identity;
+    # current_head is GENERIC (any tag) but MUST peel to head_commit.
+    product_live_evidence: EvidenceTagBinding
+    current_head_capture_evidence: EvidenceTagBinding
 
 
 def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, object]:
@@ -135,6 +182,24 @@ def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, obj
     fx = load_fixture(fixture_dir)
     parent_sha = compute_fixture_hash(fx)
     slice_sha = compute_slice_hash(fixture_dir)
+
+    # Fail closed: product-live capture evidence must match the governed immutable
+    # identity (tag + annotated object + peel), and remains bound even after it
+    # becomes an ancestor.
+    ple = inp.product_live_evidence
+    if (ple.tag, ple.object_sha, ple.peel_sha) != (
+        PRODUCT_LIVE_CAPTURE_TAG,
+        PRODUCT_LIVE_CAPTURE_OBJECT_SHA,
+        PRODUCT_LIVE_CAPTURE_PEEL_SHA,
+    ):
+        raise LiveAbort("evidence", "product-live capture evidence identity mismatch")
+
+    # Fail closed: generic current-HEAD capture evidence MUST peel to head_commit
+    # (no hardcoded tag name => bindable to a future capture tag without a code edit).
+    che = inp.current_head_capture_evidence
+    if che.peel_sha != inp.head_commit:
+        raise LiveAbort("evidence", "current-head capture evidence must peel to head_commit")
+
     manifest: Dict[str, object] = {
         "manifest_version": "09H_unified_live_execution_v2_proxy",
         "head_commit": inp.head_commit,
@@ -156,6 +221,8 @@ def build_manifest_v2(inp: ManifestInputs, *, fixture_dir=None) -> Dict[str, obj
                 "peel_sha": inp.tag_09h_slice_peel,
                 "tag": "graphrag-09h-pn02-slice-hash-derivation-approved",
             },
+            "09h_product_live_orchestrator_budget_proxy": ple.as_entry(),
+            "current_head_capture_evidence": che.as_entry(),
         },
         "dataset": {
             "dataset_id": "graphrag_pn02_eval_v1::NB_A::A1,A2,A3",

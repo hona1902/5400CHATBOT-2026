@@ -17,6 +17,29 @@ REAL_KEY = "sk-FAKE-real"
 LOCAL_TOKEN = "local-FAKE"
 CONTROL_TOKEN = "ctrl-FAKE"
 
+# The CURRENT real HEAD at which this amendment is being built (product-live capture
+# commit). Used by the §16 "serialized at current HEAD" test.
+CURRENT_REAL_HEAD = "1b4dd7916783443065ddfdfc1e9b7ebcd2080651"
+# The previously observed INCOMPLETE post-capture manifest candidate — NEVER a golden
+# success value. Status: INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE.
+INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE = (
+    "05ebef2269958f7315e5350d91da57c722ed064a0b44899046bc18ed9f130fee"
+)
+
+# Governed immutable product-live capture evidence (identity fixed regardless of HEAD).
+PRODUCT_LIVE_EVIDENCE = plo.EvidenceTagBinding(
+    tag=plo.PRODUCT_LIVE_CAPTURE_TAG,
+    object_sha=plo.PRODUCT_LIVE_CAPTURE_OBJECT_SHA,
+    peel_sha=plo.PRODUCT_LIVE_CAPTURE_PEEL_SHA,
+)
+# Generic current-HEAD evidence for the MINPUTS scenario (head == 2af787e). Any tag is
+# allowed; it MUST peel to head_commit. Here we use the 09h-slice tag (peels to HEAD).
+CURRENT_HEAD_EVIDENCE = plo.EvidenceTagBinding(
+    tag="graphrag-09h-pn02-slice-hash-derivation-approved",
+    object_sha="6e871cc7a7fe83df0593110afe4178890bc0c1b1",
+    peel_sha=HEAD,
+)
+
 MINPUTS = plo.ManifestInputs(
     head_commit=HEAD,
     parent_commit="7e815f6d53a5a3180422d02b435ab9c2394f4d43",
@@ -28,6 +51,8 @@ MINPUTS = plo.ManifestInputs(
     tag_09h_slice_peel=HEAD,
     proxy_sidecar_gateway_endpoint="http://127.0.0.1:PORT",
     proxy_provider_internal_endpoint="http://proxy:PORT/v1",
+    product_live_evidence=PRODUCT_LIVE_EVIDENCE,
+    current_head_capture_evidence=CURRENT_HEAD_EVIDENCE,
 )
 
 
@@ -46,7 +71,13 @@ def test_manifest_builder_deterministic_and_fields():
 
 
 def test_manifest_sha_head_sensitive():
-    other = dataclasses.replace(MINPUTS, head_commit="0" * 40)
+    # head change requires a matching current-head evidence peel (fail-closed invariant).
+    new_head = "0" * 40
+    other = dataclasses.replace(
+        MINPUTS,
+        head_commit=new_head,
+        current_head_capture_evidence=dataclasses.replace(CURRENT_HEAD_EVIDENCE, peel_sha=new_head),
+    )
     assert plo.manifest_sha256(plo.build_manifest_v2(MINPUTS)) != plo.manifest_sha256(plo.build_manifest_v2(other))
 
 
@@ -118,6 +149,22 @@ def test_live_auth_reusable_rejected():
     sha = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
     tag = plo.expected_live_auth_tag(sha)
     git = _FakeGit(tags={tag: (HEAD, {"manifest_v2_sha256": sha, "run_count": "1", "reusable": "true"})})
+    with pytest.raises(plo.LiveAbort):
+        plo.verify_live_auth(git, head=HEAD, manifest_sha=sha)
+
+
+def test_live_auth_run_count_not_one_rejected():
+    sha = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    tag = plo.expected_live_auth_tag(sha)
+    git = _FakeGit(tags={tag: (HEAD, {"manifest_v2_sha256": sha, "run_count": "2", "reusable": "false"})})
+    with pytest.raises(plo.LiveAbort):
+        plo.verify_live_auth(git, head=HEAD, manifest_sha=sha)
+
+
+def test_live_auth_wrong_manifest_sha_rejected():
+    sha = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    tag = plo.expected_live_auth_tag(sha)
+    git = _FakeGit(tags={tag: (HEAD, {"manifest_v2_sha256": "f" * 64, "run_count": "1", "reusable": "false"})})
     with pytest.raises(plo.LiveAbort):
         plo.verify_live_auth(git, head=HEAD, manifest_sha=sha)
 
@@ -896,3 +943,206 @@ async def test_async_cancellation_unwinds_cleanup_and_env():
         await task
     assert cleaned["n"] == 1  # finally cleanup ran on cancellation
     assert _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED") == prior  # env restored on cancellation
+
+
+# =============================================== evidence-binding amendment (09H)
+CURRENT_REAL_HEAD_AGAIN = "1b4dd7916783443065ddfdfc1e9b7ebcd2080651"
+FAKE_NEW_HEAD = "ab" * 20  # 40-hex hypothetical post-amendment-capture HEAD
+AMENDMENT_CAPTURE_TAG = "graphrag-09h-manifest-builder-capture-tag-binding-approved"
+_PRIOR_EVIDENCE_KEYS = {
+    "09g_offline_integration_proof",
+    "09h_canonical_chat_execution_bounds",
+    "09h_pn02_slice_hash_derivation",
+}
+_ALL_EVIDENCE_KEYS = _PRIOR_EVIDENCE_KEYS | {
+    "09h_product_live_orchestrator_budget_proxy",
+    "current_head_capture_evidence",
+}
+
+
+def _minputs_kwargs():
+    return dict(
+        head_commit=HEAD,
+        parent_commit="7e815f6d53a5a3180422d02b435ab9c2394f4d43",
+        tag_09g_object="d759e9e65a9b0e52854f0505f84298fea431d8b2",
+        tag_09g_peel="e7ad1f7db89dd4b9ee82dda563e83b5c7534759a",
+        tag_09h_bounds_object="25070473dab6bcb6da3f25f8dcea8ee35b9570bc",
+        tag_09h_bounds_peel="7e815f6d53a5a3180422d02b435ab9c2394f4d43",
+        tag_09h_slice_object="6e871cc7a7fe83df0593110afe4178890bc0c1b1",
+        tag_09h_slice_peel=HEAD,
+        proxy_sidecar_gateway_endpoint="http://127.0.0.1:PORT",
+        proxy_provider_internal_endpoint="http://proxy:PORT/v1",
+        product_live_evidence=PRODUCT_LIVE_EVIDENCE,
+        current_head_capture_evidence=CURRENT_HEAD_EVIDENCE,
+    )
+
+
+def _inputs_at(head, *, current_head_tag, current_head_obj, current_head_peel):
+    return dataclasses.replace(
+        MINPUTS,
+        head_commit=head,
+        current_head_capture_evidence=plo.EvidenceTagBinding(
+            tag=current_head_tag, object_sha=current_head_obj, peel_sha=current_head_peel
+        ),
+    )
+
+
+def test_product_live_capture_tag_serialized():  # §16
+    inp = _inputs_at(
+        CURRENT_REAL_HEAD_AGAIN,
+        current_head_tag=plo.PRODUCT_LIVE_CAPTURE_TAG,
+        current_head_obj=plo.PRODUCT_LIVE_CAPTURE_OBJECT_SHA,
+        current_head_peel=CURRENT_REAL_HEAD_AGAIN,
+    )
+    text = plo.canonical_manifest_bytes(plo.build_manifest_v2(inp)).decode("utf-8")
+    assert "graphrag-09h-product-live-orchestrator-budget-proxy-approved" in text
+    assert "79e4085c04d94ebe0347ec28bdca3f6e199bd44d" in text
+    assert "1b4dd7916783443065ddfdfc1e9b7ebcd2080651" in text
+
+
+def test_missing_product_live_evidence_rejected():  # §23 required-by-type
+    kw = _minputs_kwargs()
+    del kw["product_live_evidence"]
+    with pytest.raises(TypeError):
+        plo.ManifestInputs(**kw)
+
+
+def test_missing_current_head_evidence_rejected():  # §22 required-by-type
+    kw = _minputs_kwargs()
+    del kw["current_head_capture_evidence"]
+    with pytest.raises(TypeError):
+        plo.ManifestInputs(**kw)
+
+
+def test_current_head_peel_not_head_rejected():  # §10
+    inp = dataclasses.replace(
+        MINPUTS,
+        current_head_capture_evidence=plo.EvidenceTagBinding(
+            tag="x-tag", object_sha="a" * 40, peel_sha="b" * 40
+        ),
+    )
+    with pytest.raises(plo.LiveAbort):
+        plo.build_manifest_v2(inp)
+
+
+def test_product_live_wrong_identity_rejected():  # §11
+    wrong = plo.EvidenceTagBinding(
+        tag=plo.PRODUCT_LIVE_CAPTURE_TAG, object_sha="9" * 40, peel_sha=plo.PRODUCT_LIVE_CAPTURE_PEEL_SHA
+    )
+    inp = dataclasses.replace(MINPUTS, product_live_evidence=wrong)
+    with pytest.raises(plo.LiveAbort):
+        plo.build_manifest_v2(inp)
+
+
+@pytest.mark.parametrize("bad", ["", "deadbeef", "g" * 40, "A" * 40, "a" * 39, "a" * 41])
+def test_malformed_evidence_sha_rejected(bad):  # §4
+    with pytest.raises(plo.LiveAbort):
+        plo.EvidenceTagBinding(tag="t", object_sha=bad, peel_sha="a" * 40)
+    with pytest.raises(plo.LiveAbort):
+        plo.EvidenceTagBinding(tag="t", object_sha="a" * 40, peel_sha=bad)
+
+
+def test_empty_evidence_tag_rejected():  # §4
+    with pytest.raises(plo.LiveAbort):
+        plo.EvidenceTagBinding(tag="   ", object_sha="a" * 40, peel_sha="a" * 40)
+
+
+def test_future_amendment_tag_binds_without_code_change():  # §12 anti-recursion / §7
+    inp = _inputs_at(
+        FAKE_NEW_HEAD,
+        current_head_tag=AMENDMENT_CAPTURE_TAG,
+        current_head_obj="cd" * 20,
+        current_head_peel=FAKE_NEW_HEAD,
+    )
+    m = plo.build_manifest_v2(inp)  # builds with NO source edit
+    et = m["evidence_tags"]
+    # product-live remains a pure ancestor evidence entry (immutable identity)
+    assert et["09h_product_live_orchestrator_budget_proxy"]["peel_sha"] == plo.PRODUCT_LIVE_CAPTURE_PEEL_SHA  # type: ignore[index]
+    assert et["09h_product_live_orchestrator_budget_proxy"]["tag"] == plo.PRODUCT_LIVE_CAPTURE_TAG  # type: ignore[index]
+    # current-head is the NEW amendment capture tag peeling to the NEW head
+    assert et["current_head_capture_evidence"]["tag"] == AMENDMENT_CAPTURE_TAG  # type: ignore[index]
+    assert et["current_head_capture_evidence"]["peel_sha"] == FAKE_NEW_HEAD  # type: ignore[index]
+    assert m["head_commit"] == FAKE_NEW_HEAD
+
+
+def test_evidence_object_sha_change_changes_manifest_sha():  # §15
+    base = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    other = dataclasses.replace(
+        MINPUTS, current_head_capture_evidence=dataclasses.replace(CURRENT_HEAD_EVIDENCE, object_sha="f" * 40)
+    )
+    assert plo.manifest_sha256(plo.build_manifest_v2(other)) != base
+
+
+def test_evidence_peel_change_changes_manifest_sha():  # §15 (decoupled-from-head binding)
+    base = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    other = dataclasses.replace(MINPUTS, tag_09g_peel="f" * 40)
+    assert plo.manifest_sha256(plo.build_manifest_v2(other)) != base
+
+
+def test_evidence_tag_name_change_changes_manifest_sha():  # §15
+    base = plo.manifest_sha256(plo.build_manifest_v2(MINPUTS))
+    other = dataclasses.replace(
+        MINPUTS,
+        current_head_capture_evidence=dataclasses.replace(
+            CURRENT_HEAD_EVIDENCE, tag="graphrag-09h-pn02-slice-hash-derivation-approved-ALT"
+        ),
+    )
+    assert plo.manifest_sha256(plo.build_manifest_v2(other)) != base
+
+
+def test_evidence_input_order_independent():  # §14
+    kw = _minputs_kwargs()
+    reordered = dict(reversed(list(kw.items())))
+    a = plo.manifest_sha256(plo.build_manifest_v2(plo.ManifestInputs(**kw)))
+    b = plo.manifest_sha256(plo.build_manifest_v2(plo.ManifestInputs(**reordered)))
+    assert a == b
+
+
+def test_historical_pre_proxy_sha_remains_rejected():  # §18
+    assert (
+        plo.HISTORICAL_PRE_PROXY_MANIFEST_SHA
+        == "0b24966264df75b80ffe77596cb8bf03df49653705dbd1bfa521a9ec2915989b"
+    )
+    assert plo.manifest_sha256(plo.build_manifest_v2(MINPUTS)) != plo.HISTORICAL_PRE_PROXY_MANIFEST_SHA
+
+
+def test_incomplete_candidate_not_accepted_as_final():  # §17
+    # 05ebef... == INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE (never golden output)
+    inp = _inputs_at(
+        CURRENT_REAL_HEAD_AGAIN,
+        current_head_tag=plo.PRODUCT_LIVE_CAPTURE_TAG,
+        current_head_obj=plo.PRODUCT_LIVE_CAPTURE_OBJECT_SHA,
+        current_head_peel=CURRENT_REAL_HEAD_AGAIN,
+    )
+    sha = plo.manifest_sha256(plo.build_manifest_v2(inp))
+    assert sha != INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE
+    assert plo.manifest_sha256(plo.build_manifest_v2(MINPUTS)) != INVALID_INCOMPLETE_EVIDENCE_BINDING_NOT_EXECUTABLE
+
+
+def test_prior_evidence_bindings_preserved():  # §13
+    et = plo.build_manifest_v2(MINPUTS)["evidence_tags"]
+    assert set(et) == _ALL_EVIDENCE_KEYS  # type: ignore[arg-type]
+    assert et["09g_offline_integration_proof"]["tag"] == "graphrag-09g-offline-integration-proof-approved"  # type: ignore[index]
+    assert et["09h_canonical_chat_execution_bounds"]["tag"] == "graphrag-09h-canonical-chat-execution-bounds-approved"  # type: ignore[index]
+    assert et["09h_pn02_slice_hash_derivation"]["tag"] == "graphrag-09h-pn02-slice-hash-derivation-approved"  # type: ignore[index]
+
+
+def test_no_ephemeral_runtime_fields_in_evidence():  # §25
+    m = plo.build_manifest_v2(MINPUTS)
+    for entry in m["evidence_tags"].values():  # type: ignore[attr-defined]
+        assert set(entry.keys()) == {"tag", "object_sha", "peel_sha"}
+    text = plo.canonical_manifest_bytes(m).decode("utf-8")
+    for forbidden in (LOCAL_TOKEN, CONTROL_TOKEN, REAL_KEY):
+        assert forbidden not in text
+
+
+def test_manifest_independent_recomputation():  # §30
+    import hashlib as _hl
+    import json as _json
+
+    m = plo.build_manifest_v2(MINPUTS)
+    prod_bytes = plo.canonical_manifest_bytes(m)
+    indep_bytes = _json.dumps(m, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    assert prod_bytes == indep_bytes
+    assert _hl.sha256(prod_bytes).hexdigest() == plo.manifest_sha256(m)
+    assert not prod_bytes.endswith(b"\n")  # no trailing newline / no BOM
