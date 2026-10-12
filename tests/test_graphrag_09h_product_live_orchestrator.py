@@ -239,6 +239,7 @@ def _make_deps(
     provenance=None,
     cleanup=None,
     facts=None,
+    wait_ready=None,
 ):
     up_calls = []
 
@@ -309,6 +310,14 @@ def _make_deps(
     # in the happy path the fakes keep provider ops at 0 (budget trivially satisfied).
     f = facts if facts is not None else _good_facts()
 
+    # Default controlled readiness: an injected no-op gate that reports ready
+    # immediately (the orchestrator-ordering tests are not about the HTTP probe; the
+    # real probe_sidecar_ready is unit-tested separately). Tests override via wait_ready
+    # or dataclasses.replace to exercise delay/timeout/auth-failure/ordering/cleanup.
+    if wait_ready is None:
+        async def wait_ready(_facts):  # noqa: E306 - local default double
+            return None
+
     return plo.RunDeps(
         git=git,
         manifest_inputs=MINPUTS,
@@ -327,6 +336,7 @@ def _make_deps(
         execute_one_chat=execute_chat,
         controller=controller,
         control_token=CONTROL_TOKEN,
+        wait_sidecar_ready=wait_ready,
     ), controller
 
 
@@ -838,10 +848,11 @@ def test_default_run_deps_concrete_all_seams():
         "git", "read_model_state", "read_session_state", "read_checkpoint_message_count",
         "read_canonical_trust", "recompute_question_sha256", "verify_local_sidecar_digest",
         "boot_topology", "cleanup", "index_source", "track_status", "list_indexed_doc_ids",
-        "load_source_text", "execute_one_chat", "controller",
+        "load_source_text", "execute_one_chat", "controller", "wait_sidecar_ready",
     ):
         assert getattr(deps, name) is not None
     assert callable(deps.boot_topology) and callable(deps.cleanup)
+    assert callable(deps.wait_sidecar_ready)  # §18 default path always wires readiness
     assert deps.git.head.__self__ is deps.git  # concrete git adapter
 
 
@@ -1596,3 +1607,329 @@ async def test_default_path_async_read_integration_and_boot_order(monkeypatch): 
     assert "boot" in events and calls["repo_query"] > 0
     for r in ("read_model", "read_session", "read_checkpoint", "read_trust"):
         assert events.index(r) < events.index("boot")  # all real reads complete before boot
+
+
+# =============================================================================
+# 09H sidecar-HTTP READINESS GATE (bounded, fail-closed, provider-free). The real
+# probe (plo.probe_sidecar_ready) is unit-tested with an injected deterministic
+# transport + clock (no real HTTP/Docker/sleep); orchestrator ordering/gating/
+# cleanup/cancellation use an injected readiness seam via _make_deps(wait_ready=..).
+# =============================================================================
+
+
+def _rd_clock(step=1.0, start=0.0):
+    """Deterministic monotonic clock + no-op async sleep (sleep advances the clock)."""
+    t = {"v": start}
+
+    def now():
+        return t["v"]
+
+    async def sleep(_s):
+        t["v"] += step
+
+    return now, sleep
+
+
+def _rd_http(statuses):
+    """Fake readiness transport returning queued statuses (last value sticks).
+    Records every (url, headers) so provider-egress/port/token assertions are exact."""
+    seq = list(statuses)
+    calls = {"urls": [], "headers": [], "n": 0}
+
+    def http_get(url, headers):
+        calls["urls"].append(url)
+        calls["headers"].append(dict(headers))
+        i = min(calls["n"], len(seq) - 1)
+        calls["n"] += 1
+        return seq[i]
+
+    return http_get, calls
+
+
+@pytest.mark.asyncio
+async def test_readiness_delayed_then_success():  # §31
+    now, sleep = _rd_clock(step=1.0)
+    http_get, calls = _rd_http([None, 500, 200])
+    await plo.probe_sidecar_ready(
+        _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=5.0, interval_s=0.25,
+        http_get=http_get, now=now, sleep=sleep,
+    )  # returns (no raise) once HTTP 200 observed
+    assert calls["n"] == 3  # None -> 500 -> 200
+    assert all(u.endswith("/health") for u in calls["urls"])  # only the whitelisted route
+
+
+@pytest.mark.asyncio
+async def test_readiness_requires_http_200_not_tcp():  # §12
+    now, sleep = _rd_clock(step=100.0)
+    # transport "connects" (returns a non-200) but never 200 -> must NOT pass
+    http_get, calls = _rd_http([500])
+    with pytest.raises(plo.SidecarNotReady):
+        await plo.probe_sidecar_ready(
+            _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=1.0, interval_s=0.25,
+            http_get=http_get, now=now, sleep=sleep,
+        )
+
+
+@pytest.mark.asyncio
+async def test_readiness_timeout_raises():  # §33 (probe level)
+    now, sleep = _rd_clock(step=1.0)
+    http_get, calls = _rd_http([None])  # never ready
+    with pytest.raises(plo.SidecarNotReady) as ei:
+        await plo.probe_sidecar_ready(
+            _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=1.0, interval_s=0.25,
+            http_get=http_get, now=now, sleep=sleep,
+        )
+    assert "timeout" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_readiness_timeout_orchestrator_no_index(monkeypatch):  # §33 (orchestrator)
+    counts = {"index": 0, "chat": 0}
+
+    async def never_ready(_facts):
+        raise plo.SidecarNotReady("sidecar_http_not_ready:timeout:transport")
+
+    async def idx(sid, text):
+        counts["index"] += 1
+        return "t"
+
+    async def chat():
+        counts["chat"] += 1
+        return {"graph_provenance_source_ids": [], "graph_answer_text_surfaced": False, "graph_excerpts_surfaced": False}
+
+    cleaned = {"n": 0}
+    deps, ctrl = _make_deps(facts=_env_facts(), wait_ready=never_ready)
+
+    def cl():
+        cleaned["n"] += 1
+        return plo.CleanupReport(True, True, True, True, True, True)
+
+    deps = dataclasses.replace(deps, index_source=idx, execute_one_chat=chat, cleanup=cl)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert "sidecar_readiness" in res.reason
+    assert counts == {"index": 0, "chat": 0}  # readiness timeout prevents INDEX/chat
+    assert ctrl.product_query_count() == 0
+    assert cleaned["n"] == 1  # topology booted -> cleanup ran in finally
+
+
+@pytest.mark.asyncio
+async def test_readiness_auth_failure_fails_closed_immediately():  # §34
+    now, sleep = _rd_clock(step=0.001)
+    http_get, calls = _rd_http([401, 200])  # 2nd would be 200 but must never be reached
+    with pytest.raises(plo.SidecarNotReady) as ei:
+        await plo.probe_sidecar_ready(
+            _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=5.0, interval_s=0.25,
+            http_get=http_get, now=now, sleep=sleep,
+        )
+    assert "permanent:401" in str(ei.value)
+    assert calls["n"] == 1  # no retry past a permanent auth failure
+
+
+@pytest.mark.asyncio
+async def test_readiness_404_fails_closed_no_spin():  # §35
+    now, sleep = _rd_clock(step=0.001)
+    http_get, calls = _rd_http([404])
+    with pytest.raises(plo.SidecarNotReady) as ei:
+        await plo.probe_sidecar_ready(
+            _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=5.0, interval_s=0.25,
+            http_get=http_get, now=now, sleep=sleep,
+        )
+    assert "permanent:404" in str(ei.value)
+    assert calls["n"] == 1  # did not spin to the deadline
+
+
+@pytest.mark.asyncio
+async def test_readiness_transient_http_retry_then_200():  # §36
+    now, sleep = _rd_clock(step=1.0)
+    http_get, calls = _rd_http([503, 500, 200])
+    await plo.probe_sidecar_ready(
+        _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=10.0, interval_s=0.25,
+        http_get=http_get, now=now, sleep=sleep,
+    )
+    assert calls["n"] == 3  # 503 -> 500 -> 200
+
+
+@pytest.mark.asyncio
+async def test_readiness_observed_port_sensitivity():  # §37
+    now, sleep = _rd_clock(step=0.001)
+    g1, c1 = _rd_http([200])
+    g2, c2 = _rd_http([200])
+    await plo.probe_sidecar_ready(_env_facts(base_url="http://127.0.0.1:11111"),
+                                  sidecar_api_token="s", http_get=g1, now=now, sleep=sleep)
+    await plo.probe_sidecar_ready(_env_facts(base_url="http://127.0.0.1:22222"),
+                                  sidecar_api_token="s", http_get=g2, now=now, sleep=sleep)
+    assert c1["urls"][0] == "http://127.0.0.1:11111/health"  # OBSERVED port, not intent
+    assert c2["urls"][0] == "http://127.0.0.1:22222/health"
+    assert c1["urls"] != c2["urls"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "base_url,loopback",
+    [
+        ("http://0.0.0.0:8900", True),                       # non-loopback host
+        ("http://10.0.0.5:8900", True),                      # non-loopback host
+        ("http://127.0.0.1:8900 http://0.0.0.0:9", True),    # ambiguous/extra
+        ("http://127.0.0.1:8900/extra", True),               # extra path
+        ("", True),                                          # missing
+        ("http://127.0.0.1:8900", False),                    # proxy not loopback-attested
+        ("http://127.0.0.1:99999", True),                    # port out of range
+    ],
+)
+async def test_readiness_unsafe_gateway_rejected(base_url, loopback):  # §38
+    http_get, calls = _rd_http([200])  # even if it would return 200, gateway must reject first
+    with pytest.raises(plo.LiveAbort):
+        await plo.probe_sidecar_ready(
+            _env_facts(base_url=base_url, loopback=loopback), sidecar_api_token="s",
+            http_get=http_get,
+        )
+    assert calls["n"] == 0  # never issued an HTTP request against an unsafe gateway
+
+
+@pytest.mark.asyncio
+async def test_readiness_run_local_token_only():  # §39
+    now, sleep = _rd_clock(step=0.001)
+    http_get, calls = _rd_http([200])
+    await plo.probe_sidecar_ready(
+        _env_facts(), sidecar_api_token=LOCAL_TOKEN, http_get=http_get, now=now, sleep=sleep,
+    )
+    hdr = calls["headers"][0]
+    assert hdr.get("X-API-Key") == LOCAL_TOKEN      # run-local Surface-A token
+    assert REAL_KEY not in hdr.values()             # never the real OpenRouter key
+    assert "Authorization" not in hdr               # no bearer provider auth
+
+
+@pytest.mark.asyncio
+async def test_readiness_missing_token_fails_closed():  # §14
+    http_get, calls = _rd_http([200])
+    with pytest.raises(plo.SidecarNotReady) as ei:
+        await plo.probe_sidecar_ready(_env_facts(), sidecar_api_token="", http_get=http_get)
+    assert "run_local_token_missing" in str(ei.value)
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_readiness_zero_provider_calls():  # §40
+    now, sleep = _rd_clock(step=1.0)
+    http_get, calls = _rd_http([None, 503, 200])
+    await plo.probe_sidecar_ready(
+        _env_facts(), sidecar_api_token=LOCAL_TOKEN, timeout_s=10.0, interval_s=0.25,
+        http_get=http_get, now=now, sleep=sleep,
+    )
+    # the probe only ever touches the whitelisted /health route (no /chat/completions,
+    # no /embeddings) => structurally zero provider egress / zero budget consumption.
+    for u in calls["urls"]:
+        assert u.endswith("/health")
+        assert "/chat/completions" not in u and "/embeddings" not in u
+
+
+@pytest.mark.asyncio
+async def test_readiness_gate_seam_absent_fails_closed():  # §18 no silent bypass
+    counts = {"index": 0}
+
+    async def idx(sid, text):
+        counts["index"] += 1
+        return "t"
+
+    deps, _ = _make_deps(facts=_env_facts(), wait_ready=None)
+    deps = dataclasses.replace(deps, wait_sidecar_ready=None, index_source=idx)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert res.reason == "sidecar_readiness: readiness gate seam absent"
+    assert counts["index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_readiness_before_index_ordering_and_race_regression():  # §32/§41
+    events = []
+    ready_flag = {"v": False}
+    deps, _ = _make_deps(facts=_env_facts())
+    orig_boot, orig_index, orig_chat = deps.boot_topology, deps.index_source, deps.execute_one_chat
+
+    def boot():
+        events.append("boot")
+        return orig_boot()
+
+    async def wait_ready(_facts):
+        events.append("readiness")
+        ready_flag["v"] = True  # the sidecar HTTP path is now proven accepting
+
+    def factory(facts):
+        events.append("derive")
+        return plo.run_scoped_env_values(facts, sidecar_api_token="lp-FAKE")
+
+    async def idx(sid, text):
+        events.append("index")
+        # the live-#3 race: INDEX must never run before readiness proved HTTP-up
+        assert ready_flag["v"] is True
+        return await orig_index(sid, text)
+
+    async def chat():
+        events.append("chat")
+        return await orig_chat()
+
+    deps = dataclasses.replace(
+        deps, boot_topology=boot, wait_sidecar_ready=wait_ready,
+        run_scoped_env_factory=factory, index_source=idx, execute_one_chat=chat,
+    )
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING, res.reason
+    assert res.evidence.get("sidecar_http_readiness_gate") == "PASS"
+    assert events.index("boot") < events.index("readiness") < events.index("derive") \
+        < events.index("index") < events.index("chat")
+
+
+@pytest.mark.asyncio
+async def test_readiness_failure_cleanup_runs():  # §42
+    cleaned = {"n": 0}
+
+    async def boom_ready(_facts):
+        raise plo.SidecarNotReady("sidecar_http_not_ready:timeout:transport")
+
+    deps, _ = _make_deps(facts=_env_facts(), wait_ready=boom_ready)
+
+    def cl():
+        cleaned["n"] += 1
+        return plo.CleanupReport(True, True, True, True, True, True)
+
+    deps = dataclasses.replace(deps, cleanup=cl)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert cleaned["n"] == 1  # booted topology cleaned up; conceptual zero residue
+    assert res.evidence.get("cleanup_zero_residue") is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_cancellation_unwinds():  # §43
+    import asyncio
+    cleaned = {"n": 0}
+    prior = _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED")
+
+    async def hang_ready(_facts):
+        await asyncio.sleep(10)
+
+    deps, _ = _make_deps(facts=_env_facts(), wait_ready=hang_ready)
+
+    def cl():
+        cleaned["n"] += 1
+        return plo.CleanupReport(True, True, True, True, True, True)
+
+    # env would be applied AFTER readiness; cancelling during readiness must leave env
+    # untouched and still run cleanup in finally.
+    deps = dataclasses.replace(
+        deps, cleanup=cl, run_scoped_env={"OPEN_NOTEBOOK_GRAPHRAG_ENABLED": "true"},
+    )
+    task = asyncio.ensure_future(plo.run_live_validation(deps, head_expected=HEAD))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned["n"] == 1  # finally cleanup ran on cancellation during readiness
+    assert _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED") == prior  # env never entered
+
+
+def test_readiness_bounded_constants_present():  # §11 bounded defaults captured
+    assert plo.SIDECAR_READINESS_TIMEOUT_SECONDS == 20.0
+    assert plo.SIDECAR_READINESS_POLL_INTERVAL_SECONDS == 0.25
+    assert plo.SIDECAR_READINESS_ENDPOINT == "/health"

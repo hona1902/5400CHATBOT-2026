@@ -110,6 +110,31 @@ class LiveVerdict(str, enum.Enum):
     RESULT_INDETERMINATE = "09H_LIVE_F"
 
 
+class SidecarNotReady(LiveAbort):
+    """Bounded Surface-A sidecar HTTP readiness gate failed (timeout or a permanent/
+    structurally-invalid response). A LiveAbort subtype, so it maps to the existing
+    PRE_EXECUTION_ABORT verdict and the always-run cleanup unwinds the booted topology.
+    It is raised BEFORE any provider-capable INDEX request, so no provider egress or
+    index has occurred."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("sidecar_readiness", reason)
+
+
+# 09H sidecar-HTTP readiness gate (captured bounded defaults). The gate proves the
+# product -> loopback-proxy Surface A -> LightRAG sidecar HTTP path is accepting
+# before any provider-capable INDEX request, closing the boot-returns-before-uvicorn
+# race that produced the live-run-#3 sidecar HTTP 500.
+SIDECAR_READINESS_TIMEOUT_SECONDS: float = 20.0
+SIDECAR_READINESS_POLL_INTERVAL_SECONDS: float = 0.25
+SIDECAR_READINESS_ENDPOINT: str = "/health"
+#: Transient during the sidecar startup window (Surface-A connect race / warmup) —
+#: retried until the bounded deadline, never counted as provider attempts.
+_READINESS_TRANSIENT_STATUSES: frozenset = frozenset({500, 502, 503, 504})
+#: Structurally non-transient (auth / misroute) — fail closed immediately, no spin.
+_READINESS_PERMANENT_STATUSES: frozenset = frozenset({401, 403, 404})
+
+
 # --------------------------------------------------------------------------- #
 # Evidence binding (reusable, immutable, full-SHA validated)
 # --------------------------------------------------------------------------- #
@@ -489,6 +514,13 @@ class RunDeps:
     # VERIFIED post-boot ObservedTopologyFacts (actual loopback gateway), never from a
     # pre-boot/static ephemeral endpoint. Applied only after verify_single_gateway_topology.
     run_scoped_env_factory: Optional[Callable[["ObservedTopologyFacts"], Mapping[str, str]]] = None
+    # 09H sidecar-HTTP readiness gate seam. Consumes the VERIFIED post-boot
+    # ObservedTopologyFacts and returns None (or an awaitable of None) once the
+    # product->proxy Surface-A->sidecar HTTP path is accepting; raises SidecarNotReady
+    # (fail-closed) on timeout/permanent failure. default_run_deps always wires the
+    # REAL probe (probe_sidecar_ready); tests inject controlled readiness behavior. The
+    # orchestrator fails closed when this seam is absent (no silent readiness bypass).
+    wait_sidecar_ready: Optional[Callable[["ObservedTopologyFacts"], "None | Awaitable[None]"]] = None
 
 
 @dataclass
@@ -574,6 +606,21 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         facts = deps.boot_topology()
         topology_built = True
         verify_single_gateway_topology(facts)
+
+        # 09H sidecar-HTTP readiness gate (ROOT-CAUSE fix for live-run-#3 sidecar 500):
+        # boot_topology returns right after `docker run` (uvicorn inside the pinned
+        # LightRAG image is not yet accepting), so a provider-capable INDEX request
+        # issued immediately races the sidecar's HTTP startup; during that window the
+        # proxy Surface-A forward raises httpx.ConnectError and is exposed as a bare
+        # HTTP 500. This bounded, fail-closed gate proves the SAME product->proxy
+        # Surface-A->sidecar path is accepting (HTTP 200) BEFORE the env is activated or
+        # any INDEX is issued. Mandatory: a run lacking the seam fails closed (no
+        # silent bypass) rather than indexing too soon. Readiness causes ZERO provider
+        # egress (/health is sidecar-whitelisted) and consumes no provider budget.
+        if deps.wait_sidecar_ready is None:
+            raise SidecarNotReady("readiness gate seam absent")
+        await _resolve_maybe_awaitable(deps.wait_sidecar_ready(cast("ObservedTopologyFacts", facts)))
+        evidence["sidecar_http_readiness_gate"] = "PASS"
 
         # F2/09H: activate run-scoped process-local env ONLY after topology verify
         # (so provider-capable product config is never exposed before the enforced
@@ -901,6 +948,95 @@ async def bounded_track_poll(
         polls += 1
         if polls >= max_polls or (_now() - start) >= deadline_s:
             return "timeout"
+        await _sleep(interval_s)
+
+
+# =========================================================================== #
+# 09H sidecar-HTTP readiness gate (bounded, fail-closed, provider-free, native async)
+# =========================================================================== #
+#: Injected readiness probe transport: (url, headers) -> status | None (None denotes a
+#: transport/connect failure, retryable within the bounded startup window). May be sync
+#: or an awaitable. The real default issues a single GET via httpx; tests inject a
+#: deterministic fake so no real HTTP/Docker/clock is required.
+ReadinessHttpGet = Callable[[str, Mapping[str, str]], "int | None | Awaitable[int | None]"]
+
+
+async def _default_readiness_http_get(url: str, headers: Mapping[str, str]) -> "int | None":
+    """Real readiness transport: ONE short GET; return status, or None on a transport/
+    connect failure (which is retryable during the sidecar startup window). Never raises
+    out; never contacts a provider (the URL is the loopback proxy Surface-A /health)."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers=dict(headers))
+            return resp.status_code
+    except Exception:
+        return None
+
+
+async def probe_sidecar_ready(
+    facts: "ObservedTopologyFacts",
+    *,
+    sidecar_api_token: str,
+    timeout_s: float = SIDECAR_READINESS_TIMEOUT_SECONDS,
+    interval_s: float = SIDECAR_READINESS_POLL_INTERVAL_SECONDS,
+    http_get: Optional[ReadinessHttpGet] = None,
+    now: Optional[Callable[[], float]] = None,
+    sleep: Optional[Callable[[float], Awaitable[None]]] = None,
+) -> None:
+    """Bounded, fail-closed Surface-A sidecar HTTP readiness gate.
+
+    Probes the SAME product gateway path the live run uses (host -> loopback proxy
+    Surface A -> LightRAG sidecar ``/health``), with the gateway derived FAIL-CLOSED
+    from the VERIFIED observed facts via ``_derive_graphrag_gateway`` (exact
+    ``http://127.0.0.1:<observed port>``; 0.0.0.0 / non-loopback / malformed / extra
+    path / out-of-range all rejected). Authenticates with the run-local Surface-A token
+    only (never the real OpenRouter key). ZERO provider egress: ``/health`` is a
+    sidecar-whitelisted route that triggers no LLM/embedding call and no proxy budget.
+
+    Success requires HTTP ``200``. Transient startup conditions — transport/connect
+    failure (``None``) or ``500/502/503/504`` (Surface-A connect race / warmup) — are
+    retried until the MONOTONIC deadline. Permanent failures (``401/403/404`` auth/
+    misroute, a missing run-local token, a malformed gateway, or any other structurally
+    invalid status) fail closed immediately without spinning. Native async: no
+    ``asyncio.run`` / ``new_event_loop`` / ``run_until_complete`` / thread offload;
+    ``now``/``sleep`` are injectable so tests are deterministic and fast.
+    """
+    import asyncio as _asyncio
+    import time as _time
+
+    if timeout_s <= 0:
+        raise SidecarNotReady("readiness timeout must be positive")
+    if interval_s <= 0:
+        raise SidecarNotReady("readiness poll interval must be positive")
+    if not (sidecar_api_token or "").strip():
+        raise SidecarNotReady("sidecar_http_not_ready:permanent:run_local_token_missing")
+    # Fail-closed gateway identity (reuses the governed observed-gateway constraints).
+    gateway = _derive_graphrag_gateway(facts)
+    url = gateway + SIDECAR_READINESS_ENDPOINT
+    headers = {"X-API-Key": sidecar_api_token}  # run-local Surface-A token ONLY
+    _get = http_get or _default_readiness_http_get
+    _now = now or _time.monotonic
+    _sleep = sleep or _asyncio.sleep
+    deadline = _now() + timeout_s
+    last = "no_attempt"
+    while True:
+        status = await _resolve_maybe_awaitable(_get(url, headers))
+        if status == 200:
+            return
+        if status in _READINESS_PERMANENT_STATUSES:
+            raise SidecarNotReady(f"sidecar_http_not_ready:permanent:{status}")
+        if status is None:
+            last = "transport"
+        elif status in _READINESS_TRANSIENT_STATUSES:
+            last = f"http_{status}"
+        else:
+            # Any other non-200 status is a structurally invalid readiness contract:
+            # fail closed (do not spin to the deadline on a misrouted/odd response).
+            raise SidecarNotReady(f"sidecar_http_not_ready:unexpected_status:{status}")
+        if _now() >= deadline:
+            raise SidecarNotReady(f"sidecar_http_not_ready:timeout:{last}")
         await _sleep(interval_s)
 
 
@@ -1509,6 +1645,14 @@ def default_run_deps(
         # proxy/sidecar token — never a hardcoded port or the real OpenRouter key.
         return run_scoped_env_values(facts, sidecar_api_token=sidecar_api_token)
 
+    async def _wait_sidecar_ready(facts: "ObservedTopologyFacts") -> None:
+        # Self-contained default path: the REAL bounded, fail-closed Surface-A HTTP
+        # readiness gate, driven off the VERIFIED observed facts with the run-local
+        # token. No provider egress; captured bounded timeout/interval defaults.
+        await probe_sidecar_ready(
+            cast("ObservedTopologyFacts", facts), sidecar_api_token=sidecar_api_token
+        )
+
     return RunDeps(
         git=_SubprocessGit(),
         manifest_inputs=manifest_inputs,
@@ -1529,4 +1673,5 @@ def default_run_deps(
         control_token=control_token,
         credential_present=lambda: bool(os.environ.get(provider_key_env, "").strip()),
         run_scoped_env_factory=_env_factory,
+        wait_sidecar_ready=_wait_sidecar_ready,
     )
