@@ -1412,3 +1412,187 @@ async def test_boot_failure_does_not_call_env_factory():  # 17
     res = await plo.run_live_validation(deps, head_expected=HEAD)
     assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
     assert called["n"] == 0  # boot failed -> no facts -> env factory never ran
+
+
+# ============== 09H async-safe default read-state adapters (provider-free)
+import pathlib as _pathlib_ar
+
+
+def _valid_runtime_repo(monkeypatch):
+    """Monkeypatch the repository/graph boundaries the concrete read adapters use so
+    they return valid canonical synthetic state; returns a call-counter dict."""
+    import open_notebook.database.repository as _repo
+    import open_notebook.utils.graph_utils as _gu
+    calls = {"repo_query": 0, "count": 0}
+
+    async def fake_repo_query(q, params=None):
+        calls["repo_query"] += 1
+        if "refers_to" in q or "reference" in q:
+            return [{"out": "notebook:gr_pn02_a"}]
+        pid = str((params or {}).get("id"))
+        if pid == "model:gr_pn02_chat":
+            return [{"id": "model:gr_pn02_chat", "provider": "openrouter",
+                     "name": "openai/gpt-4o-mini", "type": "language", "credential": None}]
+        if pid == "chat_session:gr_pn02_chat":
+            return [{"model_override": "model:gr_pn02_chat"}]
+        return []
+
+    async def fake_count(*a, **k):
+        calls["count"] += 1
+        return 0
+
+    monkeypatch.setattr(_repo, "repo_query", fake_repo_query)
+    monkeypatch.setattr(_repo, "ensure_record_id", lambda x: x)
+    monkeypatch.setattr(_gu, "get_session_message_count", fake_count)
+    return calls
+
+
+def _real_default_deps():
+    import os as _os
+    _os.environ["GRAPHRAG_09H_FAKE_KEY_ENV_AR"] = "sk-FAKE-not-real"
+    try:
+        return plo.default_run_deps(
+            MINPUTS, sidecar_api_token="sk-side-FAKE", local_provider_token="lp-FAKE",
+            control_token="ct-FAKE", provider_key_env="GRAPHRAG_09H_FAKE_KEY_ENV_AR",
+            host_port=8900, run_id="artest",
+        )
+    finally:
+        _os.environ.pop("GRAPHRAG_09H_FAKE_KEY_ENV_AR", None)
+
+
+def test_no_forbidden_loop_primitives_in_read_path():  # 29
+    src = _pathlib_ar.Path("open_notebook/integrations/graphrag/eval/productlivepn02d.py").read_text(encoding="utf-8")
+    for prim in ("new_event_loop(", "run_until_complete(", "asyncio.run("):
+        assert prim not in src, f"forbidden loop primitive present: {prim}"
+
+
+@pytest.mark.asyncio
+async def test_concrete_default_read_adapters_async_in_running_loop(monkeypatch):  # 14/15
+    calls = _valid_runtime_repo(monkeypatch)
+    deps = _real_default_deps()
+    # each concrete adapter is an async callable; await directly inside this running loop
+    import inspect as _inspect
+    for name in ("read_model_state", "read_session_state", "read_checkpoint_message_count", "read_canonical_trust"):
+        fn = getattr(deps, name)
+        res = fn()
+        assert _inspect.isawaitable(res), f"{name} concrete adapter must return an awaitable"
+        await res
+    model = await deps.read_model_state()
+    assert model["provider"] == "openrouter" and model["id"] == "model:gr_pn02_chat"  # CONCRETE_MODEL_READ
+    sess = await deps.read_session_state()
+    assert sess["model_override"] == "model:gr_pn02_chat" and sess["refers_to_out"] == ["notebook:gr_pn02_a"]  # SESSION
+    cp = await deps.read_checkpoint_message_count()
+    assert cp == 0  # CHECKPOINT
+    trust = await deps.read_canonical_trust()
+    assert trust["intact"] is True  # TRUST
+    assert calls["repo_query"] > 0 and calls["count"] > 0  # async stubs actually awaited
+
+
+@pytest.mark.asyncio
+async def test_check_runtime_state_sync_doubles():  # 16
+    deps, _ = _make_deps()  # sync lambda read callables
+    await plo._check_runtime_state(deps)  # resolves sync values; no raise
+
+
+@pytest.mark.asyncio
+async def test_check_runtime_state_async_doubles():  # 17
+    deps, _ = _make_deps()
+
+    async def am():
+        return {"id": plo.MODEL_ID, "provider": "openrouter", "name": "openai/gpt-4o-mini", "type": "language", "credential": None}
+
+    async def asess():
+        return {"model_override": plo.MODEL_ID, "refers_to_out": [plo.NOTEBOOK_ID]}
+
+    async def acp():
+        return 0
+
+    async def atr():
+        return {"intact": True}
+
+    deps = dataclasses.replace(deps, read_model_state=am, read_session_state=asess,
+                               read_checkpoint_message_count=acp, read_canonical_trust=atr)
+    await plo._check_runtime_state(deps)  # awaits async doubles; no raise
+
+
+@pytest.mark.asyncio
+async def test_read_dependency_exactly_once():  # 18
+    n = {"m": 0, "s": 0, "c": 0, "t": 0}
+    deps, _ = _make_deps()
+
+    async def am():
+        n["m"] += 1
+        return {"id": plo.MODEL_ID, "provider": "openrouter", "name": "openai/gpt-4o-mini", "type": "language", "credential": None}
+
+    async def asess():
+        n["s"] += 1
+        return {"model_override": plo.MODEL_ID, "refers_to_out": [plo.NOTEBOOK_ID]}
+
+    async def acp():
+        n["c"] += 1
+        return 0
+
+    async def atr():
+        n["t"] += 1
+        return {"intact": True}
+
+    deps = dataclasses.replace(deps, read_model_state=am, read_session_state=asess,
+                               read_checkpoint_message_count=acp, read_canonical_trust=atr)
+    await plo._check_runtime_state(deps)
+    assert n == {"m": 1, "s": 1, "c": 1, "t": 1}
+
+
+@pytest.mark.asyncio
+async def test_async_read_failure_fails_before_boot():  # 19
+    deps, _ = _make_deps(facts=_env_facts())
+    booted = {"n": 0}
+
+    async def bad_model():
+        raise plo.LiveAbort("runtime_state", "boom")
+
+    def boot():
+        booted["n"] += 1
+        return _env_facts()
+
+    deps = dataclasses.replace(deps, read_model_state=bad_model, boot_topology=boot)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert booted["n"] == 0  # read-state failure precedes topology boot
+
+
+@pytest.mark.asyncio
+async def test_default_path_async_read_integration_and_boot_order(monkeypatch):  # 30/31
+    calls = _valid_runtime_repo(monkeypatch)
+    real = _real_default_deps()
+    events = []
+
+    async def model():
+        events.append("read_model")
+        return await real.read_model_state()
+
+    async def session():
+        events.append("read_session")
+        return await real.read_session_state()
+
+    async def checkpoint():
+        events.append("read_checkpoint")
+        return await real.read_checkpoint_message_count()
+
+    async def trust():
+        events.append("read_trust")
+        return await real.read_canonical_trust()
+
+    def boot():
+        events.append("boot")
+        raise plo.LiveAbort("topology", "stop-before-provider")
+
+    deps, _ = _make_deps(facts=_env_facts())
+    deps = dataclasses.replace(
+        deps, read_model_state=model, read_session_state=session,
+        read_checkpoint_message_count=checkpoint, read_canonical_trust=trust, boot_topology=boot,
+    )
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert "boot" in events and calls["repo_query"] > 0
+    for r in ("read_model", "read_session", "read_checkpoint", "read_trust"):
+        assert events.index(r) < events.index("boot")  # all real reads complete before boot

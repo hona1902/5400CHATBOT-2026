@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -456,11 +457,13 @@ def verify_single_gateway_topology(facts: TopologyFacts) -> None:
 class RunDeps:
     git: GitRunner
     manifest_inputs: ManifestInputs
-    # runtime-state readers (provider-free DB reads)
-    read_model_state: Callable[[], Mapping[str, object]]
-    read_session_state: Callable[[], Mapping[str, object]]
-    read_checkpoint_message_count: Callable[[], int]
-    read_canonical_trust: Callable[[], Mapping[str, object]]
+    # runtime-state readers (provider-free DB reads). Each may return either an
+    # immediate value (sync test double) OR an awaitable (real async adapter); the
+    # orchestrator resolves both via _resolve_maybe_awaitable (no nested event loop).
+    read_model_state: Callable[[], "Mapping[str, object] | Awaitable[Mapping[str, object]]"]
+    read_session_state: Callable[[], "Mapping[str, object] | Awaitable[Mapping[str, object]]"]
+    read_checkpoint_message_count: Callable[[], "int | Awaitable[int]"]
+    read_canonical_trust: Callable[[], "Mapping[str, object] | Awaitable[Mapping[str, object]]"]
     recompute_question_sha256: Callable[[], str]
     verify_local_sidecar_digest: Callable[[], str]
     # lifecycle (Docker) — returns TopologyFacts; boot provider-bound sidecar+proxy
@@ -548,8 +551,9 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
                 LiveVerdict.PRE_EXECUTION_ABORT, evidence, "manifest_is_historical_pre_proxy"
             )
 
-        # 3. runtime model/session/checkpoint/trust
-        _check_runtime_state(deps)
+        # 3. runtime model/session/checkpoint/trust (async-safe: awaits async adapters
+        # or resolves sync test doubles; no nested event loop)
+        await _check_runtime_state(deps)
 
         # 4. fixture parent/slice/question
         if deps.recompute_question_sha256() != QUESTION_SHA256:
@@ -640,8 +644,8 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         evidence["graphrag_query_count"] = deps.controller.product_query_count()
         _with_proxy(evidence, deps)
 
-        # post-run canonical trust unchanged
-        trust_after = deps.read_canonical_trust()
+        # post-run canonical trust unchanged (async-safe resolve)
+        trust_after = cast(Mapping[str, object], await _resolve_maybe_awaitable(deps.read_canonical_trust()))
         if not trust_after.get("intact", False):
             return LiveRunResult(LiveVerdict.KILL_SWITCH_TRIGGERED, evidence, "canonical_trust_drift")
 
@@ -670,8 +674,20 @@ def _with_proxy(evidence: Dict[str, object], deps: RunDeps) -> Dict[str, object]
     return evidence
 
 
-def _check_runtime_state(deps: RunDeps) -> None:
-    m = deps.read_model_state()
+async def _resolve_maybe_awaitable(value: object) -> object:
+    """Resolve a read-dependency result: await it exactly once if it is awaitable
+    (real async adapter), else return the synchronous value unchanged (test double).
+    The dependency is invoked by the caller exactly once; this only resolves its result.
+    No nested event loop is ever created — the single awaitable is awaited on the
+    orchestrator's running loop.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _check_runtime_state(deps: RunDeps) -> None:
+    m = cast(Mapping[str, object], await _resolve_maybe_awaitable(deps.read_model_state()))
     if not (
         str(m.get("id")) == MODEL_ID
         and m.get("provider") == "openrouter"
@@ -680,13 +696,15 @@ def _check_runtime_state(deps: RunDeps) -> None:
         and m.get("credential") is None
     ):
         raise LiveAbort("runtime_state", "model record mismatch")
-    s = deps.read_session_state()
+    s = cast(Mapping[str, object], await _resolve_maybe_awaitable(deps.read_session_state()))
     refers_out = [str(x) for x in cast(Sequence[object], s.get("refers_to_out") or [])]
     if not (s.get("model_override") == MODEL_ID and refers_out == [NOTEBOOK_ID]):
         raise LiveAbort("runtime_state", "session relation/override mismatch")
-    if deps.read_checkpoint_message_count() != 0:
+    checkpoint_count = cast(int, await _resolve_maybe_awaitable(deps.read_checkpoint_message_count()))
+    if checkpoint_count != 0:
         raise LiveAbort("runtime_state", "checkpoint not empty before execution")
-    if not deps.read_canonical_trust().get("intact", False):
+    trust = cast(Mapping[str, object], await _resolve_maybe_awaitable(deps.read_canonical_trust()))
+    if not trust.get("intact", False):
         raise LiveAbort("runtime_state", "canonical trust state mismatch")
 
 
@@ -1433,14 +1451,12 @@ def default_run_deps(
             "graph_excerpts_surfaced": False,
         }
 
-    def _read_model() -> Mapping[str, object]:
-        import asyncio
-
+    # Native async concrete adapters: await the async repository APIs directly on the
+    # orchestrator's running loop. No asyncio.new_event_loop/run_until_complete/run.
+    async def _read_model() -> Mapping[str, object]:
         from open_notebook.database.repository import ensure_record_id, repo_query
 
-        rows = asyncio.new_event_loop().run_until_complete(
-            repo_query("SELECT * FROM $id", {"id": ensure_record_id(MODEL_ID)})
-        )
+        rows = await repo_query("SELECT * FROM $id", {"id": ensure_record_id(MODEL_ID)})
         r = rows[0] if rows else {}
         return {
             "id": str(r.get("id")),
@@ -1450,40 +1466,30 @@ def default_run_deps(
             "credential": r.get("credential"),
         }
 
-    def _read_session() -> Mapping[str, object]:
-        import asyncio
-
+    async def _read_session() -> Mapping[str, object]:
         from open_notebook.database.repository import ensure_record_id, repo_query
 
-        loop = asyncio.new_event_loop()
-        s = loop.run_until_complete(repo_query("SELECT * FROM $id", {"id": ensure_record_id(SESSION_ID)}))
-        edges = loop.run_until_complete(
-            repo_query("SELECT out FROM refers_to WHERE in=$s", {"s": ensure_record_id(SESSION_ID)})
+        s = await repo_query("SELECT * FROM $id", {"id": ensure_record_id(SESSION_ID)})
+        edges = await repo_query(
+            "SELECT out FROM refers_to WHERE in=$s", {"s": ensure_record_id(SESSION_ID)}
         )
         row = s[0] if s else {}
         return {"model_override": row.get("model_override"), "refers_to_out": [str(e["out"]) for e in edges]}
 
-    def _read_checkpoint() -> int:
-        import asyncio
-
+    async def _read_checkpoint() -> int:
         from open_notebook.graphs.chat import graph as chat_graph
         from open_notebook.utils.graph_utils import get_session_message_count
 
-        return asyncio.new_event_loop().run_until_complete(get_session_message_count(chat_graph, SESSION_ID))
+        return await get_session_message_count(chat_graph, SESSION_ID)
 
-    def _read_trust() -> Mapping[str, object]:
-        import asyncio
-
+    async def _read_trust() -> Mapping[str, object]:
         from open_notebook.database.repository import ensure_record_id, repo_query
 
-        loop = asyncio.new_event_loop()
         ok = True
         for a in INDEX_SOURCE_IDS:
-            rc = loop.run_until_complete(
-                repo_query(
-                    "SELECT out FROM reference WHERE in=$s AND out=$n",
-                    {"s": ensure_record_id(a), "n": ensure_record_id(NOTEBOOK_ID)},
-                )
+            rc = await repo_query(
+                "SELECT out FROM reference WHERE in=$s AND out=$n",
+                {"s": ensure_record_id(a), "n": ensure_record_id(NOTEBOOK_ID)},
             )
             ok = ok and len(rc) == 1
         return {"intact": ok}
