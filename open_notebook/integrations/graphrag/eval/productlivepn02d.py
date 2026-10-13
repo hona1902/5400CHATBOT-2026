@@ -476,6 +476,115 @@ def verify_single_gateway_topology(facts: TopologyFacts) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# In-path proxy control (D4-A/D4-B): the governed orchestrator must read provider
+# counters and drive phase on the SAME budget-proxy instance that actually receives the
+# sidecar's Surface-B traffic — the one inside the run-owned proxy CONTAINER — not a
+# disconnected in-process object. SupportsProxyControl is the shared shape the
+# orchestrator calls; it is satisfied by BOTH the in-process proxy.BudgetProxyController
+# (used directly as a unit-test seam) and the HTTP-backed ProxyControlClient (the default
+# governed live path, which talks to the container proxy's authenticated control surface).
+# --------------------------------------------------------------------------- #
+class SupportsProxyControl(Protocol):
+    async def enter_index(self, control_token: str) -> None: ...
+    async def snapshot_after_index_and_advance(self, control_token: str) -> Mapping[str, int]: ...
+    async def snapshot_final(self, control_token: str) -> Mapping[str, int]: ...
+    async def refresh(self) -> None: ...
+    def evidence(self) -> "proxy.ProxyEvidence": ...
+    def phase_deltas(self) -> Mapping[str, int]: ...
+    def product_query_count(self) -> int: ...
+
+
+class ProxyControlClient:
+    """HTTP client for the IN-PATH container budget proxy's run-local control surface.
+
+    Binds the orchestrator's phase transitions and provider-counter evidence to the exact
+    proxy instance that receives Surface-B traffic (D4-A fix), over the run-owned loopback
+    control routes (D4-B). Phase-changing methods POST the authenticated transition then
+    cache a fresh authoritative snapshot; the synchronous ``evidence``/``phase_deltas``/
+    ``product_query_count`` reads serve that cache, and the orchestrator calls ``refresh``
+    at the points where a live counter read is required (e.g. the per-source INDEX budget
+    check). The control token travels ONLY in the control header, never to the provider
+    upstream; the real OpenRouter key is never used as a control credential.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        control_token: str,
+        client_factory: Optional[Callable[[], object]] = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._token = control_token
+        self._client_factory = client_factory  # test seam -> httpx.AsyncClient (ASGI)
+        self._timeout_s = timeout_s
+        self._cache: Dict[str, object] = {}
+
+    def _client(self):
+        if self._client_factory is not None:
+            return self._client_factory()
+        import httpx  # lazy; not needed for pure unit tests that inject a factory
+
+        return httpx.AsyncClient(timeout=self._timeout_s)
+
+    async def _get_state(self) -> Dict[str, object]:
+        async with self._client() as c:
+            r = await c.get(self._base + proxy.CONTROL_STATE_PATH, headers={proxy.CONTROL_HEADER: self._token})
+            r.raise_for_status()
+            return dict(r.json())
+
+    async def _post_phase(self, target: str) -> Dict[str, object]:
+        async with self._client() as c:
+            r = await c.post(
+                self._base + proxy.CONTROL_PHASE_PATH,
+                headers={proxy.CONTROL_HEADER: self._token},
+                json={"phase": target},
+            )
+            r.raise_for_status()
+            return dict(r.json())
+
+    async def refresh(self) -> None:
+        self._cache = await self._get_state()
+
+    async def enter_index(self, control_token: str) -> None:
+        await self._post_phase("INDEX")
+        await self.refresh()
+
+    async def snapshot_after_index_and_advance(self, control_token: str) -> Mapping[str, int]:
+        res = await self._post_phase("POST_INDEX_QUERY")
+        await self.refresh()
+        return dict(cast(Mapping[str, int], res.get("snapshot", {})))
+
+    async def snapshot_final(self, control_token: str) -> Mapping[str, int]:
+        res = await self._post_phase("FINISHED")
+        await self.refresh()
+        return dict(cast(Mapping[str, int], res.get("snapshot", {})))
+
+    def evidence(self) -> "proxy.ProxyEvidence":
+        ev = cast(Mapping[str, object], self._cache.get("evidence", {}))
+        g = ev.get
+        return proxy.ProxyEvidence(
+            phase=str(g("phase", "PRE_INDEX")),
+            llm_forwarded=int(cast(int, g("llm_forwarded", 0))),
+            embedding_forwarded=int(cast(int, g("embedding_forwarded", 0))),
+            llm_denied_budget=int(cast(int, g("llm_denied_budget", 0))),
+            embedding_denied_budget=int(cast(int, g("embedding_denied_budget", 0))),
+            unknown_denied=int(cast(int, g("unknown_denied", 0))),
+            upstream_hosts=tuple(cast(Sequence[str], g("upstream_hosts", ()))),
+            request_path_counts=dict(cast(Mapping[str, int], g("request_path_counts", {}))),
+            index_budget_exceeded=bool(g("index_budget_exceeded", False)),
+            pre_index_provider_call=bool(g("pre_index_provider_call", False)),
+        )
+
+    def phase_deltas(self) -> Mapping[str, int]:
+        return dict(cast(Mapping[str, int], self._cache.get("phase_deltas", {})))
+
+    def product_query_count(self) -> int:
+        return int(cast(int, self._cache.get("product_query_count", 0)))
+
+
+# --------------------------------------------------------------------------- #
 # Run dependencies + result
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -500,8 +609,10 @@ class RunDeps:
     list_indexed_doc_ids: Callable[[], Awaitable[Sequence[str]]]
     load_source_text: Callable[[str], str]  # source_id -> canonical text (fixture read, sync)
     execute_one_chat: Callable[[], Awaitable[Mapping[str, object]]]  # -> product response-ish
-    # proxy controller (already constructed, run-owned)
-    controller: "proxy.BudgetProxyController"
+    # proxy controller (run-owned). Default governed path: the HTTP-backed
+    # ProxyControlClient bound to the IN-PATH container proxy (D4-A). Unit tests may inject
+    # an in-process proxy.BudgetProxyController directly (both satisfy SupportsProxyControl).
+    controller: "SupportsProxyControl"
     control_token: str
     # ---- remediation additions (defaults keep existing injection sites valid) ----
     credential_present: Callable[[], bool] = staticmethod(lambda: True)  # F2 preflight
@@ -649,6 +760,10 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
                 interval_s=deps.poll_interval_s,
                 max_polls=deps.poll_max_polls,
             )
+            # D4-A: refresh the AUTHORITATIVE in-path proxy counters before reading them,
+            # so the budget check reflects the provider traffic the sidecar actually sent
+            # to the container proxy (the in-process controller's refresh() is a no-op).
+            await deps.controller.refresh()
             if state != "processed":
                 return LiveRunResult(LiveVerdict.LIVE_FAIL_SAFE, _with_proxy(evidence, deps), f"index_incomplete:{source_id}:{state}")
             if deps.controller.evidence().index_budget_exceeded:
@@ -1497,12 +1612,14 @@ def default_run_deps(
     authorized live run requires no injected Callables. Tests still inject fakes.
     Nothing here executes until run_live_validation is driven under an authorized run.
     """
-    controller = proxy.BudgetProxyController(
-        real_openrouter_key=os.environ.get(provider_key_env, ""),
-        local_provider_token=local_provider_token,
+    # D4-A: the DEFAULT governed path binds phase/counter control to the IN-PATH container
+    # proxy via its run-local loopback control surface — NOT a disconnected in-process
+    # BudgetProxyController. The loopback base is the published proxy port (Surface A host
+    # entry), which also serves the reserved /__pbp_control__/* routes. The container proxy
+    # (create_app_from_env) holds the authoritative counters/phase for the sidecar's traffic.
+    controller: SupportsProxyControl = ProxyControlClient(
+        base_url=f"http://127.0.0.1:{host_port}",
         control_token=control_token,
-        upstream=proxy.build_https_openrouter_upstream(),
-        sidecar=None,
     )
     topo_ctrl = DockerTopologyController(run_id=run_id)
     facts_holder: Dict[str, ObservedTopologyFacts] = {}

@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Mapping, Optional, Tuple
 
@@ -73,6 +74,18 @@ OPERATION_COUNT_SEMANTIC_ID: str = (
 )
 LLM_PATH_SUFFIX: str = "/chat/completions"
 EMBEDDING_PATH_SUFFIX: str = "/embeddings"
+
+# Run-local phase/evidence CONTROL surface (D4-A/D4-B). Distinct, reserved path space
+# that cannot collide with provider paths (/chat/completions, /embeddings) or LightRAG
+# product paths, so the governed orchestrator reads/controls the SAME in-path container
+# proxy instance that actually receives Surface-B traffic. Authenticated by the run-owned
+# CONTROL token presented in CONTROL_HEADER (never the provider/local token, never the
+# real OpenRouter key). The sidecar does not hold the control token and so cannot
+# self-transition phase.
+CONTROL_STATE_PATH: str = "/__pbp_control__/state"
+CONTROL_PHASE_PATH: str = "/__pbp_control__/phase"
+CONTROL_HEADER: str = "x-pbp-control"
+GOVERNED_PHASES: Tuple[str, ...] = ("PRE_INDEX", "INDEX", "POST_INDEX_QUERY", "FINISHED")
 
 
 class RunPhase(str, enum.Enum):
@@ -144,12 +157,21 @@ def _model_allowed(cls: ProviderClass, model: Optional[str]) -> bool:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class ForwardDecision:
-    """Outcome of the pre-egress budget check. ``forwarded`` => reached upstream."""
+    """Outcome of the pre-egress budget check. ``forwarded`` => reached upstream.
+
+    On a forward, ``status``/``body``/``content_type`` carry the ACTUAL upstream provider
+    response so the thin HTTP layer can return it TRANSPARENTLY to the sidecar (D4-C); on a
+    denial, no upstream call is made and ``body`` is empty (the HTTP layer emits a governance
+    marker with the denial ``status``). The provider body is forwarded but never logged,
+    stored, or placed in content-safe evidence.
+    """
 
     classification: ProviderClass
     forwarded: bool
     status: int
     reason: str
+    body: bytes = b""
+    content_type: str = "application/json"
 
 
 @dataclass
@@ -184,9 +206,12 @@ class ProxyEvidence:
 
 #: Injected upstream transport. Real implementation performs HTTPS to the pinned
 #: OpenRouter host (credential already swapped by the controller). Tests inject a
-#: fake. Signature: (classification, path, forwarded_headers, body) -> (status).
+#: fake. Signature: (classification, path, forwarded_headers, body) ->
+#: (status, response_body, response_content_type). The response body/content-type are
+#: returned to the sidecar TRANSPARENTLY by the HTTP layer (D4-C) so LightRAG receives a
+#: real provider-compatible completion; they are never logged/stored/placed in evidence.
 Upstream = Callable[
-    [ProviderClass, str, Mapping[str, str], bytes], Awaitable[int]
+    [ProviderClass, str, Mapping[str, str], bytes], Awaitable[Tuple[int, bytes, str]]
 ]
 
 #: Injected sidecar transport for Surface A (host->sidecar). Real implementation
@@ -313,6 +338,47 @@ class BudgetProxyController:
                 out["QUERY_PHASE_EMBEDDING_OPERATION_COUNT"] = aq["embedding_forwarded"] - ai["embedding_forwarded"]
         return out
 
+    # ----- run-local CONTROL surface (D4-A/D4-B): authoritative in-path state -----
+    def control_token_ok(self, token: str) -> bool:
+        """True iff ``token`` is the run-owned control token (constant-time-ish compare
+        is unnecessary here — the token is run-local and never a real provider key)."""
+        return bool(token) and token == self.__control_token
+
+    async def transition_phase(self, control_token: str, target: str) -> Dict[str, int]:
+        """Authenticated phase transition driven by the governed orchestrator ONLY.
+
+        PRE_INDEX -> INDEX -> POST_INDEX_QUERY (-> FINISHED). Delegates to the existing
+        enter/snapshot methods (which enforce the legal source phase atomically). An
+        unknown target phase raises BudgetProxyError (the HTTP layer maps it to 400); a
+        bad control token raises ControlAuthError (mapped to 401). The sidecar cannot
+        self-transition because it does not hold the control token.
+        """
+        self._auth_control(control_token)
+        t = (target or "").strip().upper()
+        if t == "INDEX":
+            await self.enter_index(control_token)
+            return self._counter_snapshot()
+        if t == "POST_INDEX_QUERY":
+            return await self.snapshot_after_index_and_advance(control_token)
+        if t == "FINISHED":
+            return await self.snapshot_final(control_token)
+        raise BudgetProxyError(f"unknown governed phase: {target!r}")
+
+    def control_state(self) -> Dict[str, object]:
+        """Content-safe authoritative snapshot for the orchestrator: counters + phase
+        deltas + product /query count. Integers + coarse strings only (no secret/body)."""
+        return {
+            "evidence": self.evidence().as_dict(),
+            "phase_deltas": self.phase_deltas(),
+            "product_query_count": self.product_query_count(),
+        }
+
+    async def refresh(self) -> None:
+        """No-op for the in-process controller: ``evidence()`` is already live. Present so
+        the in-process controller satisfies the same SupportsProxyControl shape the
+        orchestrator uses for the HTTP-backed in-path client (whose refresh fetches state)."""
+        return None
+
     # ----- Surface B: provider egress gateway -----
     async def handle_provider_request(
         self,
@@ -368,11 +434,18 @@ class BudgetProxyController:
         # is pinned by the injected transport; caller-supplied host is ignored.
         assert reserved
         fwd_headers = _swap_auth(extra_headers or {}, self.__real_key)
-        status = await self._upstream(cls, _relative_provider_path(req.path), fwd_headers, body)
+        status, up_body, up_ct = await self._upstream(
+            cls, _relative_provider_path(req.path), fwd_headers, body
+        )
         self._upstream_hosts[_host_of(OPENROUTER_UPSTREAM)] = (
             self._upstream_hosts.get(_host_of(OPENROUTER_UPSTREAM), 0) + 1
         )
-        return ForwardDecision(cls, True, status, "forwarded")
+        # D4-C: carry the ACTUAL upstream status/body/content-type back so the HTTP layer
+        # returns it transparently. Budget was already reserved+counted PRE-egress above,
+        # so transparency does not weaken enforcement. A non-2xx upstream response is
+        # forwarded as-is (forwarded=True, real status) and never converted to a success
+        # marker.
+        return ForwardDecision(cls, True, status, "forwarded", body=up_body, content_type=up_ct)
 
     # ----- Surface A: product sidecar API gateway (no provider counting) -----
     async def handle_sidecar_api_request(
@@ -447,13 +520,19 @@ def build_https_openrouter_upstream(timeout_seconds: float = 60.0) -> Upstream:
 
     async def _upstream(
         cls: ProviderClass, rel_path: str, headers: Mapping[str, str], body: bytes
-    ) -> int:
+    ) -> Tuple[int, bytes, str]:
         import httpx  # lazy; not needed for provider-free tests
 
         url = OPENROUTER_UPSTREAM + rel_path
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             resp = await client.post(url, headers=dict(headers), content=body)
-            return resp.status_code
+            # D4-C: return the upstream status + body + content-type so the HTTP layer can
+            # hand LightRAG a real provider-compatible completion. Body is not logged/stored.
+            return (
+                resp.status_code,
+                resp.content,
+                resp.headers.get("content-type", "application/json"),
+            )
 
     return _upstream
 
@@ -495,6 +574,28 @@ def _parse_model(body: bytes) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # ASGI surfaces (Starlette imported lazily so the module stays import-light)
 # --------------------------------------------------------------------------- #
+def _provider_response(decision: "ForwardDecision"):
+    """Thin-HTTP rendering of a Surface-B decision (D4-C).
+
+    FORWARDED  -> return the upstream provider status/body/content-type TRANSPARENTLY, so
+                  LightRAG receives a real OpenAI-compatible completion (never a marker,
+                  and a non-2xx upstream is NOT converted into a success marker).
+    DENIED     -> no upstream was contacted; emit the content-safe governance marker with
+                  the denial status (budget/phase/auth/unknown), carrying no provider body.
+    """
+    from starlette.responses import JSONResponse, Response
+
+    if decision.forwarded:
+        return Response(
+            content=decision.body,
+            status_code=decision.status,
+            media_type=decision.content_type or "application/json",
+        )
+    return JSONResponse(
+        {"forwarded": False, "reason": decision.reason}, status_code=decision.status
+    )
+
+
 def build_surface_b_app(controller: "BudgetProxyController"):
     """Surface B: sidecar -> proxy -> OpenRouter. Only POST /chat/completions and
     POST /embeddings are accepted; everything else denies pre-egress. Classification
@@ -514,14 +615,13 @@ def build_surface_b_app(controller: "BudgetProxyController"):
             body=body,
             extra_headers={"Content-Type": request.headers.get("content-type", "application/json")},
         )
-        # Content-safe: return only a status marker, never upstream body/secret.
-        return JSONResponse({"forwarded": decision.forwarded, "reason": decision.reason}, status_code=decision.status)
+        return _provider_response(decision)
 
     async def _deny(request: "Request") -> "Response":
         # Any other provider path/method is unknown => counted + denied pre-egress.
         req = ProviderRequest(method=request.method, path=request.url.path, model=None)
         decision = await controller.handle_provider_request(req, local_auth=_bearer(request.headers))
-        return JSONResponse({"forwarded": False, "reason": decision.reason}, status_code=decision.status)
+        return _provider_response(decision)
 
     routes = [
         Route("/chat/completions", _provider, methods=["POST"]),
@@ -573,7 +673,31 @@ def build_proxy_app(controller: "BudgetProxyController"):
             body=body,
             extra_headers={"Content-Type": request.headers.get("content-type", "application/json")},
         )
-        return JSONResponse({"forwarded": d.forwarded, "reason": d.reason}, status_code=d.status)
+        return _provider_response(d)
+
+    async def _control_state(request: "Request") -> "Response":
+        # D4-A/D4-B: authenticated authoritative in-path state read (counters/phase/query).
+        if not controller.control_token_ok(request.headers.get(CONTROL_HEADER, "")):
+            return JSONResponse({"error": "control_auth"}, status_code=401)
+        return JSONResponse(controller.control_state())
+
+    async def _control_phase(request: "Request") -> "Response":
+        # D4-B: orchestrator-only authenticated phase transition on the IN-PATH proxy.
+        token = request.headers.get(CONTROL_HEADER, "")
+        if not controller.control_token_ok(token):
+            return JSONResponse({"error": "control_auth"}, status_code=401)
+        raw = await request.body()
+        try:
+            target = (json.loads(raw.decode("utf-8") or "{}") or {}).get("phase")
+        except Exception:
+            target = None
+        try:
+            snap = await controller.transition_phase(token, str(target))
+        except ControlAuthError:
+            return JSONResponse({"error": "control_auth"}, status_code=401)
+        except BudgetProxyError as exc:
+            return JSONResponse({"error": "bad_phase", "reason": str(exc)}, status_code=400)
+        return JSONResponse({"snapshot": snap, "phase": controller.evidence().phase})
 
     async def _product(request: "Request") -> "Response":
         body = await request.body()
@@ -584,6 +708,8 @@ def build_proxy_app(controller: "BudgetProxyController"):
 
     routes = [
         Route("/healthz", lambda r: JSONResponse(controller.healthz()), methods=["GET"]),
+        Route(CONTROL_STATE_PATH, _control_state, methods=["GET"]),
+        Route(CONTROL_PHASE_PATH, _control_phase, methods=["POST"]),
         Route("/chat/completions", _provider, methods=["POST"]),
         Route("/embeddings", _provider, methods=["POST"]),
         Route("/{path:path}", _product, methods=["GET", "POST", "PUT", "DELETE"]),
@@ -627,8 +753,12 @@ def create_smoke_app():
     """
     import os
 
-    async def _noop_upstream(cls: ProviderClass, rel_path: str, headers: Mapping[str, str], body: bytes) -> int:
-        return 200  # never contacts any network
+    async def _noop_upstream(
+        cls: ProviderClass, rel_path: str, headers: Mapping[str, str], body: bytes
+    ) -> Tuple[int, bytes, str]:
+        # Never contacts any network. Returns a minimal, structurally-empty 200 so a
+        # container boot + /healthz + deny-path smoke can run with ZERO provider calls.
+        return 200, b"{}", "application/json"
 
     sidecar = build_local_sidecar_transport(os.environ.get("PBP_SIDECAR_BASE", "http://127.0.0.1:9621"))
     controller = _controller_from_env(upstream=_noop_upstream, sidecar=sidecar)

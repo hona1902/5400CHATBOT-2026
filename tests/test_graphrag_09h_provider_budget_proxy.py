@@ -16,14 +16,19 @@ CONTROL_TOKEN = "ctrl-FAKE-token"
 
 
 class _FakeUpstream:
-    """Records forwarded (cls, rel_path, headers, body); returns 200. No network."""
+    """Records forwarded (cls, rel_path, headers, body); returns a configurable
+    (status, body, content_type) so transparency (D4-C) and upstream-failure pass-through
+    can be exercised. No network."""
 
-    def __init__(self) -> None:
+    def __init__(self, status: int = 200, body: bytes = b'{"ok":true}', content_type: str = "application/json") -> None:
         self.calls = []
+        self.status = status
+        self.body = body
+        self.content_type = content_type
 
     async def __call__(self, cls, rel_path, headers, body):
         self.calls.append({"cls": cls, "path": rel_path, "headers": dict(headers), "body": body})
-        return 200
+        return self.status, self.body, self.content_type
 
 
 def _controller(upstream, sidecar=None):
@@ -298,8 +303,10 @@ async def test_surface_b_asgi_forward_and_deny():
             headers={"Authorization": f"Bearer {LOCAL_TOKEN}"},
             content=b'{"model":"openai/gpt-4o-mini","messages":[{"content":"SECRET"}]}',
         )
-        assert r.status_code == 200 and r.json()["forwarded"] is True
-        # unknown provider path -> denied pre-egress
+        # D4-C: forwarded success returns the UPSTREAM body transparently (not a marker)
+        assert r.status_code == 200 and r.content == up.body
+        assert b'"forwarded"' not in r.content
+        # unknown provider path -> denied pre-egress (denials still carry the marker)
         r2 = await client.post("/v1/models", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b"{}")
         assert r2.json()["forwarded"] is False
     assert c.evidence().llm_forwarded == 1 and c.evidence().unknown_denied >= 1
@@ -357,7 +364,7 @@ async def test_combined_proxy_app_routes_both_surfaces():
             headers={"Authorization": f"Bearer {LOCAL_TOKEN}"},
             content=b'{"model":"openai/gpt-4o-mini"}',
         )
-        assert pr.json()["forwarded"] is True  # Surface B
+        assert pr.status_code == 200 and pr.content == up.body  # Surface B transparent body
         qr = await client.post("/query", content=b"{}")
         assert qr.status_code == 200  # Surface A
     assert c.evidence().llm_forwarded == 1  # provider path only
@@ -378,6 +385,146 @@ async def test_smoke_app_boots_in_process_zero_provider(monkeypatch):
             "/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}'
         )
         assert r.json()["forwarded"] is False
+
+
+# =========================================================== D4 control surface (D4-A/B)
+@pytest.mark.asyncio
+async def test_proxy_phase_control_route_transitions():
+    """D4-B: the in-path proxy app supports authenticated PRE_INDEX->INDEX->POST_INDEX_QUERY."""
+    c = _controller(_FakeUpstream())
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        st = await client.get(bp.CONTROL_STATE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN})
+        assert st.status_code == 200 and st.json()["evidence"]["phase"] == "PRE_INDEX"
+        r1 = await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN}, json={"phase": "INDEX"})
+        assert r1.status_code == 200 and r1.json()["phase"] == "INDEX"
+        r2 = await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN}, json={"phase": "POST_INDEX_QUERY"})
+        assert r2.status_code == 200 and r2.json()["phase"] == "POST_INDEX_QUERY"
+    assert c.evidence().phase == "POST_INDEX_QUERY"
+
+
+@pytest.mark.asyncio
+async def test_proxy_phase_control_requires_control_token():
+    """D4-B: phase mutation + state read require the run-local control token."""
+    app = bp.build_proxy_app(_controller(_FakeUpstream()))
+    async with _asgi(app) as client:
+        assert (await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: "wrong"}, json={"phase": "INDEX"})).status_code == 401
+        assert (await client.post(bp.CONTROL_PHASE_PATH, json={"phase": "INDEX"})).status_code == 401
+        assert (await client.get(bp.CONTROL_STATE_PATH)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_proxy_unknown_phase_rejected():
+    """D4-B: an unknown governed phase is rejected (400), leaving phase unchanged."""
+    c = _controller(_FakeUpstream())
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        r = await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN}, json={"phase": "BOGUS"})
+        assert r.status_code == 400
+    assert c.evidence().phase == "PRE_INDEX"
+
+
+@pytest.mark.asyncio
+async def test_in_path_counter_observable_via_control_state():
+    """D4-A: a provider forward is observable on the SAME in-path proxy's control state."""
+    up = _FakeUpstream()
+    c = _controller(up)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN}, json={"phase": "INDEX"})
+        before = (await client.get(bp.CONTROL_STATE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN})).json()
+        assert before["evidence"]["llm_forwarded"] == 0
+        await client.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+        after = (await client.get(bp.CONTROL_STATE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN})).json()
+    assert after["evidence"]["llm_forwarded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_phase_enforcement_preindex_denies_then_index_forwards():
+    """D4-B regression: PRE_INDEX denies the provider call (409); after INDEX it forwards."""
+    up = _FakeUpstream()
+    c = _controller(up)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        r = await client.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+        assert r.status_code == 409 and r.json()["forwarded"] is False
+        await client.post(bp.CONTROL_PHASE_PATH, headers={bp.CONTROL_HEADER: CONTROL_TOKEN}, json={"phase": "INDEX"})
+        r2 = await client.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+        assert r2.status_code == 200 and r2.content == up.body
+    assert c.evidence().llm_forwarded == 1
+
+
+# =========================================================== D4-C Surface-B transparency
+@pytest.mark.asyncio
+async def test_surface_b_returns_upstream_chat_body_transparently():
+    chat_body = b'{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"}}]}'
+    up = _FakeUpstream(status=200, body=chat_body)
+    c = _controller(up)
+    await c.enter_index(CONTROL_TOKEN)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        r = await client.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+    assert r.status_code == 200 and r.content == chat_body and "chat.completion" in r.text
+    assert b'"forwarded"' not in r.content  # NOT a marker
+
+
+@pytest.mark.asyncio
+async def test_surface_b_returns_upstream_embedding_body_transparently():
+    emb = b'{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2,0.3]}]}'
+    up = _FakeUpstream(status=200, body=emb)
+    c = _controller(up)
+    await c.enter_index(CONTROL_TOKEN)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        r = await client.post("/embeddings", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/text-embedding-3-small"}')
+    assert r.status_code == 200 and r.content == emb
+    assert c.evidence().embedding_forwarded == 1
+
+
+@pytest.mark.asyncio
+async def test_surface_b_upstream_failure_not_converted_to_success():
+    """§21/§44: a non-2xx upstream response passes through; never a success marker."""
+    up = _FakeUpstream(status=500, body=b'{"error":"upstream boom"}')
+    c = _controller(up)
+    await c.enter_index(CONTROL_TOKEN)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        r = await client.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+    assert r.status_code == 500 and r.content == b'{"error":"upstream boom"}'
+    assert b'"forwarded":true' not in r.content
+    assert c.evidence().llm_forwarded == 1  # attempt counted (attempts semantic)
+
+
+@pytest.mark.asyncio
+async def test_control_token_not_leaked_upstream():
+    """§23/§45: the run-local control token never reaches the provider upstream leg."""
+    up = _FakeUpstream()
+    c = _controller(up)
+    await c.enter_index(CONTROL_TOKEN)
+    app = bp.build_proxy_app(c)
+    async with _asgi(app) as client:
+        await client.post(
+            "/chat/completions",
+            headers={"Authorization": f"Bearer {LOCAL_TOKEN}", bp.CONTROL_HEADER: CONTROL_TOKEN},
+            content=b'{"model":"openai/gpt-4o-mini"}',
+        )
+    low = {k.lower(): v for k, v in up.calls[0]["headers"].items()}
+    assert bp.CONTROL_HEADER not in low
+    assert CONTROL_TOKEN not in str(low) and LOCAL_TOKEN not in str(low)
+    assert low.get("authorization") == f"Bearer {REAL_KEY}"
+
+
+@pytest.mark.asyncio
+async def test_unknown_route_denied_and_counted_surface_b():
+    """§50: unknown Surface-B route denied pre-egress and counted; no upstream call."""
+    up = _FakeUpstream()
+    c = _controller(up)
+    await c.enter_index(CONTROL_TOKEN)
+    app = bp.build_surface_b_app(c)
+    async with _asgi(app) as client:
+        r = await client.post("/v1/models", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b"{}")
+    assert r.status_code == 400 and r.json()["forwarded"] is False
+    assert c.evidence().unknown_denied == 1 and up.calls == []
 
 
 def test_launch_argv_safety_and_shape():

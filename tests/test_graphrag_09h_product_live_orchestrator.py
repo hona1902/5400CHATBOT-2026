@@ -7,6 +7,7 @@ authoritative fixture (pure, provider-free).
 
 import dataclasses
 
+import httpx
 import pytest
 
 from open_notebook.integrations.graphrag.eval import productlivepn02d as plo
@@ -245,7 +246,7 @@ def _make_deps(
 
     async def fake_upstream(cls, path, headers, body):
         up_calls.append(path)
-        return 200
+        return 200, b'{"ok":true}', "application/json"
 
     async def fake_sidecar(method, path, headers, body):
         return 200, b"{}"
@@ -2103,3 +2104,91 @@ async def test_unknown_track_state_never_success():  # §39/§9 (old buggy 'inde
         await _tc_seq(["indexstate.processed"] * 50), "x",
         deadline_s=100, interval_s=0, max_polls=5, now=now, sleep=nosleep)
     assert r == "timeout"  # fail-closed: the former str(enum) artifact never counts as success
+
+
+# =========================================================== D4-A/B/C governed route
+def _asgi_factory(app):
+    return lambda: httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+
+
+def test_default_governed_controller_is_in_path_proxy_client():
+    """§35: the default governed path binds phase/counter control to the IN-PATH container
+    proxy (ProxyControlClient at the loopback), NOT a disconnected in-process controller."""
+    deps = plo.default_run_deps(
+        MINPUTS,
+        sidecar_api_token="sidecar-FAKE",
+        local_provider_token="local-FAKE",
+        control_token="ctrl-FAKE",
+        provider_key_env="PBP_NONEXISTENT_ENV_FOR_TEST",
+        host_port=8912,
+    )
+    assert isinstance(deps.controller, plo.ProxyControlClient)
+    assert not isinstance(deps.controller, bp.BudgetProxyController)
+    assert deps.controller._base == "http://127.0.0.1:8912"
+    assert deps.controller._token == "ctrl-FAKE"
+
+
+@pytest.mark.asyncio
+async def test_d4a_off_path_controller_stays_zero_while_in_path_sees_forward():
+    """§40 regression: the old disconnected local controller stays 0 while the in-path
+    proxy (read via the default governed accessor) records the real forwarded delta."""
+    calls = []
+
+    async def up(cls, path, headers, body):
+        calls.append(path)
+        return 200, b'{"ok":true}', "application/json"
+
+    in_path = bp.BudgetProxyController(
+        real_openrouter_key=REAL_KEY, local_provider_token=LOCAL_TOKEN, control_token=CONTROL_TOKEN, upstream=up, sidecar=None
+    )
+    off_path = bp.BudgetProxyController(
+        real_openrouter_key=REAL_KEY, local_provider_token=LOCAL_TOKEN, control_token=CONTROL_TOKEN, upstream=up, sidecar=None
+    )
+    app = bp.build_proxy_app(in_path)
+    client = plo.ProxyControlClient(base_url="http://proxy", control_token=CONTROL_TOKEN, client_factory=_asgi_factory(app))
+    await client.enter_index(CONTROL_TOKEN)
+    async with _asgi_factory(app)() as hc:
+        r = await hc.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+        assert r.status_code == 200
+    await client.refresh()
+    assert client.evidence().llm_forwarded == 1          # in-path = authoritative
+    assert off_path.evidence().llm_forwarded == 0         # disconnected local controller = the old D4-A defect
+    assert calls == ["/chat/completions"]
+
+
+@pytest.mark.asyncio
+async def test_d4_provider_route_integration_in_path():
+    """§46: full provider-free route — PRE_INDEX read, INDEX transition, provider forward
+    with transparent upstream body, incremented counters observed on the SAME in-path
+    state, then POST_INDEX_QUERY transition."""
+    body = b'{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}'
+    calls = []
+
+    async def up(cls, path, headers, b):
+        calls.append(path)
+        return 200, body, "application/json"
+
+    ctrl = bp.BudgetProxyController(
+        real_openrouter_key=REAL_KEY, local_provider_token=LOCAL_TOKEN, control_token=CONTROL_TOKEN, upstream=up, sidecar=None
+    )
+    app = bp.build_proxy_app(ctrl)
+    mk = _asgi_factory(app)
+    client = plo.ProxyControlClient(base_url="http://proxy", control_token=CONTROL_TOKEN, client_factory=mk)
+
+    # 1-2. proxy starts PRE_INDEX; orchestrator reads counters from the in-path proxy
+    await client.refresh()
+    assert client.evidence().phase == "PRE_INDEX" and client.evidence().llm_forwarded == 0
+    # 3. transition to INDEX
+    await client.enter_index(CONTROL_TOKEN)
+    assert client.evidence().phase == "INDEX"
+    # 4-5. a provider (chat) request forwards; fake upstream response passes transparently
+    async with mk() as hc:
+        r = await hc.post("/chat/completions", headers={"Authorization": f"Bearer {LOCAL_TOKEN}"}, content=b'{"model":"openai/gpt-4o-mini"}')
+        assert r.status_code == 200 and r.content == body
+    # 6-7. counters increment on the SAME in-path state; orchestrator reads incremented value
+    await client.refresh()
+    assert client.evidence().llm_forwarded == 1
+    # 8. transition POST_INDEX_QUERY succeeds
+    await client.snapshot_after_index_and_advance(CONTROL_TOKEN)
+    assert client.evidence().phase == "POST_INDEX_QUERY"
+    assert calls == ["/chat/completions"]
