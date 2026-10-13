@@ -496,7 +496,7 @@ class RunDeps:
     cleanup: Callable[[], "CleanupReport"]
     # product seams (async; real impls are product GraphRAGService / execute_chat)
     index_source: Callable[[str, str], Awaitable[str]]  # (source_id, text) -> track_id
-    track_status: Callable[[str], Awaitable[str]]  # track_id -> terminal state ("completed"/...)
+    track_status: Callable[[str], Awaitable[str]]  # track_id -> IndexState value ("in_progress"/"processed"/"failed")
     list_indexed_doc_ids: Callable[[], Awaitable[Sequence[str]]]
     load_source_text: Callable[[str], str]  # source_id -> canonical text (fixture read, sync)
     execute_one_chat: Callable[[], Awaitable[Mapping[str, object]]]  # -> product response-ish
@@ -649,7 +649,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
                 interval_s=deps.poll_interval_s,
                 max_polls=deps.poll_max_polls,
             )
-            if state != "completed":
+            if state != "processed":
                 return LiveRunResult(LiveVerdict.LIVE_FAIL_SAFE, _with_proxy(evidence, deps), f"index_incomplete:{source_id}:{state}")
             if deps.controller.evidence().index_budget_exceeded:
                 return LiveRunResult(LiveVerdict.KILL_SWITCH_TRIGGERED, _with_proxy(evidence, deps), "index_budget_exceeded")
@@ -930,8 +930,13 @@ async def bounded_track_poll(
     now: Optional[Callable[[], float]] = None,
     sleep: Optional[Callable[[float], Awaitable[None]]] = None,
 ) -> str:
-    """Return 'completed' / 'failed' / 'timeout'. Unknown/pending states loop but are
-    hard-bounded by BOTH max_polls and the wall-clock deadline."""
+    """Return 'processed' (terminal success) / 'failed' (terminal failure) / 'timeout'.
+
+    Terminal vocabulary is the CANONICAL IndexState value set the track adapter yields:
+    'processed' is the only success, 'failed' the only failure. 'in_progress' and ANY
+    unrecognized state are non-terminal and loop until the bounded deadline (fail-closed:
+    an unknown state can never be mistaken for success). Hard-bounded by BOTH max_polls
+    and the wall-clock deadline."""
     import asyncio
     import time as _time
 
@@ -941,9 +946,9 @@ async def bounded_track_poll(
     polls = 0
     while True:
         state = await track_fn(track_id)
-        if state == "completed":
-            return "completed"
-        if state in ("failed", "error"):
+        if state == "processed":
+            return "processed"
+        if state == "failed":
             return "failed"
         polls += 1
         if polls >= max_polls or (_now() - start) >= deadline_s:
@@ -1556,7 +1561,13 @@ def default_run_deps(
         from open_notebook.integrations.graphrag.service import GraphRAGService
 
         st = await GraphRAGService().track_status(track_id)
-        return str(getattr(st, "state", getattr(st, "status", "")) or "").lower() or "pending"
+        # Return the CANONICAL IndexState VALUE ("in_progress"/"processed"/"failed"),
+        # never str(enum): str(IndexState.PROCESSED) yields "IndexState.PROCESSED", whose
+        # lowercase "indexstate.processed" matches no bounded_track_poll terminal and so
+        # times out even a fully-processed document (the live-run-#4 defect). The enum
+        # VALUE is bounded_track_poll's terminal vocabulary.
+        state = getattr(st, "state", None)
+        return str(getattr(state, "value", state) or "").lower() or "unknown"
 
     async def _list_docs() -> Sequence[str]:
         from open_notebook.integrations.graphrag.service import GraphRAGService

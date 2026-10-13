@@ -262,7 +262,7 @@ def _make_deps(
     git._head = head
     git._clean = clean
 
-    states = index_states if index_states is not None else ["completed", "completed", "completed"]
+    states = index_states if index_states is not None else ["processed", "processed", "processed"]
     state_iter = iter(states)
     docs = doc_ids if doc_ids is not None else list(plo.EXPECTED_DOC_IDS.values())
     prov = provenance if provenance is not None else list(plo.EXPECTED_PRODUCT_PROVENANCE)
@@ -396,7 +396,7 @@ async def test_dirty_checkpoint_aborts():
 
 @pytest.mark.asyncio
 async def test_index_incomplete_fail_safe_and_cleanup():
-    deps, _ = _make_deps(index_states=["completed", "failed", "completed"])
+    deps, _ = _make_deps(index_states=["processed", "failed", "processed"])
     res = await plo.run_live_validation(deps, head_expected=HEAD)
     assert res.verdict is plo.LiveVerdict.LIVE_FAIL_SAFE
     assert res.evidence["cleanup_zero_residue"] is True  # cleanup still ran
@@ -586,15 +586,16 @@ async def test_bounded_poll_sequences():
         now["t"] += 1.0
         return now["t"]
 
-    r1 = await plo.bounded_track_poll(await seq(["pending", "processing", "completed"]), "x",
+    # Canonical IndexState value vocabulary: in_progress (non-terminal) -> processed (success).
+    r1 = await plo.bounded_track_poll(await seq(["in_progress", "in_progress", "processed"]), "x",
                                       deadline_s=100, interval_s=0, max_polls=10, now=_now, sleep=_nosleep)
-    assert r1 == "completed"
+    assert r1 == "processed"
     r2 = await plo.bounded_track_poll(await seq(["failed"]), "x", deadline_s=100, interval_s=0, max_polls=10, now=_now, sleep=_nosleep)
     assert r2 == "failed"
-    r3 = await plo.bounded_track_poll(await seq(["pending"] * 100), "x", deadline_s=100, interval_s=0, max_polls=3, now=_now, sleep=_nosleep)
+    r3 = await plo.bounded_track_poll(await seq(["in_progress"] * 100), "x", deadline_s=100, interval_s=0, max_polls=3, now=_now, sleep=_nosleep)
     assert r3 == "timeout"  # bounded by max_polls, not infinite
     r4 = await plo.bounded_track_poll(await seq(["weird-unknown"] * 100), "x", deadline_s=100, interval_s=0, max_polls=2, now=_now, sleep=_nosleep)
-    assert r4 == "timeout"  # unknown state does not loop forever
+    assert r4 == "timeout"  # unknown state does not loop forever (fail-closed, never success)
 
 
 # =========================================================== Docker cleanup best-effort (fake DockerCLI)
@@ -1933,3 +1934,172 @@ def test_readiness_bounded_constants_present():  # §11 bounded defaults capture
     assert plo.SIDECAR_READINESS_TIMEOUT_SECONDS == 20.0
     assert plo.SIDECAR_READINESS_POLL_INTERVAL_SECONDS == 0.25
     assert plo.SIDECAR_READINESS_ENDPOINT == "/health"
+
+
+# =============================================================================
+# 09H TRACK-COMPLETION TERMINAL-STATE CONTRACT FIX (live-run-#4 root cause). The
+# harness _track adapter must return the canonical IndexState VALUE
+# (in_progress/processed/failed), never str(enum) ("indexstate.processed"), and
+# bounded_track_poll's terminal success is 'processed', failure 'failed'.
+# =============================================================================
+
+
+def _tc_clock():
+    now = {"t": 0.0}
+
+    def _now():
+        now["t"] += 1.0
+        return now["t"]
+
+    async def _nosleep(_s):
+        return None
+
+    return _now, _nosleep
+
+
+async def _tc_seq(states):
+    it = iter(states)
+
+    async def _t(_tid):
+        return next(it)
+
+    return _t
+
+
+def test_track_enum_values_canonical():  # §27
+    from open_notebook.integrations.graphrag.models import IndexState
+    assert IndexState.IN_PROGRESS.value == "in_progress"
+    assert IndexState.PROCESSED.value == "processed"
+    assert IndexState.FAILED.value == "failed"
+
+
+def _tc_fake_key_deps(monkeypatch, run_id):
+    # default_run_deps constructs the run-owned proxy controller, which requires a
+    # non-empty key; a FAKE value lets construction proceed with zero provider egress.
+    key_env = "GRAPHRAG_09H_TRACKFIX_FAKE_KEY"
+    monkeypatch.setenv(key_env, "sk-FAKE-not-real")
+    return plo.default_run_deps(
+        MINPUTS, sidecar_api_token="s-FAKE", local_provider_token="l-FAKE",
+        control_token="c-FAKE", provider_key_env=key_env, host_port=8900, run_id=run_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_track_adapter_returns_enum_value_no_classname_leak(monkeypatch):  # §5/§6/§28
+    from open_notebook.integrations.graphrag import service as _svc
+    from open_notebook.integrations.graphrag.models import IndexState, IndexStatus
+    deps = _tc_fake_key_deps(monkeypatch, "trackfix-leak")
+    for st, expected in (
+        (IndexState.IN_PROGRESS, "in_progress"),
+        (IndexState.PROCESSED, "processed"),
+        (IndexState.FAILED, "failed"),
+    ):
+        async def fake_track(self, track_id, _st=st):
+            return IndexStatus(track_id=track_id, state=_st, total_count=1, state_counts={})
+        monkeypatch.setattr(_svc.GraphRAGService, "track_status", fake_track)
+        val = await deps.track_status("trk")  # the REAL default _track adapter
+        assert val == expected
+        assert not val.startswith("indexstate.")  # no str(enum) classname leak
+        assert "IndexState." not in val
+
+
+@pytest.mark.asyncio
+async def test_track_poll_processed_success():  # §29
+    now, nosleep = _tc_clock()
+    r = await plo.bounded_track_poll(
+        await _tc_seq(["in_progress", "in_progress", "processed"]), "x",
+        deadline_s=100, interval_s=0, max_polls=10, now=now, sleep=nosleep)
+    assert r == "processed"
+
+
+@pytest.mark.asyncio
+async def test_track_poll_immediate_processed():  # §30
+    now, nosleep = _tc_clock()
+    r = await plo.bounded_track_poll(
+        await _tc_seq(["processed"]), "x",
+        deadline_s=100, interval_s=0, max_polls=10, now=now, sleep=nosleep)
+    assert r == "processed"
+
+
+@pytest.mark.asyncio
+async def test_track_poll_failed_terminal():  # §31
+    now, nosleep = _tc_clock()
+    r = await plo.bounded_track_poll(
+        await _tc_seq(["in_progress", "failed"]), "x",
+        deadline_s=100, interval_s=0, max_polls=10, now=now, sleep=nosleep)
+    assert r == "failed"  # terminal failure, not spin-to-timeout
+
+
+@pytest.mark.asyncio
+async def test_live4_track_completion_regression_real_adapter(monkeypatch):  # §32
+    from open_notebook.integrations.graphrag import service as _svc
+    from open_notebook.integrations.graphrag.models import IndexState, IndexStatus
+    deps = _tc_fake_key_deps(monkeypatch, "trackfix-regress")
+    seq = iter([IndexState.IN_PROGRESS, IndexState.IN_PROGRESS, IndexState.PROCESSED])
+
+    async def fake_track(self, track_id):
+        return IndexStatus(track_id=track_id, state=next(seq), total_count=1, state_counts={})
+    monkeypatch.setattr(_svc.GraphRAGService, "track_status", fake_track)
+    now, nosleep = _tc_clock()
+    # REAL default _track adapter + REAL bounded_track_poll (not a final-string mock):
+    # before the fix _track emitted 'indexstate.processed' -> never terminal -> timeout.
+    r = await plo.bounded_track_poll(deps.track_status, "trk-a1",
+                                     deadline_s=100, interval_s=0, max_polls=20, now=now, sleep=nosleep)
+    assert r == "processed"
+
+
+@pytest.mark.asyncio
+async def test_live4_failed_state_regression_real_adapter(monkeypatch):  # §33
+    from open_notebook.integrations.graphrag import service as _svc
+    from open_notebook.integrations.graphrag.models import IndexState, IndexStatus
+    deps = _tc_fake_key_deps(monkeypatch, "trackfix-failregress")
+
+    async def fake_track(self, track_id):
+        return IndexStatus(track_id=track_id, state=IndexState.FAILED, total_count=1, state_counts={})
+    monkeypatch.setattr(_svc.GraphRAGService, "track_status", fake_track)
+    now, nosleep = _tc_clock()
+    r = await plo.bounded_track_poll(deps.track_status, "trk-a1",
+                                     deadline_s=100, interval_s=0, max_polls=20, now=now, sleep=nosleep)
+    assert r == "failed"  # terminal failure, NOT timeout
+
+
+@pytest.mark.asyncio
+async def test_index_track_contract_integration_processed():  # §34/§35/§36/§38
+    deps, _ = _make_deps()
+    idx_calls = {"n": 0}
+    polls = {}
+
+    async def idx(sid, _text):
+        idx_calls["n"] += 1
+        return f"trk-{sid}"
+
+    async def track(track_id):
+        polls[track_id] = polls.get(track_id, 0) + 1
+        return "in_progress" if polls[track_id] < 2 else "processed"
+
+    deps = dataclasses.replace(deps, index_source=idx, track_status=track,
+                               poll_interval_s=0, poll_deadline_s=100, poll_max_polls=50)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING, res.reason
+    assert idx_calls["n"] == 3                       # exactly one index attempt per A1/A2/A3 (§35)
+    assert all(v >= 2 for v in polls.values())       # polled repeatedly, never re-POST (§36)
+    assert "index_incomplete" not in res.reason and "timeout" not in res.reason  # §38
+
+
+@pytest.mark.asyncio
+async def test_failed_track_reported_failed_not_timeout():  # §37
+    deps, _ = _make_deps(index_states=["failed"])
+    deps = dataclasses.replace(deps, poll_interval_s=0, poll_deadline_s=100, poll_max_polls=50)
+    res = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert res.verdict == plo.LiveVerdict.LIVE_FAIL_SAFE
+    assert res.reason.endswith(":failed")
+    assert "timeout" not in res.reason
+
+
+@pytest.mark.asyncio
+async def test_unknown_track_state_never_success():  # §39/§9 (old buggy 'indexstate.processed' is now unknown)
+    now, nosleep = _tc_clock()
+    r = await plo.bounded_track_poll(
+        await _tc_seq(["indexstate.processed"] * 50), "x",
+        deadline_s=100, interval_s=0, max_polls=5, now=now, sleep=nosleep)
+    assert r == "timeout"  # fail-closed: the former str(enum) artifact never counts as success
