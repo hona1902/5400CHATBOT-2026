@@ -922,8 +922,15 @@ async def test_chat_exception_full_unwind_env_and_cleanup():
         cleanup=counting_cleanup,
         run_scoped_env={"OPEN_NOTEBOOK_GRAPHRAG_ENABLED": "true"},
     )
-    with pytest.raises(RuntimeError):
-        await plo.run_live_validation(deps, head_expected=HEAD)
+    # F4-B: an unexpected (non-LiveAbort) RuntimeError after execution starts no longer
+    # escapes — it is captured fail-closed as LIVE_FAIL_SAFE with accumulated evidence
+    # preserved; the existing finally still restores env and runs cleanup.
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert result.verdict is plo.LiveVerdict.LIVE_FAIL_SAFE
+    assert result.reason == "post_start_exception:RuntimeError"
+    assert result.evidence["post_start_exception"] is True
+    assert result.evidence["post_start_exception_type"] == "RuntimeError"
+    assert result.evidence["post_start_exception_stage"] == "canonical_chat"
     assert cleaned["n"] == 1  # cleanup ran in finally
     assert _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED") == prior  # env restored on exception
 
@@ -955,6 +962,120 @@ async def test_async_cancellation_unwinds_cleanup_and_env():
         await task
     assert cleaned["n"] == 1  # finally cleanup ran on cancellation
     assert _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED") == prior  # env restored on cancellation
+
+
+# ===================================== F4-B post-consumption exception-evidence boundary
+@pytest.mark.asyncio
+async def test_live5_canonical_chat_moduleerror_fail_closed_preserves_evidence():
+    # Exact live-run-#5 shape: the canonical-chat seam raises ModuleNotFoundError AFTER
+    # INDEX-stage evidence has accumulated. The run must NOT let it escape (the #5 defect
+    # was that it did, losing the evidence dict): fail-closed LIVE_FAIL_SAFE with stage,
+    # type, sanitized message AND the accumulated evidence all preserved.
+    deps, _ctrl = _make_deps()
+
+    async def modulenotfound_chat():
+        raise ModuleNotFoundError("No module named 'api'")
+
+    deps = dataclasses.replace(deps, execute_one_chat=modulenotfound_chat)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert result.verdict is plo.LiveVerdict.LIVE_FAIL_SAFE
+    assert result.reason == "post_start_exception:ModuleNotFoundError"
+    ev = result.evidence
+    assert ev["post_start_exception"] is True
+    assert ev["post_start_exception_stage"] == "canonical_chat"
+    assert ev["post_start_exception_type"] == "ModuleNotFoundError"
+    assert ev["post_start_exception_message"] == "No module named 'api'"
+    # accumulated INDEX-stage evidence survived the escape
+    assert ev["index_verify_gate"] == "PASS"
+    assert ev["sidecar_http_readiness_gate"] == "PASS"
+    assert "manifest_v2_sha256" in ev
+
+
+@pytest.mark.asyncio
+async def test_post_start_evidence_retention():
+    deps, _ctrl = _make_deps()
+
+    async def boom():
+        raise RuntimeError("late failure")
+
+    deps = dataclasses.replace(deps, execute_one_chat=boom)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    for key in ("manifest_v2_sha256", "sidecar_http_readiness_gate", "index_verify_gate"):
+        assert key in result.evidence
+    assert result.evidence["index_verify_gate"] == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_is_fail_closed_never_pass():
+    deps, _ctrl = _make_deps()
+
+    async def boom():
+        raise RuntimeError("synthetic failure")
+
+    deps = dataclasses.replace(deps, execute_one_chat=boom)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert result.verdict is not plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING
+    assert result.verdict is plo.LiveVerdict.LIVE_FAIL_SAFE
+
+
+@pytest.mark.asyncio
+async def test_post_start_liveabort_still_pre_execution_abort():
+    # Ordering guarantee: LiveAbort raised after start is still handled by the EXISTING
+    # LiveAbort branch (it precedes the generic Exception boundary) -> PRE_EXECUTION_ABORT,
+    # with no post_start_exception evidence recorded. (§18 LiveAbort semantics unchanged.)
+    deps, _ctrl = _make_deps()
+
+    async def abort_chat():
+        raise plo.LiveAbort("canonical_chat", "synthetic live-abort")
+
+    deps = dataclasses.replace(deps, execute_one_chat=abort_chat)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    assert result.verdict is plo.LiveVerdict.PRE_EXECUTION_ABORT
+    assert "post_start_exception" not in result.evidence
+
+
+@pytest.mark.asyncio
+async def test_post_start_exception_message_secret_scrubbed():
+    deps, _ctrl = _make_deps()
+    leak = (
+        "boom Authorization: Bearer abc123FAKETOKEN using sk-FAKEKEY0123456789 and "
+        "x-pbp-control=CTRLFAKE1234 token=SIDEFAKE987"
+    )
+
+    async def leaky():
+        raise RuntimeError(leak)
+
+    deps = dataclasses.replace(deps, execute_one_chat=leaky)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    msg = result.evidence["post_start_exception_message"]
+    for secret in ("abc123FAKETOKEN", "sk-FAKEKEY0123456789", "CTRLFAKE1234", "SIDEFAKE987"):
+        assert secret not in msg
+    assert "[REDACTED]" in msg
+
+
+@pytest.mark.asyncio
+async def test_post_start_exception_message_bounded():
+    deps, _ctrl = _make_deps()
+    huge = "A" * 5000
+
+    async def big():
+        raise RuntimeError(huge)
+
+    deps = dataclasses.replace(deps, execute_one_chat=big)
+    result = await plo.run_live_validation(deps, head_expected=HEAD)
+    msg = result.evidence["post_start_exception_message"]
+    assert len(msg) <= plo.EXCEPTION_MESSAGE_MAX_LENGTH + len("...[truncated]")
+    assert msg.endswith("...[truncated]")
+
+
+def test_sanitize_exception_message_unit():
+    out = plo._sanitize_exception_message("x Bearer SECRETbearer1 y sk-ABCDEF123456 z")
+    assert "SECRETbearer1" not in out
+    assert "sk-ABCDEF123456" not in out
+    assert out.count("[REDACTED]") >= 2
+    assert plo._sanitize_exception_message("clean message") == "clean message"
+    bounded = plo._sanitize_exception_message("B" * (plo.EXCEPTION_MESSAGE_MAX_LENGTH + 50))
+    assert len(bounded) == plo.EXCEPTION_MESSAGE_MAX_LENGTH + len("...[truncated]")
 
 
 # =============================================== evidence-binding amendment (09H)

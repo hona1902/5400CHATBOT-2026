@@ -677,6 +677,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
     cleanup_done: Optional[CleanupReport] = None
     topology_built = False
     env_mgr: Optional[RunScopedEnv] = None
+    stage: str = "pre_execution"  # F4-B forensic breadcrumb (updated at each phase)
     try:
         # 1. HEAD / worktree
         if deps.git.head() != head_expected:
@@ -716,6 +717,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         # 10-11. boot run-owned topology (proxy + networks + provider-bound sidecar)
         facts = deps.boot_topology()
         topology_built = True
+        stage = "topology_boot"
         verify_single_gateway_topology(facts)
 
         # 09H sidecar-HTTP readiness gate (ROOT-CAUSE fix for live-run-#3 sidecar 500):
@@ -732,6 +734,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
             raise SidecarNotReady("readiness gate seam absent")
         await _resolve_maybe_awaitable(deps.wait_sidecar_ready(cast("ObservedTopologyFacts", facts)))
         evidence["sidecar_http_readiness_gate"] = "PASS"
+        stage = "sidecar_readiness"
 
         # F2/09H: activate run-scoped process-local env ONLY after topology verify
         # (so provider-capable product config is never exposed before the enforced
@@ -750,6 +753,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
             env_mgr = RunScopedEnv(env_values).apply()
 
         # INDEX phase
+        stage = "index"
         await deps.controller.enter_index(deps.control_token)
         for source_id in INDEX_SOURCE_IDS:
             track_id = await deps.index_source(source_id, deps.load_source_text(source_id))
@@ -770,6 +774,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
                 return LiveRunResult(LiveVerdict.KILL_SWITCH_TRIGGERED, _with_proxy(evidence, deps), "index_budget_exceeded")
 
         # snapshot after index + advance phase
+        stage = "index_verify"
         await deps.controller.snapshot_after_index_and_advance(deps.control_token)
 
         # index verification (provider-free, exact doc set)
@@ -781,6 +786,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         # exactly one product chat execution, under host-side instrumentation
         # (F3): count ACTUAL canonical-chat provider attempts + guard the exact
         # non-chat ON-LLM provisioning call site. Restored on exit of the context.
+        stage = "canonical_chat"
         if deps.enforce_host_instrumentation:
             with CanonicalChatAttemptCounter() as _chat_cc, NonChatLLMGuard() as _nonchat:
                 response = await deps.execute_one_chat()
@@ -801,6 +807,7 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         evidence["graph_excerpts_surfaced"] = bool(response.get("graph_excerpts_surfaced", False))
 
         # final snapshot + deltas
+        stage = "finalize"
         await deps.controller.snapshot_final(deps.control_token)
         evidence.update(deps.controller.phase_deltas())
         evidence["graphrag_query_count"] = deps.controller.product_query_count()
@@ -819,6 +826,25 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
         return LiveRunResult(LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING, evidence, "ok")
     except LiveAbort as exc:
         return LiveRunResult(LiveVerdict.PRE_EXECUTION_ABORT, evidence, str(exc))
+    except Exception as exc:  # noqa: BLE001 — F4-B post-consumption evidence boundary
+        # An UNEXPECTED (non-LiveAbort) exception after execution has started must remain
+        # a FAIL without discarding the evidence accumulated so far (the live-run-#5
+        # defect: ModuleNotFoundError at the canonical-chat seam escaped and the local
+        # evidence dict was lost). The one-shot grant is already consumed and this run is
+        # terminal — NEVER retried here. We catch Exception, NOT BaseException, so
+        # KeyboardInterrupt / SystemExit / asyncio.CancelledError propagate unchanged. The
+        # `finally` below still restores the run-scoped env and runs cleanup.
+        evidence["post_start_exception"] = True
+        evidence["post_start_exception_stage"] = stage
+        evidence["post_start_exception_type"] = type(exc).__name__
+        evidence["post_start_exception_message"] = _sanitize_exception_message(str(exc))
+        try:  # best-effort in-path proxy snapshot; must never override the fail verdict
+            _with_proxy(evidence, deps)
+        except Exception:  # noqa: BLE001
+            evidence.setdefault("proxy_evidence", None)
+        return LiveRunResult(
+            LiveVerdict.LIVE_FAIL_SAFE, evidence, f"post_start_exception:{type(exc).__name__}"
+        )
     finally:
         # Unwind order (also on exception/CancelledError): restore env, then cleanup
         # run-owned Docker resources. Instrumentation guards (if used) already restored
@@ -834,6 +860,29 @@ async def run_live_validation(deps: RunDeps, *, head_expected: str) -> LiveRunRe
 def _with_proxy(evidence: Dict[str, object], deps: RunDeps) -> Dict[str, object]:
     evidence["proxy_evidence"] = deps.controller.evidence().as_dict()
     return evidence
+
+
+# F4-B post-consumption evidence boundary helpers. Unexpected exceptions raised after a
+# one-shot live run has started are preserved (fail-closed) instead of discarding the
+# accumulated evidence; the captured message is secret-scrubbed and length-bounded so no
+# provider key / bearer token / proxy|control|sidecar token / Authorization header leaks
+# into durable evidence, and no unbounded provider/application text is retained.
+EXCEPTION_MESSAGE_MAX_LENGTH: int = 500
+_SECRET_SCRUB_PATTERNS: Tuple[re.Pattern, ...] = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+"),
+    re.compile(r"\bsk-[A-Za-z0-9._\-]{6,}"),
+    re.compile(r"(?i)\b(?:authorization|x-pbp-control|api[_-]?key|token|secret)\b\s*[:=]\s*\S+"),
+)
+
+
+def _sanitize_exception_message(message: str) -> str:
+    """Return a secret-scrubbed, deterministically length-bounded exception message."""
+    redacted = message
+    for pattern in _SECRET_SCRUB_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    if len(redacted) > EXCEPTION_MESSAGE_MAX_LENGTH:
+        redacted = redacted[:EXCEPTION_MESSAGE_MAX_LENGTH] + "...[truncated]"
+    return redacted
 
 
 async def _resolve_maybe_awaitable(value: object) -> object:
