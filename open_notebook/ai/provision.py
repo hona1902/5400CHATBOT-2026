@@ -93,6 +93,39 @@ def _apply_max_retries(model: BaseChatModel, max_retries: int) -> BaseChatModel:
     return model
 
 
+# Allowlisted, credential-free fields safe to log for a provider-model object. We read
+# ONLY these explicitly-named scalar identity fields and NEVER call str()/repr() on the
+# model itself: some provider-model objects (e.g. Esperanto's) embed a plaintext API key
+# in their own repr, so formatting the whole object into a log/error message leaks the
+# credential (GraphRAG-09H Run #6 SEC1). A credential-like field is never read.
+_SAFE_MODEL_LOG_FIELDS = ("provider", "model_name", "name", "model_type", "type")
+
+
+def _safe_model_description(model: object) -> str:
+    """Return a credential-free identity string for a provider model, safe to log.
+
+    Reads only the allowlisted scalar identity fields in ``_SAFE_MODEL_LOG_FIELDS`` via
+    ``getattr`` and emits the model's class name plus those present scalar values. It
+    never stringifies/reprs the whole model object and never reads a credential-like
+    field (api_key/token/authorization/secret/key), so a provider model whose own repr
+    embeds a plaintext key cannot leak through this helper. Falls back to the class name
+    alone when no safe identity field is present.
+    """
+    cls = type(model).__name__
+    parts: list[str] = []
+    seen: set[str] = set()
+    for field in _SAFE_MODEL_LOG_FIELDS:
+        value = getattr(model, field, None)
+        if value is None or not isinstance(value, (str, int, float, bool)):
+            continue
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        parts.append(f"{field}={text}")
+    return f"{cls}({', '.join(parts)})" if parts else cls
+
+
 async def provision_langchain_model(
     content, model_id, default_type, **kwargs
 ) -> BaseChatModel:
@@ -130,7 +163,7 @@ async def provision_langchain_model(
         selection_reason = f"default for type={default_type}"
         model = await model_manager.get_default_model(default_type, **kwargs)
 
-    logger.debug(f"Using model: {model}")
+    logger.debug(f"Using model: {_safe_model_description(model)}")
 
     if model is None:
         logger.error(
@@ -151,7 +184,7 @@ async def provision_langchain_model(
             f"model_id={model_id}, default_type={default_type}."
         )
         raise ConfigurationError(
-            f"Model is not a LanguageModel: {model}. "
+            f"Model is not a LanguageModel: {_safe_model_description(model)}. "
             f"Please check that the model configured for '{default_type}' is a language model, not an embedding or speech model."
         )
 
