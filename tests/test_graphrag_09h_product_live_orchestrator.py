@@ -346,7 +346,7 @@ async def test_happy_path_pass():
     deps, controller = _make_deps()
     res = await plo.run_live_validation(deps, head_expected=HEAD)
     assert res.verdict is plo.LiveVerdict.PASS_BOUNDED_LIVE_PROVENANCE_PLUMBING, res.reason
-    assert res.evidence["final_product_provenance_source_ids"] == ["source:gr_pn02_a2"]
+    assert res.evidence["final_product_provenance_source_ids"] == list(plo.EXPECTED_PRODUCT_PROVENANCE)
     assert res.evidence["a3_product_visibility"] == 0
     assert res.evidence["graphrag_query_count"] == 1
     assert res.evidence["index_verify_gate"] == "PASS"
@@ -412,7 +412,7 @@ async def test_extra_indexed_doc_kill():
 
 @pytest.mark.asyncio
 async def test_a3_product_visibility_kill():
-    deps, _ = _make_deps(provenance=["source:gr_pn02_a2", "source:gr_pn02_a3"])
+    deps, _ = _make_deps(provenance=["source:gr_pn02_a1", "source:gr_pn02_a2", "source:gr_pn02_a3"])
     res = await plo.run_live_validation(deps, head_expected=HEAD)
     assert res.verdict is plo.LiveVerdict.KILL_SWITCH_TRIGGERED
 
@@ -869,7 +869,7 @@ async def test_run_scoped_env_integration_active_then_restored():
         seen["base"] = _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_BASE_URL")
         seen["retries"] = _os2.environ.get("OPEN_NOTEBOOK_LLM_MAX_RETRIES")
         await controller.handle_sidecar_api_request("POST", "/query", body=b"{}")
-        return {"graph_provenance_source_ids": ["source:gr_pn02_a2"], "graph_answer_text_surfaced": False, "graph_excerpts_surfaced": False}
+        return {"graph_provenance_source_ids": list(plo.EXPECTED_PRODUCT_PROVENANCE), "graph_answer_text_surfaced": False, "graph_excerpts_surfaced": False}
 
     prior = _os2.environ.get("OPEN_NOTEBOOK_GRAPHRAG_ENABLED")
     deps = dataclasses.replace(

@@ -85,7 +85,18 @@ QUESTION_SHA256 = "ceeccbb559f0e56a8dd9220e53e402d470f1e79d5b9b4784a69a4c6d975f6
 SIDECAR_IMAGE = "ghcr.io/hkuds/lightrag:v1.5.6"
 SIDECAR_DIGEST = "sha256:ab23a9c83a735901b18c8960b6b482b602d5b6291abb7e07c5776f7bb2da504e"
 SIDECAR_VERSION = "1.5.6"
-EXPECTED_PRODUCT_PROVENANCE = ("source:gr_pn02_a2",)
+# Deterministic 09F product-provenance contract for this frozen scenario. 09F provenance is
+# a CONTEXT-MEMBERSHIP ∩ GRAPH-VALIDATION marker (answer-text-INDEPENDENT): it is the canonical
+# answer-context source ids (A1, A2) intersected with the 09E-validated graph-referenced source
+# ids, in canonical context order. All three indexed sources (A1, A2, A3) are live members of the
+# notebook, so the graph query over this corpus validates all three; the intersection with the
+# A1+A2 context deterministically yields (A1, A2) and DROPS A3 (validated but not in context).
+# Derived provider-free from the real build_chat_graph_provenance + real validate_graph_references
+# over the frozen corpus+context (see tests/test_graphrag_09h_run6_provenance_contract.py), NOT
+# from any single stochastic chat answer. The earlier ("source:gr_pn02_a2",) value was a
+# test-injected assumption, never derived from real 09F, and caused the Run #6 final_provenance
+# kill (observed deterministic output was A1+A2). Ordered, exact-list comparison (see _check_product_invariants).
+EXPECTED_PRODUCT_PROVENANCE = ("source:gr_pn02_a1", "source:gr_pn02_a2")
 HISTORICAL_PRE_PROXY_MANIFEST_SHA = (
     "0b24966264df75b80ffe77596cb8bf03df49653705dbd1bfa521a9ec2915989b"
 )
